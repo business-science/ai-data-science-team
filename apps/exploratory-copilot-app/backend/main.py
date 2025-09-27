@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import math
+import numpy as np
 from uuid import uuid4
 import os
 import sys
@@ -21,6 +23,41 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 
 app = FastAPI(title="EDA Copilot API", version="0.1.0")
+def _json_safe(value: Any) -> Any:
+    """Recursively convert value into JSON-safe types.
+
+    - NaN/Inf -> None
+    - numpy scalars -> Python scalars
+    - numpy arrays -> lists
+    - pandas NA/NaT -> None
+    - dict/list/tuple/set -> recurse
+    """
+    try:
+        # pandas NA detection
+        import pandas as _pd
+        if _pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if value is None:
+        return None
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        v = float(value)
+        return v if math.isfinite(v) else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (np.ndarray,)):
+        return _json_safe(value.tolist())
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return value
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,8 +132,13 @@ async def upload_file(session_id: str = Form(...), file: UploadFile = File(...))
         raise HTTPException(status_code=400, detail=f"failed to parse file: {e}")
 
     SESSIONS[session_id]["data"] = df
-    preview_df = df.head(10)
-    return {
+    # 清洗 NaN/Inf 以避免 JSON 序列化失败
+    preview_df = (
+        df.head(10)
+        .replace([pd.NA, pd.NaT, float('inf'), float('-inf')], None)
+        .where(pd.notna(df.head(10)), None)
+    )
+    return _json_safe({
         "status": "ok",
         "rows": int(df.shape[0]),
         "cols": int(df.shape[1]),
@@ -104,7 +146,7 @@ async def upload_file(session_id: str = Form(...), file: UploadFile = File(...))
             "columns": [str(c) for c in preview_df.columns],
             "rows": preview_df.to_dict(orient="records"),
         },
-    }
+    })
 
 
 @app.post("/api/demo-data")
@@ -123,8 +165,13 @@ def load_demo_data(session_id: str = Form(...), name: str = Form("churn")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"failed to load demo: {e}")
     SESSIONS[session_id]["data"] = df
-    preview_df = df.head(10)
-    return {
+    # 清洗 NaN/Inf 以避免 JSON 序列化失败
+    preview_df = (
+        df.head(10)
+        .replace([pd.NA, pd.NaT, float('inf'), float('-inf')], None)
+        .where(pd.notna(df.head(10)), None)
+    )
+    return _json_safe({
         "status": "ok",
         "rows": int(df.shape[0]),
         "cols": int(df.shape[1]),
@@ -132,7 +179,7 @@ def load_demo_data(session_id: str = Form(...), name: str = Form("churn")):
             "columns": [str(c) for c in preview_df.columns],
             "rows": preview_df.to_dict(orient="records"),
         },
-    }
+    })
 
 
 @app.post("/api/validate-key")
@@ -153,8 +200,13 @@ def _get_llm(override_key: Optional[str] = None) -> ChatOpenAI:
 
 
 def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> DataframePayload:
-    df_limited = df.head(limit)
-    return DataframePayload(columns=[str(c) for c in df_limited.columns], rows=df_limited.to_dict(orient="records"))
+    df_limited = df.head(limit).replace([pd.NA, pd.NaT, float('inf'), float('-inf')], None)
+    # 将 numpy.nan 转为 None，确保 JSON 可序列化
+    df_limited = df_limited.where(pd.notna(df_limited), None)
+    return DataframePayload(
+        columns=[str(c) for c in df_limited.columns],
+        rows=df_limited.to_dict(orient="records"),
+    )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -249,6 +301,6 @@ def chat(body: ChatRequest):
         if "dtale_url" in artifacts:
             resp["dtale_url"] = artifacts["dtale_url"]
 
-    return resp
+    return _json_safe(resp)
 
 
