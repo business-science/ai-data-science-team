@@ -26,8 +26,9 @@ from ai_data_science_team import (
 
 # * APP INPUTS ----
 
-MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
+MODEL_LIST = ["deepseek-chat", "deepseek-reasoner"]
 TITLE = "Pandas Data Analyst AI Copilot"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 # ---------------------------
 # Streamlit App Configuration
@@ -70,8 +71,8 @@ st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
 
 # Test OpenAI API Key
 if st.session_state["OPENAI_API_KEY"]:
-    # Set the API key for OpenAI
-    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
+    # Set the API key for OpenAI-compatible DeepSeek endpoint
+    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"], base_url=DEEPSEEK_BASE_URL)
 
     # Test the API key (optional)
     try:
@@ -89,7 +90,7 @@ else:
 
 model_option = st.sidebar.selectbox("Choose OpenAI model", MODEL_LIST, index=0)
 
-llm = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"])
+llm = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"], base_url=DEEPSEEK_BASE_URL)
 
 
 # ---------------------------

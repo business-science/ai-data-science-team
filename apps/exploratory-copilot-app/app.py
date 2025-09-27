@@ -23,6 +23,8 @@ from ai_data_science_team.utils.plotly import plotly_from_dict
 
 # Helpers
 
+MODEL_LIST = ["deepseek-chat", "deepseek-reasoner"]
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 def render_report_iframe(
     report_src, src_type="url", height=620, title="Interactive Report"
@@ -117,7 +119,6 @@ def render_report_iframe(
 # STREAMLIT APP SETUP (including data upload, API key, etc.)
 # =============================================================================
 
-MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
 TITLE = "Your Exploratory Data Analysis (EDA) Copilot"
 st.set_page_config(page_title=TITLE, page_icon="📊")
 st.title("📊 " + TITLE)
@@ -188,7 +189,7 @@ st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
 )
 
 if st.session_state["OPENAI_API_KEY"]:
-    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
+    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"], base_url=DEEPSEEK_BASE_URL)
     try:
         models = client.models.list()
         st.success("API Key is valid!")
@@ -198,9 +199,10 @@ else:
     st.info("Please enter your OpenAI API Key to proceed.")
     st.stop()
 
+
+
 model_option = st.sidebar.selectbox("Choose OpenAI model", MODEL_LIST, index=0)
-OPENAI_LLM = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"])
-llm = OPENAI_LLM
+llm = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"], base_url=DEEPSEEK_BASE_URL)
 
 # =============================================================================
 # CHAT MESSAGE HISTORY AND ARTIFACT STORAGE
