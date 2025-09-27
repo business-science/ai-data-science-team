@@ -5,11 +5,16 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from uuid import uuid4
 import os
+import sys
 import io
 import pandas as pd
 
 from langchain_openai import ChatOpenAI
+from openai import OpenAI
+
 from ai_data_science_team.ds_agents import EDAToolsAgent
+from ai_data_science_team.utils.matplotlib import matplotlib_from_base64
+from ai_data_science_team.utils.plotly import plotly_from_dict
 
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -37,6 +42,7 @@ class SessionCreateResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     question: str
+    api_key: Optional[str] = None
 
 
 class DataframePayload(BaseModel):
@@ -51,6 +57,9 @@ class ChatResponse(BaseModel):
     dataframe: Optional[DataframePayload] = None
     report_url: Optional[str] = None
     dtale_url: Optional[str] = None
+    missing_matrix_url: Optional[str] = None
+    missing_bar_url: Optional[str] = None
+    missing_heatmap_url: Optional[str] = None
 
 
 # In-memory session store. For production, replace with Redis or DB.
@@ -86,13 +95,61 @@ async def upload_file(session_id: str = Form(...), file: UploadFile = File(...))
         raise HTTPException(status_code=400, detail=f"failed to parse file: {e}")
 
     SESSIONS[session_id]["data"] = df
-    return {"status": "ok", "rows": int(df.shape[0]), "cols": int(df.shape[1])}
+    preview_df = df.head(10)
+    return {
+        "status": "ok",
+        "rows": int(df.shape[0]),
+        "cols": int(df.shape[1]),
+        "preview": {
+            "columns": [str(c) for c in preview_df.columns],
+            "rows": preview_df.to_dict(orient="records"),
+        },
+    }
 
 
-def _get_llm() -> ChatOpenAI:
-    if not API_KEY:
+@app.post("/api/demo-data")
+def load_demo_data(session_id: str = Form(...), name: str = Form("churn")):
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="session not found")
+    # Map demo names to local files
+    demo_map = {
+        "churn": os.path.join(ROOT_DIR if 'ROOT_DIR' in globals() else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")), "data", "churn_data.csv"),
+    }
+    path = demo_map.get(name)
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"demo data not found: {name}")
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to load demo: {e}")
+    SESSIONS[session_id]["data"] = df
+    preview_df = df.head(10)
+    return {
+        "status": "ok",
+        "rows": int(df.shape[0]),
+        "cols": int(df.shape[1]),
+        "preview": {
+            "columns": [str(c) for c in preview_df.columns],
+            "rows": preview_df.to_dict(orient="records"),
+        },
+    }
+
+
+@app.post("/api/validate-key")
+def validate_key(api_key: str = Form(...)):
+    try:
+        client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+        _ = client.models.list()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"invalid key: {e}")
+
+
+def _get_llm(override_key: Optional[str] = None) -> ChatOpenAI:
+    key = override_key or API_KEY
+    if not key:
         raise HTTPException(status_code=400, detail="missing OPENAI_API_KEY/DEEPSEEK_API_KEY")
-    return ChatOpenAI(model=DEEPSEEK_MODEL, api_key=API_KEY, base_url=DEEPSEEK_BASE_URL)
+    return ChatOpenAI(model=DEEPSEEK_MODEL, api_key=key, base_url=DEEPSEEK_BASE_URL)
 
 
 def _df_to_payload(df: pd.DataFrame, limit: int = 200) -> DataframePayload:
@@ -109,7 +166,7 @@ def chat(body: ChatRequest):
     if df is None:
         raise HTTPException(status_code=400, detail="no data uploaded for this session")
 
-    llm = _get_llm()
+    llm = _get_llm(override_key=body.api_key)
     eda_agent = EDAToolsAgent(llm, invoke_react_agent_kwargs={"recursion_limit": 10})
 
     question = body.question.strip() + " Don't return hyperlinks to files in the response."
@@ -152,6 +209,28 @@ def chat(body: ChatRequest):
         # plotly figure
         if "plotly_figure" in artifacts:
             resp["plotly_figure"] = artifacts["plotly_figure"]
+
+        # visualize_missing: base64 images -> static files
+        def _save_b64_image(b64_str: Optional[str], filename: str) -> Optional[str]:
+            if not b64_str:
+                return None
+            try:
+                import base64
+                from pathlib import Path
+                sess_dir = os.path.join(STATIC_DIR, body.session_id)
+                os.makedirs(sess_dir, exist_ok=True)
+                out_path = os.path.join(sess_dir, filename)
+                data = base64.b64decode(b64_str)
+                with open(out_path, "wb") as f:
+                    f.write(data)
+                return f"/static/{body.session_id}/{filename}"
+            except Exception:
+                return None
+
+        if "matrix_plot" in artifacts or "bar_plot" in artifacts or "heatmap_plot" in artifacts:
+            resp["missing_matrix_url"] = _save_b64_image(artifacts.get("matrix_plot"), "missing_matrix.png")
+            resp["missing_bar_url"] = _save_b64_image(artifacts.get("bar_plot"), "missing_bar.png")
+            resp["missing_heatmap_url"] = _save_b64_image(artifacts.get("heatmap_plot"), "missing_heatmap.png")
 
         # sweetviz report
         if "report_html" in artifacts:
