@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+aiofiles
+python-dotenv
+langchain
+langchain-openai
+langgraph
+openai
+pandas
+numpy
+plotly
+ai-data-science-team
+
