@@ -1,6 +1,15 @@
 <template>
+  
   <McLayout class="container">
-    <McHeader :title="'Pandas Data Analyst'"  :logoImg="'https://matechat.gitcode.com/logo.svg'">>
+
+    <McIntroduction
+      :logoImg="'https://matechat.gitcode.com/logo.svg'"
+      :title="'MateChat'"
+      :subTitle="'Hi，欢迎使用 EDA agent'"
+      :description="description"
+    ></McIntroduction>
+
+    <McHeader :title="'Pandas Data Analyst'">>
       <template #operationArea>
         <div class="ops">
         </div>
@@ -116,6 +125,12 @@ const asking = ref(false)
 const preview = ref({ columns: [], rows: [] })
 
 const plotlyDivMap = new Map()
+
+const description = [
+  'MateChat 可以辅助研发人员编码、查询知识和相关作业信息、编写文档等。',
+  '作为AI模型，MateChat 提供的答案可能不总是确定或准确的，但您的反馈可以帮助 MateChat 做的更好。',
+];
+
 function setPlotlyRef(id, el) {
   if (!id) return
   if (el) plotlyDivMap.set(id, el); else plotlyDivMap.delete(id)
