@@ -9,7 +9,7 @@
       :description="description"
     ></McIntroduction>
 
-    <McHeader :title="'Pandas Data Analyst'">>
+    <McHeader :title="'Pandas Data Analyst'">
       <template #operationArea>
         <div class="ops">
         </div>
@@ -38,32 +38,45 @@
       </div>
 
       <div v-for="m in messages" :key="m.id">
-        <McBubble v-if="m.type!=='plotly'" :align="m.from==='user' ? 'right' : 'left'" :avatarConfig="m.avatarConfig">
-          <template #default>
-            <div v-if="m.type==='text'" v-html="renderMarkdown(m.text)"></div>
-            <div v-else-if="m.type==='table'" class="panel">
-              <div class="panel-title">Data Table</div>
-              <div class="table-wrap">
-                <table cellpadding="6" cellspacing="0" class="table">
-                  <thead>
-                    <tr>
-                      <th v-for="c in m.payload.columns" :key="c">{{ c }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(r, idx2) in m.payload.rows" :key="idx2">
-                      <td v-for="c in m.payload.columns" :key="c">{{ r[c] }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+        <template v-if="m.from==='user'">
+          <McBubble :align="'right'" :avatarConfig="{ imgSrc: 'https://matechat.gitcode.com/png/demo/userAvatar.svg' }" class="user-bubble">
+            <template #default>
+              <div v-if="m.type==='text'" v-html="renderMarkdown(m.text)"></div>
+            </template>
+          </McBubble>
+        </template>
+        <template v-else>
+          <McBubble v-if="m.type!=='plotly'" :align="'left'" :avatarConfig="{ imgSrc: 'https://matechat.gitcode.com/logo.svg' }" class="ai-bubble">
+            <template #default>
+              <div v-if="m.type==='text'" v-html="renderMarkdown(m.text)"></div>
+              <div v-else-if="m.type==='table'" class="panel">
+                <div class="panel-title">Data Table</div>
+                <div class="table-wrap">
+                  <table cellpadding="6" cellspacing="0" class="table">
+                    <thead>
+                      <tr>
+                        <th v-for="c in m.payload.columns" :key="c">{{ c }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, idx2) in m.payload.rows" :key="idx2">
+                        <td v-for="c in m.payload.columns" :key="c">{{ r[c] }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          </template>
-        </McBubble>
-        <div v-else class="panel full">
-          <div class="panel-title">Chart</div>
-          <div :ref="el => setPlotlyRef(m.id, el)" class="plotly-full"></div>
-        </div>
+            </template>
+          </McBubble>
+          <McBubble v-else :align="'left'" :avatarConfig="m.avatarConfig" class="ai-bubble ai-full">
+            <template #default>
+              <div class="panel">
+                <div class="panel-title">Chart</div>
+                <div :ref="el => setPlotlyRef(m.id, el)" class="plotly-full"></div>
+              </div>
+            </template>
+          </McBubble>
+        </template>
       </div>
     </McLayoutContent>
 
@@ -266,6 +279,9 @@ async function validateKey() {
 .table-wrap { overflow:auto; max-height:420px; }
 .full { width: 100%; max-width: 100%; overflow-x: hidden; }
 .plotly-full { width: 100%; height: 520px; overflow: hidden; }
+.user-bubble :deep(.mc-bubble-content) { background: #e6f4ff; }
+.ai-bubble :deep(.mc-bubble-content) { background: #f7f7f8; }
+.ai-full { width: 100%; display: block; }
 .input-foot { 
   display: flex; 
   align-items: center; 
@@ -281,5 +297,5 @@ async function validateKey() {
 .count { font-size:12px; color:#71757f; }
 </style>
 
-44123019710316343X
+
 
