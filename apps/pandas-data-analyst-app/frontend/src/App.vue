@@ -36,32 +36,34 @@
         </div>
       </div>
 
-      <McBubble v-for="m in messages" :key="m.id" :align="m.from==='user' ? 'right' : 'left'" :avatarConfig="m.avatarConfig">
-        <template #default>
-          <div v-if="m.type==='text'" v-html="renderMarkdown(m.text)"></div>
-          <div v-else-if="m.type==='table'" class="panel">
-            <div class="panel-title">Data Table</div>
-            <div class="table-wrap">
-              <table cellpadding="6" cellspacing="0" class="table">
-                <thead>
-                  <tr>
-                    <th v-for="c in m.payload.columns" :key="c">{{ c }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(r, idx2) in m.payload.rows" :key="idx2">
-                    <td v-for="c in m.payload.columns" :key="c">{{ r[c] }}</td>
-                  </tr>
-                </tbody>
-              </table>
+      <div v-for="m in messages" :key="m.id">
+        <McBubble v-if="m.type!=='plotly'" :align="m.from==='user' ? 'right' : 'left'" :avatarConfig="m.avatarConfig">
+          <template #default>
+            <div v-if="m.type==='text'" v-html="renderMarkdown(m.text)"></div>
+            <div v-else-if="m.type==='table'" class="panel">
+              <div class="panel-title">Data Table</div>
+              <div class="table-wrap">
+                <table cellpadding="6" cellspacing="0" class="table">
+                  <thead>
+                    <tr>
+                      <th v-for="c in m.payload.columns" :key="c">{{ c }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(r, idx2) in m.payload.rows" :key="idx2">
+                      <td v-for="c in m.payload.columns" :key="c">{{ r[c] }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-          <div v-else-if="m.type==='plotly'" class="panel">
-            <div class="panel-title">Chart</div>
-            <div :ref="el => setPlotlyRef(m.id, el)" style="width:100%; height:480px;"></div>
-          </div>
-        </template>
-      </McBubble>
+          </template>
+        </McBubble>
+        <div v-else class="panel full">
+          <div class="panel-title">Chart</div>
+          <div :ref="el => setPlotlyRef(m.id, el)" class="plotly-full"></div>
+        </div>
+      </div>
     </McLayoutContent>
 
     <McLayoutSender>
@@ -77,7 +79,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import axios from 'axios'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
@@ -164,10 +166,28 @@ function pushPlotly(fig) {
   nextTick(async () => {
     const el = plotlyDivMap.get(id)
     if (el && window.Plotly) {
-      try { await window.Plotly.react(el, fig.data || [], fig.layout || {}, { responsive: true }) } catch (_) {}
+      try { await window.Plotly.react(el, fig.data || [], { ...fig.layout, autosize: true } || {}, { responsive: true }) } catch (_) {}
     }
   })
 }
+
+function rerenderAllPlots() {
+  nextTick(async () => {
+    for (const m of messages.value) {
+      if (m.type === 'plotly') {
+        const el = plotlyDivMap.get(m.id)
+        if (el && window.Plotly) {
+          try { await window.Plotly.Plots.resize(el) } catch (_) {}
+        }
+      }
+    }
+  })
+}
+
+function onResize() { rerenderAllPlots() }
+
+onMounted(() => { window.addEventListener('resize', onResize) })
+onBeforeUnmount(() => { window.removeEventListener('resize', onResize) })
 
 async function onSubmit(val) {
   if (typeof val === 'string') question.value = val
@@ -214,6 +234,8 @@ async function validateKey() {
 .table { width:100%; border-collapse:collapse; }
 .table th, .table td { border:1px solid #eee; text-align:left; }
 .table-wrap { overflow:auto; max-height:420px; }
+.full { width: 100%; }
+.plotly-full { width: 100%; height: 520px; }
 .input-foot { display:flex; justify-content:flex-end; width:100%; }
 .count { font-size:12px; color:#71757f; }
 </style>

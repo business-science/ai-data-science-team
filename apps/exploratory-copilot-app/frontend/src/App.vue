@@ -11,7 +11,7 @@
           <button @click="validateKey" :disabled="!apiKey || validating">{{ validating ? '校验中…' : '校验Key' }}</button>
           <span v-if="keyValid===true" class="ok">Key OK</span>
           <span v-if="keyValid===false" class="err">Key 无效</span>
-        </div>
+      </div>
       </template>
     </McHeader>
 
