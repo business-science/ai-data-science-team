@@ -1,6 +1,6 @@
 <template>
   <McLayout class="container">
-    <McHeader :title="'Pandas Data Analyst'">
+    <McHeader :title="'Pandas Data Analyst'"  :logoImg="'https://matechat.gitcode.com/logo.svg'">>
       <template #operationArea>
         <div class="ops">
         </div>
