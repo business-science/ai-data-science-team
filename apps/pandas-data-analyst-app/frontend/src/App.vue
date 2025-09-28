@@ -138,8 +138,8 @@ const preview = ref({ columns: [], rows: [] })
 const plotlyDivMap = new Map()
 
 const description = [
-  'MateChat 可以辅助研发人员编码、查询知识和相关作业信息、编写文档等。',
-  '作为AI模型，MateChat 提供的答案可能不总是确定或准确的，但您的反馈可以帮助 MateChat 做的更好。',
+  'Welcome to the Pandas Data Analyst AI. Upload a CSV or Excel file and ask questions about the data.',  
+  'The AI agent will analyze your dataset and return either data tables or interactive charts.',
 ];
 
 function setPlotlyRef(id, el) {
