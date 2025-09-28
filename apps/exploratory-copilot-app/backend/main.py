@@ -14,6 +14,11 @@ import pandas as pd
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
+# 优先从本地工程导入 ai_data_science_team 源码
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 from ai_data_science_team.ds_agents import EDAToolsAgent
 from ai_data_science_team.utils.matplotlib import matplotlib_from_base64
 from ai_data_science_team.utils.plotly import plotly_from_dict

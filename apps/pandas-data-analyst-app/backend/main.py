@@ -13,6 +13,12 @@ import pandas as pd
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
+# 优先从本地工程导入 ai_data_science_team 源码
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+import sys
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 from ai_data_science_team.agents import DataWranglingAgent, DataVisualizationAgent
 from ai_data_science_team.multiagents.pandas_data_analyst import PandasDataAnalyst
 
