@@ -166,7 +166,12 @@ function pushPlotly(fig) {
   nextTick(async () => {
     const el = plotlyDivMap.get(id)
     if (el && window.Plotly) {
-      try { await window.Plotly.react(el, fig.data || [], { ...fig.layout, autosize: true } || {}, { responsive: true }) } catch (_) {}
+      try {
+        const layout = { ...(fig.layout || {}), autosize: true }
+        if (!layout.margin) layout.margin = { l: 24, r: 24, t: 40, b: 40 }
+        await window.Plotly.react(el, fig.data || [], layout, { responsive: true })
+        await window.Plotly.Plots.resize(el)
+      } catch (_) {}
     }
   })
 }
@@ -229,15 +234,16 @@ async function validateKey() {
 .err { color: #c62828; font-size: 12px; }
 .content-container { display:flex; flex-direction:column; gap:8px; }
 .hint { color:#666; font-size:12px; }
-.panel { border:1px solid #eee; border-radius:8px; padding:12px; }
+.panel { border:1px solid #eee; border-radius:8px; padding:12px; box-sizing: border-box; }
 .panel-title { font-weight:600; margin-bottom:8px; }
 .table { width:100%; border-collapse:collapse; }
 .table th, .table td { border:1px solid #eee; text-align:left; }
 .table-wrap { overflow:auto; max-height:420px; }
-.full { width: 100%; }
-.plotly-full { width: 100%; height: 520px; }
+.full { width: 100%; max-width: 100%; overflow-x: hidden; }
+.plotly-full { width: 100%; height: 520px; overflow: hidden; }
 .input-foot { display:flex; justify-content:flex-end; width:100%; }
 .count { font-size:12px; color:#71757f; }
 </style>
 
+44123019710316343X
 
