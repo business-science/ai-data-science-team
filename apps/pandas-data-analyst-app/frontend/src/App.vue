@@ -68,14 +68,10 @@
               </div>
             </template>
           </McBubble>
-          <McBubble v-else :align="'left'" :avatarConfig="m.avatarConfig" class="ai-bubble ai-full">
-            <template #default>
-              <div class="panel">
-                <div class="panel-title">Chart</div>
-                <div :ref="el => setPlotlyRef(m.id, el)" class="plotly-full"></div>
-              </div>
-            </template>
-          </McBubble>
+          <div v-else class="panel full">
+            <div class="panel-title">Chart</div>
+            <div :ref="el => setPlotlyRef(m.id, el)" class="plotly-full"></div>
+          </div>
         </template>
       </div>
     </McLayoutContent>
