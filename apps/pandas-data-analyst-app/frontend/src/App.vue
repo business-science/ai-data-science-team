@@ -83,11 +83,13 @@
         <template #extra>
         
           <div class="input-foot">
-            <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
 
-            <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
-
-            <span class="count">{{ question.length }}/2000</span>
+            <div class="input-foot-left">
+              <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
+              <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
+              <span class="count">{{ question.length }}/2000</span>
+            </div>
+            
           </div>
         </template>
       </McInput>
