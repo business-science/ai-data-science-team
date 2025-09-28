@@ -4,7 +4,7 @@
 
     <McIntroduction
       :logoImg="'https://matechat.gitcode.com/logo.svg'"
-      :title="'MateChat'"
+      :title="'EDA Chat'"
       :subTitle="'Hi，欢迎使用 EDA agent'"
       :description="description"
     ></McIntroduction>
