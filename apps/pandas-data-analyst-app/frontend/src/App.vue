@@ -3,7 +3,7 @@
   <McLayout class="container">
 
     <McIntroduction
-      :logoImg="'https://raw.githubusercontent.com/business-science/ai-data-science-team/master/img/ai_data_science_team_logo_small.jpg'"
+      :logoImg="'https://matechat.gitcode.com/logo.svg'"
       :title="'EDA Chat'"
       :subTitle="'Hi，欢迎使用 EDA agent'"
       :description="description"
