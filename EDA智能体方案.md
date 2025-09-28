@@ -5,6 +5,34 @@
 - 说明多智能体（multi-agents）的编排与交互机制
 - 给出在当前项目中新增智能体与实现编排的实践指南
 
+## 方案总览（Executive Summary）
+
+- 本方案基于 LangGraph 的状态图（StateGraph）与 LangChain 的可组合流水线（LCEL）实现“可编排、可中断、可恢复”的智能体体系。
+- 智能体分为两类：
+  - 工具型（ReAct/Tool-Calling）：用 `create_react_agent + ToolNode` 选择并调用 `tools/` 中的原子能力。
+  - 代码生成-执行型：LLM 生成受控的单函数代码，运行失败进入修复与重试，支持 HITL。
+- 多智能体通过路由预处理与条件边在主图中编排，统一返回 JSON 产物（数据表、Plotly 图、报告路径等），便于前后端消费。
+
+## 文档导览与阅读路径
+
+- 建议阅读顺序：
+  1) [项目架构](#项目架构)：目录与模块职责
+  2) [技术原理概述](#技术原理概述)：核心技术栈与思路
+  3) [LangGraph 知识补充](#langgraph-知识补充)：状态图、节点/边、Checkpointer、HITL
+  4) [基于 LangChain 开发智能体的通用方案](#基于-langchain-开发智能体的通用方案)：核心概念与通用步骤
+  5) [单个智能体运行流程](#单个智能体运行流程)：工具型与代码生成-执行型对比
+  6) [多智能体编排与交互](#多智能体编排与交互)：路由、子图调用与结果汇总
+  7) [将 HITL 融入智能体流程（模块化集成指南）](#将-hitl-融入智能体流程模块化集成指南)：中断/恢复/人工审阅
+  8) [如何新增一个智能体](#如何新增一个智能体) 与 [如何实现新的编排（多智能体）](#如何实现新的编排多智能体)：落地指南
+  9) [关键工程实践](#关键工程实践) 与 [Checklist](#在本项目中快速落地一个新智能体checklist)：交付与质量
+  10) [架构图（Mermaid）](#架构图mermaid)：整体与关键流程图
+
+## 术语与缩写
+
+- HITL：Human-In-The-Loop（本方案中以“HITL”直接标注）
+- LCEL：LangChain Expression Language，可组合运行单元的流水线语法
+- StateGraph/CompiledStateGraph：LangGraph 状态工作流与其可执行工件
+
 ## 技术原理概述
 
 - **框架核心**：基于 LangGraph 的 `StateGraph/CompiledStateGraph` 构建“有状态的工作流图”，由节点（node）与有向边（edge/conditional edges）组成。
@@ -249,6 +277,173 @@ result = app.invoke({"messages": [], "x": 0})
 # result["messages"] -> ["step1", "step2", "step1", "step2", "step1"]
 ```
 
+
+
+## 基于 LangChain 开发智能体的通用方案
+
+### 核心概念
+
+- 模型抽象（LLM/ChatModel/Embedding）：统一 `.invoke()` 接口与可组合的 Runnable（LCEL）流水线。
+- Prompt 模板（PromptTemplate/ChatPromptTemplate）：参数化提示，便于复用与测试。
+- 输出解析器（OutputParser）：把自由文本约束为结构化输出（JSON、Pydantic、代码片段）。
+- 工具（Tools）：用 `@tool` 暴露原子能力，支持 ReAct/Tool-Calling；与 `InjectedState` 协作进行状态注入。
+- 记忆/检查点：LangChain 侧对话记忆，LangGraph 侧 `Checkpointer` 支持中断/恢复与 HITL。
+- 可组合执行（LCEL）：如 `prompt | model | parser`，将步骤装配成可复用算子。
+
+### 通用步骤
+
+1) 明确任务与产物
+- 输入（数据/参数）、输出（JSON/图/表/代码）、失败策略（错误键、重试上限）。
+
+2) 选择开发模式
+- 工具型（ReAct/Tool-Calling）：查询+选择工具的工作负载。
+- 代码生成-执行：由 LLM 产出函数代码并在受控环境执行。
+- 纯推理对话：仅结构化问答与解释，无工具/执行。
+
+3) 设计 Prompt 与解析器
+- 以模板组织上下文（用户指令、数据摘要、历史等）。
+- 采用 `JsonOutputParser`、`PydanticOutputParser` 或专用解析器（如 Python 代码解析器）。
+
+4) 实现工具
+- 使用 `@tool` 暴露能力，返回 JSON 可序列化的结果（dict/list/base64/URL）。
+- 如需共享上游状态，使用 `InjectedState("key")` 注入。
+
+5) 组织执行流
+- 轻量：`prompt | model | parser`。
+- 带工具：`create_react_agent(model, tools=ToolNode([...]))`。
+- 多步骤/可中断：用 LangGraph `StateGraph` 建节点与（条件）边，编译为 `CompiledStateGraph`。
+
+6) 加入 HITL 与重试
+- 关键节点前后插入审核节点（HITL），失败进入修复节点并重试。
+
+7) 封装为类与接口
+- 提供 `XxxAgent(BaseAgent)` + `make_xxx_agent()`；
+- 实现 `invoke_agent/ainvoke_agent` 与产物访问器（如 `get_plotly_graph()`）。
+
+8) 集成到编排器
+- 在 `multiagents/` 通过路由预处理拆分子任务，注入各子智能体 `_compiled_graph`，统一汇总输出。
+
+### 代码骨架示例（工具型 ReAct）
+
+```python
+from langgraph.prebuilt import create_react_agent, ToolNode
+from langchain.tools import tool
+
+@tool
+def essential_stat(data: dict) -> str:
+    """Return basic statistics of a dataset."""
+    return str({"rows": len(next(iter(data.values()), []))})
+
+def make_agent(model):
+    tool_node = ToolNode(tools=[essential_stat])
+    return create_react_agent(model, tools=tool_node)
+
+def run(model, data, question):
+    agent = make_agent(model)
+    return agent.invoke({
+        "messages": [("user", question)],
+        "data_raw": data,
+    })
+```
+
+### 代码骨架示例（代码生成-执行）
+
+```python
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+from ai_data_science_team.templates import (
+    create_coding_agent_graph,
+    node_func_execute_agent_code_on_data,
+    node_func_fix_agent_code,
+)
+
+class GraphState(TypedDict):
+    user_instructions: str
+    data_raw: dict
+    code_snippet: str
+    result: dict
+    agent_error: str
+    max_retries: int
+    retry_count: int
+
+def create_code(state: GraphState):
+    code = (prompt | llm | PythonOutputParser()).invoke({
+        "user_instructions": state["user_instructions"],
+    })
+    return {"code_snippet": code}
+
+def execute(state: GraphState):
+    return node_func_execute_agent_code_on_data(
+        state,
+        data_key="data_raw",
+        code_snippet_key="code_snippet",
+        result_key="result",
+        error_key="agent_error",
+        agent_function_name="fn",
+    )
+
+def fix_code(state: GraphState):
+    return node_func_fix_agent_code(
+        state,
+        code_snippet_key="code_snippet",
+        error_key="agent_error",
+        llm=llm,
+        prompt_template="...",
+        agent_name="my_agent",
+    )
+
+workflow = StateGraph(GraphState)
+workflow.add_node("create_code", create_code)
+workflow.add_node("execute", execute)
+workflow.add_node("fix", fix_code)
+workflow.set_entry_point("create_code")
+workflow.add_edge("create_code", "execute")
+workflow.add_conditional_edges(
+    "execute",
+    lambda s: "fix" if s.get("agent_error") and s["retry_count"] < s["max_retries"] else "END",
+    {"fix": "fix", "END": END},
+)
+app = workflow.compile()
+```
+
+## 将 HITL 融入智能体流程（模块化集成指南）
+
+- 启用方式（单体智能体）：
+  - 在构建函数中打开 `human_in_the_loop=True`，并提供 `checkpointer`（未提供时可使用 `MemorySaver()`）。
+  - 若使用通用 `create_coding_agent_graph`，框架会在执行节点后根据是否报错分支到修复或 HITL 审核节点；也可像 `DataWranglingAgent` 那样在“推荐步骤”之后手动插入 `human_review` 节点，进行“预执行”人工确认。
+
+- 节点接入（推荐形态）：
+  - 预执行审核：`recommended_steps -> human_review -> create_code`
+  - 失败分支审核（可选）：`execute -> (error && can_retry ? fix_code : human_review/explain)`
+  - 使用 `templates.node_func_human_review()` 快速创建审核节点：返回 `Command(goto=..., update=...)`，当输入为 `"yes"` 时直达后续节点，否则把用户修改合并进 `state[user_instructions]` 再回到推荐/生成节点。
+
+- 前后端交互（关键点）：
+  - HITL 通过 `interrupt()` 触发人工输入暂停；需使用 `checkpointer` 保存会话状态。
+  - 前端获取中断提示后，采集用户输入（`yes` 或修改意见文本），再调用后端继续执行接口，将该输入传回以恢复流程（由框架根据 `Command` 的 `goto/update` 恢复到正确节点）。
+
+- 多智能体集成：
+  - 在编排器（如 `PandasDataAnalyst`）中，可仅在子智能体内部启用 HITL；也可在路由器后置一个全局审核节点做任务级确认。
+  - 如果顶层也需要中断与恢复，顶层图同样应配置 `checkpointer`，并在 UI 侧使用统一的“中断恢复”通道。
+
+- 最小示例（要点示意）：
+
+```python
+# 假定已有 node_functions = { "recommend": ..., "human_review": ..., "create_code": ..., "execute": ..., "fix": ..., "explain": ... }
+from langgraph.checkpoint.memory import MemorySaver
+app = create_coding_agent_graph(
+    GraphState=GraphState,
+    node_functions=node_functions,
+    recommended_steps_node_name="recommend",
+    create_code_node_name="create_code",
+    execute_code_node_name="execute",
+    fix_code_node_name="fix",
+    explain_code_node_name="explain",
+    error_key="agent_error",
+    human_in_the_loop=True,                 # 开启 HITL
+    human_review_node_name="human_review", # 指定审核节点
+    checkpointer=MemorySaver(),             # 启用检查点保存/恢复
+)
+```
 
 
 ## 架构图（Mermaid）
