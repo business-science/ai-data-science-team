@@ -3,14 +3,6 @@
     <McHeader :title="'Pandas Data Analyst'">
       <template #operationArea>
         <div class="ops">
-          <button @click="createSession" :disabled="creating">{{ creating ? '创建中…' : (sessionId ? '重建会话' : '创建会话') }}</button>
-          <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
-          <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
-          <button @click="loadDemo" :disabled="!sessionId || uploading">示例数据</button>
-          <input v-model="apiKey" placeholder="API Key" type="password" />
-          <button @click="validateKey" :disabled="!apiKey || validating">{{ validating ? '校验中…' : '校验Key' }}</button>
-          <span v-if="keyValid===true" class="ok">Key OK</span>
-          <span v-if="keyValid===false" class="err">Key 无效</span>
         </div>
       </template>
     </McHeader>
@@ -66,9 +58,23 @@
       </div>
     </McLayoutContent>
 
+
+
+    <div class="input-foot" style="justify-content: flex-start; margin-bottom: 12px;">
+      <button
+        @click="createSession" :disabled="creating"
+        style="padding: 6px 16px; border-radius: 6px; border: 1px solid #eee; background: #f5f5f5; cursor: pointer;"
+      >
+        新建会话
+      </button>
+    </div>
+
     <McLayoutSender>
       <McInput :value="question" :maxLength="2000" @change="e => question = e" @submit="onSubmit">
         <template #extra>
+          <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
+          <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
+        
           <div class="input-foot">
             <span class="count">{{ question.length }}/2000</span>
           </div>
