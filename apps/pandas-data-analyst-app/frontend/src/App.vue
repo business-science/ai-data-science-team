@@ -72,10 +72,12 @@
     <McLayoutSender>
       <McInput :value="question" :maxLength="2000" @change="e => question = e" @submit="onSubmit">
         <template #extra>
-          <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
-          <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
         
           <div class="input-foot">
+            <input type="file" @change="onFileChange" accept=".csv,.xlsx,.xls" />
+
+            <button @click="upload" :disabled="!sessionId || !file || uploading">{{ uploading ? '上传中…' : '上传' }}</button>
+
             <span class="count">{{ question.length }}/2000</span>
           </div>
         </template>
@@ -247,7 +249,18 @@ async function validateKey() {
 .table-wrap { overflow:auto; max-height:420px; }
 .full { width: 100%; max-width: 100%; overflow-x: hidden; }
 .plotly-full { width: 100%; height: 520px; overflow: hidden; }
-.input-foot { display:flex; justify-content:flex-end; width:100%; }
+.input-foot { 
+  display: flex; 
+  align-items: center; 
+  width: 100%; 
+  gap: 16px; /* 增加元素间距 */
+}
+.input-foot input[type="file"] {
+  margin-right: 8px;
+}
+.input-foot button {
+  margin-right: 8px;
+}
 .count { font-size:12px; color:#71757f; }
 </style>
 
