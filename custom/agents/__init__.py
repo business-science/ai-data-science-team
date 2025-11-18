@@ -1,12 +1,19 @@
 """
 Custom Agents
 
-Your custom agent implementations go here.
+Your custom agent implementations.
 """
 
-# Example import (uncomment when you create agents):
-# from .my_custom_agent import MyCustomAgent
+from .data_quality_agent import DataQualityAgent
+from .feature_importance_agent import FeatureImportanceAgent
+from .model_comparison_agent import ModelComparisonAgent
+from .outlier_detection_agent import OutlierDetectionAgent
+from .time_series_agent import TimeSeriesAgent
 
 __all__ = [
-    # Add your custom agents here
+    'DataQualityAgent',
+    'FeatureImportanceAgent',
+    'ModelComparisonAgent',
+    'OutlierDetectionAgent',
+    'TimeSeriesAgent',
 ]
