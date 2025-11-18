@@ -176,3 +176,33 @@ reports/
 
 # Conda Environments
 environment_ds4b_301p_dev.yml
+
+# ===== CUSTOM WORK PROTECTION =====
+# Private directory - NEVER commit (proprietary code, API keys, client work)
+/custom/private/
+/custom/private/**
+
+# Sensitive files anywhere in custom/
+custom/**/*.key
+custom/**/*.secret
+custom/**/*_secret.py
+custom/**/*_private.py
+custom/**/.env*
+custom/**/credentials*.json
+custom/**/config_local*.py
+
+# Custom experiments you may not want to commit
+# (Remove the # below to ignore all experiments)
+# /custom/experiments/
+
+# Custom data files (often too large or sensitive)
+/custom/data/
+custom/**/*.csv
+custom/**/*.xlsx
+custom/**/*.parquet
+custom/**/*.db
+custom/**/*.sqlite
+
+# But allow small example data
+!custom/examples/**/example_*.csv
+!custom/examples/**/sample_*.csv
