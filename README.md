@@ -16,6 +16,15 @@
 
 </div>
 
+---
+
+> **🚀 ENHANCED FORK:** This fork includes **5 additional AI agents** (Data Quality, Feature Importance, Model Comparison, Outlier Detection, Time Series) with **29 specialized tools** plus web apps, CLI tools, and REST API.
+>
+> **[📖 See Fork Features →](FORK_FEATURES.md)** | **[🎯 Quick Start Examples →](custom/examples/README.md)** | **[📚 Custom Extensions Guide →](custom/docs/CUSTOM_EXTENSIONS_GUIDE.md)**
+>
+> **Original Repository:** [business-science/ai-data-science-team](https://github.com/business-science/ai-data-science-team)
+
+---
 
 # Your AI Data Science Team (🪖 An Army Of Agents)
 
