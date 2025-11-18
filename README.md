@@ -1,36 +1,21 @@
 <div align="center">
-  <a href="https://github.com/business-science/ai-data-science-team">
-    <picture>
-      <img src="/img/ai_data_science_team_logo_small.jpg" alt="AI Data Science Team" width="400">
+  <picture>
+    <img src="/img/ai_data_science_team_logo_small.jpg" alt="AI Data Science Team" width="400">
   </picture>
-  </a>
 </div>
 <div align="center">
   <em>An AI-powered data science team of agents to help you perform common data science tasks 10X faster</em>
 </div>
 <div align="center">
-  <a href="https://pypi.python.org/pypi/ai-data-science-team"><img src="https://img.shields.io/pypi/v/ai-data-science-team.svg?style=for-the-badge" alt="PyPI"></a>
-  <a href="https://github.com/business-science/ai-data-science-team"><img src="https://img.shields.io/pypi/pyversions/ai-data-science-team.svg?style=for-the-badge" alt="versions"></a>
-  <a href="https://github.com/business-science/ai-data-science-team/blob/main/LICENSE"><img src="https://img.shields.io/github/license/business-science/ai-data-science-team.svg?style=for-the-badge" alt="license"></a>
-  <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/business-science/ai-data-science-team?style=for-the-badge">
-
+  <img src="https://img.shields.io/badge/python-3.9+-blue.svg?style=for-the-badge" alt="Python">
+  <img src="https://img.shields.io/badge/license-MIT-green.svg?style=for-the-badge" alt="License">
 </div>
-
----
-
-> **🚀 ENHANCED FORK:** This fork includes **5 additional AI agents** (Data Quality, Feature Importance, Model Comparison, Outlier Detection, Time Series) with **29 specialized tools** plus web apps, CLI tools, and REST API.
->
-> **[📖 See Fork Features →](FORK_FEATURES.md)** | **[🎯 Quick Start Examples →](custom/examples/README.md)** | **[📚 Custom Extensions Guide →](custom/docs/CUSTOM_EXTENSIONS_GUIDE.md)**
->
-> **Original Repository:** [business-science/ai-data-science-team](https://github.com/business-science/ai-data-science-team)
 
 ---
 
 # Your AI Data Science Team (🪖 An Army Of Agents)
 
 **An AI-powered data science team of agents to help you perform common data science tasks 10X faster**.
-
-[**Please ⭐ us on GitHub (it takes 2 seconds and means a lot).**](https://github.com/business-science/ai-data-science-team)
 
 *Beta - This Python library is under active development. There may be breaking changes that occur until release of 0.1.0.* 
 

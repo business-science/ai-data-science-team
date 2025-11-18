@@ -1,18 +1,18 @@
-# Installation Guide - Enhanced Fork
+# Installation Guide - AI Data Science Team
 
-This guide shows how to install and set up the enhanced AI Data Science Team with custom extensions.
+This guide shows how to install and set up the AI Data Science Team platform.
 
 ## Quick Install
 
 ```bash
-# Clone this fork
+# Clone repository
 git clone https://github.com/NicoLeeVaz/ai-data-science-team.git
 cd ai-data-science-team
 
 # Install the package
 pip install -e .
 
-# Install custom extensions dependencies
+# Install all dependencies
 pip install scipy statsmodels shap flask flask-cors streamlit
 ```
 
