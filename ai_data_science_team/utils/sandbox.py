@@ -22,7 +22,7 @@ from typing import Any, Dict, Tuple
 def _build_runner_script() -> str:
     """
     Returns a self-contained Python script (as text) that:
-    - Reads JSON from stdin containing: code, function_name, data, memory_limit_mb.
+    - Reads JSON from stdin containing: code, function_name, data, data_format, memory_limit_mb.
     - Validates imports against a blocklist.
     - Executes the code with restricted builtins and blocked network.
     - Returns a JSON payload with either {"result": ..., "error": null} or {"result": null, "error": "..."}.
@@ -147,6 +147,9 @@ def _build_runner_script() -> str:
             except Exception:
                 pd = None
 
+            if isinstance(obj, list):
+                return [_to_jsonable(item) for item in obj]
+
             if pd is not None and isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             try:
@@ -166,6 +169,7 @@ def _build_runner_script() -> str:
             code = payload.get("code") or ""
             function_name = payload.get("function_name")
             data = payload.get("data")
+            data_format = payload.get("data_format") or "dataframe"
             memory_limit_mb = payload.get("memory_limit_mb")
 
             try:
@@ -198,14 +202,25 @@ def _build_runner_script() -> str:
                 sys.stdout.write(json.dumps({"result": None, "error": f"Function '{function_name}' not found or not callable."}))
                 return
 
+            # Prepare input in the expected format
             try:
-                df = pd.DataFrame.from_dict(data)
+                if data_format == "dataframe":
+                    input_obj = pd.DataFrame.from_dict(data)
+                elif data_format == "dataframe_list":
+                    if isinstance(data, list):
+                        input_obj = [pd.DataFrame.from_dict(item) for item in data]
+                    elif isinstance(data, dict):
+                        input_obj = [pd.DataFrame.from_dict(data)]
+                    else:
+                        raise TypeError(f"Unsupported data type for dataframe_list: {type(data).__name__}")
+                else:
+                    raise ValueError(f"Unsupported data_format: {data_format}")
             except Exception as exc:
                 sys.stdout.write(json.dumps({"result": None, "error": f"Invalid input data: {exc}"}))
                 return
 
             try:
-                result = func(df)
+                result = func(input_obj)
                 result = _to_jsonable(result)
                 sys.stdout.write(json.dumps({"result": result, "error": None}))
             except Exception as exc:
@@ -224,9 +239,10 @@ def run_code_sandboxed_subprocess(
     *,
     code_snippet: str,
     function_name: str,
-    data: Dict[str, Any],
+    data: Any,
     timeout: int = 10,
     memory_limit_mb: int = 512,
+    data_format: str = "dataframe",
 ) -> Tuple[Any, str | None]:
     """
     Execute generated code in a separate Python subprocess with a restricted environment.
@@ -237,12 +253,16 @@ def run_code_sandboxed_subprocess(
         The Python code to execute (expected to define `function_name`).
     function_name : str
         The name of the function inside `code_snippet` to invoke.
-    data : dict
-        The raw data (dict of column -> list) to pass into the function as a DataFrame.
+    data : Any
+        Raw data to pass into the function. Shape is interpreted based on `data_format`.
     timeout : int, optional
         Timeout in seconds for the subprocess. Defaults to 10.
     memory_limit_mb : int, optional
         Soft memory cap in MB (best effort; POSIX only). Defaults to 512.
+    data_format : str, optional
+        Input shape hint for the sandbox. Options:
+        - "dataframe": data is a dict and will be converted to a single DataFrame.
+        - "dataframe_list": data is a list of dicts (or a single dict) converted to a list of DataFrames.
 
     Returns
     -------
@@ -254,6 +274,7 @@ def run_code_sandboxed_subprocess(
         "function_name": function_name,
         "data": data,
         "memory_limit_mb": memory_limit_mb,
+        "data_format": data_format,
     }
 
     env = {
