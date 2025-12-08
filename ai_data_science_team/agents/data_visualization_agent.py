@@ -8,12 +8,11 @@
 from typing import TypedDict, Annotated, Sequence, Literal
 import operator
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import BaseMessage
 
 from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Checkpointer
 
 import os
 import json
@@ -305,9 +304,9 @@ class DataVisualizationAgent(BaseAgent):
                 log_details = f"""
 ## Data Visualization Agent Log Summary:
 
-Function Path: {self.response.get('data_visualization_function_path')}
+Function Path: {self.response.get("data_visualization_function_path")}
 
-Function Name: {self.response.get('data_visualization_function_name')}
+Function Name: {self.response.get("data_visualization_function_name")}
                 """
                 if markdown:
                     return Markdown(log_details)

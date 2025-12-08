@@ -11,13 +11,13 @@ import operator
 import pandas as pd
 from IPython.display import Markdown
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import BaseMessage
 
 from langgraph.types import Command, Checkpointer
 from langgraph.checkpoint.memory import MemorySaver
 
-from ai_data_science_team.templates import(
+from ai_data_science_team.templates import (
     node_func_execute_agent_code_on_data,
     node_func_human_review,
     node_func_fix_agent_code,
@@ -39,6 +39,7 @@ from ai_data_science_team.tools.h2o import H2O_AUTOML_DOCUMENTATION
 
 AGENT_NAME = "h2o_ml_agent"
 LOG_PATH = os.path.join(os.getcwd(), "logs/")
+
 
 class H2OMLAgent(BaseAgent):
     """
@@ -81,8 +82,8 @@ class H2OMLAgent(BaseAgent):
         A custom name for the MLflow run.
     checkpointer : langgraph.checkpoint.memory.MemorySaver, optional
         A checkpointer object for saving the agent's state. Defaults to None.
-    
-    
+
+
     Methods
     -------
     update_params(**kwargs)
@@ -109,7 +110,7 @@ class H2OMLAgent(BaseAgent):
         Returns the entire response dictionary.
     show()
         Visualizes the compiled graph as a Mermaid diagram.
-        
+
     Examples
     --------
     ```python
@@ -118,16 +119,16 @@ class H2OMLAgent(BaseAgent):
     from ai_data_science_team.ml_agents import H2OMLAgent
 
     llm = ChatOpenAI(model="gpt-4o-mini")
-    
+
     df = pd.read_csv("data/churn_data.csv")
-    
+
     ml_agent = H2OMLAgent(
-        model=llm, 
-        log=True, 
+        model=llm,
+        log=True,
         log_path=LOG_PATH,
-        model_directory=MODEL_PATH, 
+        model_directory=MODEL_PATH,
     )
-    
+
     ml_agent.invoke_agent(
         data_raw=df.drop(columns=["customerID"]),
         user_instructions="Please do classification on 'Churn'. Use a max runtime of 30 seconds.",
@@ -153,12 +154,12 @@ class H2OMLAgent(BaseAgent):
     model_path = ml_agent.get_model_path()
     model_path
     ```
-    
+
     Returns
     -------
-    H2OMLAgent : langchain.graphs.CompiledStateGraph 
+    H2OMLAgent : langchain.graphs.CompiledStateGraph
         An instance of the H2O ML agent.
-    
+
     """
 
     def __init__(
@@ -169,7 +170,7 @@ class H2OMLAgent(BaseAgent):
         log_path=None,
         file_name="h2o_automl.py",
         function_name="h2o_automl",
-        model_directory=None,  
+        model_directory=None,
         overwrite=True,
         human_in_the_loop=False,
         bypass_recommended_steps=False,
@@ -178,7 +179,7 @@ class H2OMLAgent(BaseAgent):
         mlflow_tracking_uri=None,
         mlflow_experiment_name="H2O AutoML",
         mlflow_run_name=None,
-        checkpointer: Optional[Checkpointer]=None,
+        checkpointer: Optional[Checkpointer] = None,
     ):
         self._params = {
             "model": model,
@@ -217,48 +218,54 @@ class H2OMLAgent(BaseAgent):
         self._compiled_graph = self._make_compiled_graph()
 
     async def ainvoke_agent(
-        self, 
-        data_raw: pd.DataFrame, 
-        user_instructions: str=None, 
-        target_variable: str=None, 
-        max_retries=3, 
+        self,
+        data_raw: pd.DataFrame,
+        user_instructions: str = None,
+        target_variable: str = None,
+        max_retries=3,
         retry_count=0,
-        **kwargs
+        **kwargs,
     ):
         """
         Asynchronously trains an H2O AutoML model for the provided dataset,
         saving the best model to disk if model_directory or log_path is available.
         """
-        response = await self._compiled_graph.ainvoke({
-            "user_instructions": user_instructions,
-            "data_raw": data_raw.to_dict(),
-            "target_variable": target_variable,
-            "max_retries": max_retries,
-            "retry_count": retry_count
-        }, **kwargs)
+        response = await self._compiled_graph.ainvoke(
+            {
+                "user_instructions": user_instructions,
+                "data_raw": data_raw.to_dict(),
+                "target_variable": target_variable,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
         self.response = response
         return None
 
     def invoke_agent(
         self,
         data_raw: pd.DataFrame,
-        user_instructions: str=None,
-        target_variable: str=None,
+        user_instructions: str = None,
+        target_variable: str = None,
         max_retries=3,
         retry_count=0,
-        **kwargs
+        **kwargs,
     ):
         """
         Synchronously trains an H2O AutoML model for the provided dataset,
         saving the best model to disk if model_directory or log_path is available.
         """
-        response = self._compiled_graph.invoke({
-            "user_instructions": user_instructions,
-            "data_raw": data_raw.to_dict(),
-            "target_variable": target_variable,
-            "max_retries": max_retries,
-            "retry_count": retry_count
-        }, **kwargs)
+        response = self._compiled_graph.invoke(
+            {
+                "user_instructions": user_instructions,
+                "data_raw": data_raw.to_dict(),
+                "target_variable": target_variable,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
         self.response = response
         return None
 
@@ -309,31 +316,33 @@ class H2OMLAgent(BaseAgent):
         Retrieves the agent's workflow summary, if logging is enabled.
         """
         if self.response and self.response.get("messages"):
-            summary = get_generic_summary(json.loads(self.response.get("messages")[-1].content))
+            summary = get_generic_summary(
+                json.loads(self.response.get("messages")[-1].content)
+            )
             if markdown:
                 return Markdown(summary)
             else:
                 return summary
-    
+
     def get_log_summary(self, markdown=False):
         """
         Logs a summary of the agent's operations, if logging is enabled.
         """
         if self.response:
-            if self.response.get('h2o_train_function_path'):
+            if self.response.get("h2o_train_function_path"):
                 log_details = f"""
 ## H2O Machine Learning Agent Log Summary:
 
-Function Path: {self.response.get('h2o_train_function_path')}
+Function Path: {self.response.get("h2o_train_function_path")}
 
-Function Name: {self.response.get('h2o_train_function_name')}
+Function Name: {self.response.get("h2o_train_function_name")}
 
 Best Model ID: {self.get_best_model_id()}
 
 Model Path: {self.get_model_path()}
                 """
                 if markdown:
-                    return Markdown(log_details) 
+                    return Markdown(log_details)
                 else:
                     return log_details
 
@@ -357,7 +366,7 @@ def make_h2o_ml_agent(
     checkpointer=None,
 ):
     """
-    Creates a machine learning agent that uses H2O for AutoML. 
+    Creates a machine learning agent that uses H2O for AutoML.
     The agent will:
       1. Optionally recommend ML steps,
       2. Creates Python code that sets up H2OAutoML,
@@ -365,8 +374,8 @@ def make_h2o_ml_agent(
       4. Fixes errors if needed,
       5. Optionally explains the code.
 
-    model_directory: Directory to save the model. 
-                    If None, defaults to log_path. 
+    model_directory: Directory to save the model.
+                    If None, defaults to log_path.
                     If both are None, skip saving.
     """
 
@@ -378,7 +387,7 @@ def make_h2o_ml_agent(
             log_path = "logs/"
         if not os.path.exists(log_path):
             os.makedirs(log_path)
-    
+
     # Check if H2O is installed
     try:
         import h2o
@@ -389,12 +398,13 @@ def make_h2o_ml_agent(
             "    pip install h2o\n\n"
             "Visit https://docs.h2o.ai/h2o/latest-stable/h2o-docs/downloading.html for details."
         ) from e
-        
+
     if human_in_the_loop:
         if checkpointer is None:
-            print("Human in the loop is enabled. A checkpointer is required. Setting to MemorySaver().")
+            print(
+                "Human in the loop is enabled. A checkpointer is required. Setting to MemorySaver()."
+            )
             checkpointer = MemorySaver()
-        
 
     # Define GraphState
     class GraphState(TypedDict):
@@ -450,7 +460,11 @@ def make_h2o_ml_agent(
                 
                 Return as a numbered list. You can return short code snippets to demonstrate actions. But do not return a fully coded solution. The H2O AutoML code will be generated separately by a Coding Agent.
             """,
-            input_variables=["user_instructions", "all_datasets_summary", "h2o_automl_documentation"]
+            input_variables=[
+                "user_instructions",
+                "all_datasets_summary",
+                "h2o_automl_documentation",
+            ],
         )
 
         data_raw = state.get("data_raw")
@@ -459,32 +473,33 @@ def make_h2o_ml_agent(
         all_datasets_summary_str = "\n\n".join(all_datasets_summary)
 
         steps_agent = recommend_steps_prompt | llm
-        recommended_steps = steps_agent.invoke({
-            "user_instructions": state.get("user_instructions"),
-            "all_datasets_summary": all_datasets_summary_str,
-            "h2o_automl_documentation": H2O_AUTOML_DOCUMENTATION
-        })
+        recommended_steps = steps_agent.invoke(
+            {
+                "user_instructions": state.get("user_instructions"),
+                "all_datasets_summary": all_datasets_summary_str,
+                "h2o_automl_documentation": H2O_AUTOML_DOCUMENTATION,
+            }
+        )
 
         return {
             "recommended_steps": format_recommended_steps(
-                recommended_steps.content.strip(),
-                heading="# Recommended ML Steps:"
+                recommended_steps.content.strip(), heading="# Recommended ML Steps:"
             ),
-            "all_datasets_summary": all_datasets_summary_str
+            "all_datasets_summary": all_datasets_summary_str,
         }
 
     # 2) Create code
     def create_h2o_code(state: GraphState):
         if bypass_recommended_steps:
             print(format_agent_name(AGENT_NAME))
-            
+
             data_raw = state.get("data_raw")
             df = pd.DataFrame.from_dict(data_raw)
             all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
             all_datasets_summary_str = "\n\n".join(all_datasets_summary)
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
-        
+
         print("    * CREATE H2O AUTOML CODE")
 
         code_prompt = PromptTemplate(
@@ -687,7 +702,7 @@ def make_h2o_ml_agent(
             """,
             input_variables=[
                 "user_instructions",
-                "function_name", 
+                "function_name",
                 "target_variable",
                 "recommended_steps",
                 "all_datasets_summary",
@@ -697,25 +712,27 @@ def make_h2o_ml_agent(
                 "mlflow_tracking_uri",
                 "mlflow_experiment_name",
                 "mlflow_run_name",
-            ]
+            ],
         )
 
         recommended_steps = state.get("recommended_steps", "")
         h2o_code_agent = code_prompt | llm | PythonOutputParser()
 
-        resp = h2o_code_agent.invoke({
-            "user_instructions": state.get("user_instructions"),
-            "function_name": function_name,
-            "target_variable": state.get("target_variable"),
-            "recommended_steps": recommended_steps,
-            "all_datasets_summary": all_datasets_summary_str,
-            "model_directory": model_directory,
-            "log_path": log_path,
-            "enable_mlflow": enable_mlflow,
-            "mlflow_tracking_uri": mlflow_tracking_uri,
-            "mlflow_experiment_name": mlflow_experiment_name,
-            "mlflow_run_name": mlflow_run_name,
-        })
+        resp = h2o_code_agent.invoke(
+            {
+                "user_instructions": state.get("user_instructions"),
+                "function_name": function_name,
+                "target_variable": state.get("target_variable"),
+                "recommended_steps": recommended_steps,
+                "all_datasets_summary": all_datasets_summary_str,
+                "model_directory": model_directory,
+                "log_path": log_path,
+                "enable_mlflow": enable_mlflow,
+                "mlflow_tracking_uri": mlflow_tracking_uri,
+                "mlflow_experiment_name": mlflow_experiment_name,
+                "mlflow_run_name": mlflow_run_name,
+            }
+        )
 
         resp = relocate_imports_inside_function(resp)
         resp = add_comments_to_top(resp, agent_name=AGENT_NAME)
@@ -726,7 +743,7 @@ def make_h2o_ml_agent(
             file_name=file_name,
             log=log,
             log_path=log_path,
-            overwrite=overwrite
+            overwrite=overwrite,
         )
 
         return {
@@ -735,31 +752,37 @@ def make_h2o_ml_agent(
             "h2o_train_file_name": f_name,
             "h2o_train_function_name": function_name,
         }
-        
+
     # Human Review
     prompt_text_human_review = "Are the following Machine Learning instructions correct? (Answer 'yes' or provide modifications)\n{steps}"
-    
+
     if not bypass_explain_code:
-        def human_review(state: GraphState) -> Command[Literal["recommend_ml_steps", "explain_h2o_code"]]:
+
+        def human_review(
+            state: GraphState,
+        ) -> Command[Literal["recommend_ml_steps", "explain_h2o_code"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto= 'explain_h2o_code',
+                yes_goto="explain_h2o_code",
                 no_goto="recommend_ml_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",
                 code_snippet_key="h2o_train_function",
             )
     else:
-        def human_review(state: GraphState) -> Command[Literal["recommend_ml_steps", "__end__"]]:
+
+        def human_review(
+            state: GraphState,
+        ) -> Command[Literal["recommend_ml_steps", "__end__"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto= '__end__',
+                yes_goto="__end__",
                 no_goto="recommend_ml_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",
-                code_snippet_key="h2o_train_function", 
+                code_snippet_key="h2o_train_function",
             )
 
     # 3) Execute code
@@ -773,12 +796,14 @@ def make_h2o_ml_agent(
             agent_function_name=state.get("h2o_train_function_name"),
             pre_processing=lambda data: pd.DataFrame.from_dict(data),
             post_processing=lambda x: x,
-            error_message_prefix="Error occurred during H2O AutoML: "
+            error_message_prefix="Error occurred during H2O AutoML: ",
         )
 
         # If no error, extract leaderboard, best_model_id, and model_path
         if not result["h2o_train_error"]:
-            if result["h2o_train_result"] and isinstance(result["h2o_train_result"], dict):
+            if result["h2o_train_result"] and isinstance(
+                result["h2o_train_result"], dict
+            ):
                 lb = result["h2o_train_result"].get("leaderboard", {})
                 best_id = result["h2o_train_result"].get("best_model_id", None)
                 mpath = result["h2o_train_result"].get("model_path", None)
@@ -812,7 +837,7 @@ def make_h2o_ml_agent(
             agent_name=AGENT_NAME,
             file_path=state.get("h2o_train_function_path"),
             function_name=state.get("h2o_train_function_name"),
-            log=log
+            log=log,
         )
 
     # 5) Final reporting node
@@ -830,7 +855,7 @@ def make_h2o_ml_agent(
             ],
             result_key="messages",
             role=AGENT_NAME,
-            custom_title="H2O Machine Learning Agent Outputs"
+            custom_title="H2O Machine Learning Agent Outputs",
         )
 
     node_functions = {
@@ -854,7 +879,7 @@ def make_h2o_ml_agent(
         max_retries_key="max_retries",
         retry_count_key="retry_count",
         human_in_the_loop=human_in_the_loop,
-        human_review_node_name="human_review",  
+        human_review_node_name="human_review",
         checkpointer=checkpointer,
         bypass_recommended_steps=bypass_recommended_steps,
         bypass_explain_code=bypass_explain_code,
@@ -862,4 +887,3 @@ def make_h2o_ml_agent(
     )
 
     return app
-

@@ -11,25 +11,25 @@ import json
 import pandas as pd
 from IPython.display import Markdown
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import BaseMessage
 from langgraph.types import Command, Checkpointer
 from langgraph.checkpoint.memory import MemorySaver
 
-from ai_data_science_team.templates import(
-    node_func_execute_agent_code_on_data, 
+from ai_data_science_team.templates import (
+    node_func_execute_agent_code_on_data,
     node_func_human_review,
-    node_func_fix_agent_code, 
+    node_func_fix_agent_code,
     node_func_report_agent_outputs,
     create_coding_agent_graph,
     BaseAgent,
 )
 from ai_data_science_team.parsers.parsers import PythonOutputParser
 from ai_data_science_team.utils.regex import (
-    relocate_imports_inside_function, 
-    add_comments_to_top, 
-    format_agent_name, 
-    format_recommended_steps, 
+    relocate_imports_inside_function,
+    add_comments_to_top,
+    format_agent_name,
+    format_recommended_steps,
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
@@ -41,17 +41,18 @@ LOG_PATH = os.path.join(os.getcwd(), "logs/")
 
 # Class
 
+
 class DataWranglingAgent(BaseAgent):
     """
-    Creates a data wrangling agent that can work with one or more datasets, performing operations such as 
-    joining/merging multiple datasets, reshaping, aggregating, encoding, creating computed features, 
-    and ensuring consistent data types. The agent generates a Python function to wrangle the data, 
+    Creates a data wrangling agent that can work with one or more datasets, performing operations such as
+    joining/merging multiple datasets, reshaping, aggregating, encoding, creating computed features,
+    and ensuring consistent data types. The agent generates a Python function to wrangle the data,
     executes the function, and logs the process (if enabled).
 
     The agent can handle:
     - A single dataset (provided as a dictionary of {column: list_of_values})
     - Multiple datasets (provided as a list of such dictionaries)
-    
+
     Key wrangling steps can include:
     - Merging or joining datasets
     - Pivoting/melting data for reshaping
@@ -132,10 +133,10 @@ class DataWranglingAgent(BaseAgent):
     llm = ChatOpenAI(model="gpt-4o-mini")
 
     data_wrangling_agent = DataWranglingAgent(
-        model=llm, 
+        model=llm,
         n_samples=30,
-        log=True, 
-        log_path="logs", 
+        log=True,
+        log_path="logs",
         human_in_the_loop=True
     )
 
@@ -164,7 +165,7 @@ class DataWranglingAgent(BaseAgent):
 
     data_wrangled = data_wrangling_agent.get_data_wrangled()
     ```
-    
+
     Returns
     -------
     DataWranglingAgent : langchain.graphs.CompiledStateGraph
@@ -203,7 +204,7 @@ class DataWranglingAgent(BaseAgent):
 
     def _make_compiled_graph(self):
         """
-        Create the compiled graph for the data wrangling agent. 
+        Create the compiled graph for the data wrangling agent.
         Running this method will reset the response to None.
         """
         self.response = None
@@ -220,10 +221,10 @@ class DataWranglingAgent(BaseAgent):
     async def ainvoke_agent(
         self,
         data_raw: Union[pd.DataFrame, dict, list],
-        user_instructions: str=None,
-        max_retries:int=3,
-        retry_count:int=0,
-        **kwargs
+        user_instructions: str = None,
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
     ):
         """
         Asynchronously wrangles the provided dataset(s) based on user instructions.
@@ -232,8 +233,8 @@ class DataWranglingAgent(BaseAgent):
         Parameters
         ----------
         data_raw : Union[pd.DataFrame, dict, list]
-            The raw dataset(s) to be wrangled. 
-            Can be a single DataFrame, a single dict ({col: list_of_values}), 
+            The raw dataset(s) to be wrangled.
+            Can be a single DataFrame, a single dict ({col: list_of_values}),
               or a list of dicts if multiple datasets are provided.
         user_instructions : str
             Instructions for data wrangling.
@@ -249,22 +250,25 @@ class DataWranglingAgent(BaseAgent):
         None
         """
         data_input = self._convert_data_input(data_raw)
-        response = await self._compiled_graph.ainvoke({
-            "user_instructions": user_instructions,
-            "data_raw": data_input,
-            "max_retries": max_retries,
-            "retry_count": retry_count
-        }, **kwargs)
+        response = await self._compiled_graph.ainvoke(
+            {
+                "user_instructions": user_instructions,
+                "data_raw": data_input,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
         self.response = response
         return None
 
     def invoke_agent(
         self,
         data_raw: Union[pd.DataFrame, dict, list],
-        user_instructions: str=None,
-        max_retries:int=3,
-        retry_count:int=0,
-        **kwargs
+        user_instructions: str = None,
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
     ):
         """
         Synchronously wrangles the provided dataset(s) based on user instructions.
@@ -289,12 +293,15 @@ class DataWranglingAgent(BaseAgent):
         None
         """
         data_input = self._convert_data_input(data_raw)
-        response = self._compiled_graph.invoke({
-            "user_instructions": user_instructions,
-            "data_raw": data_input,
-            "max_retries": max_retries,
-            "retry_count": retry_count
-        }, **kwargs)
+        response = self._compiled_graph.invoke(
+            {
+                "user_instructions": user_instructions,
+                "data_raw": data_input,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
         self.response = response
         return None
 
@@ -303,7 +310,9 @@ class DataWranglingAgent(BaseAgent):
         Retrieves the agent's workflow summary, if logging is enabled.
         """
         if self.response and self.response.get("messages"):
-            summary = get_generic_summary(json.loads(self.response.get("messages")[-1].content))
+            summary = get_generic_summary(
+                json.loads(self.response.get("messages")[-1].content)
+            )
             if markdown:
                 return Markdown(summary)
             else:
@@ -314,16 +323,16 @@ class DataWranglingAgent(BaseAgent):
         Logs a summary of the agent's operations, if logging is enabled.
         """
         if self.response:
-            if self.response.get('data_wrangler_function_path'):
+            if self.response.get("data_wrangler_function_path"):
                 log_details = f"""
 ## Data Wrangling Agent Log Summary:
 
-Function Path: {self.response.get('data_wrangler_function_path')}
+Function Path: {self.response.get("data_wrangler_function_path")}
 
-Function Name: {self.response.get('data_wrangler_function_name')}
+Function Name: {self.response.get("data_wrangler_function_name")}
                 """
                 if markdown:
-                    return Markdown(log_details) 
+                    return Markdown(log_details)
                 else:
                     return log_details
 
@@ -396,7 +405,9 @@ Function Name: {self.response.get('data_wrangler_function_name')}
         return None
 
     @staticmethod
-    def _convert_data_input(data_raw: Union[pd.DataFrame, dict, list]) -> Union[dict, list]:
+    def _convert_data_input(
+        data_raw: Union[pd.DataFrame, dict, list],
+    ) -> Union[dict, list]:
         """
         Internal utility to convert data_raw (which could be a DataFrame, dict, or list of dicts)
         into the format expected by the underlying agent (dict or list of dicts).
@@ -429,31 +440,36 @@ Function Name: {self.response.get('data_wrangler_function_name')}
                 elif isinstance(item, dict):
                     converted_list.append(item)
                 else:
-                    raise ValueError("List must contain only DataFrames or dictionaries.")
+                    raise ValueError(
+                        "List must contain only DataFrames or dictionaries."
+                    )
             return converted_list
 
-        raise ValueError("data_raw must be a DataFrame, a dict, or a list of dicts/DataFrames.")
+        raise ValueError(
+            "data_raw must be a DataFrame, a dict, or a list of dicts/DataFrames."
+        )
 
 
 # Function
 
+
 def make_data_wrangling_agent(
-    model, 
+    model,
     n_samples=30,
-    log=False, 
-    log_path=None, 
+    log=False,
+    log_path=None,
     file_name="data_wrangler.py",
     function_name="data_wrangler",
-    overwrite=True, 
-    human_in_the_loop=False, 
-    bypass_recommended_steps=False, 
+    overwrite=True,
+    human_in_the_loop=False,
+    bypass_recommended_steps=False,
     bypass_explain_code=False,
     checkpointer=None,
 ):
     """
     Creates a data wrangling agent that can be run on one or more datasets. The agent can be
     instructed to perform common data wrangling steps such as:
-    
+
     - Joining or merging multiple datasets
     - Reshaping data (pivoting, melting)
     - Aggregating data via groupby operations
@@ -484,10 +500,10 @@ def make_data_wrangling_agent(
     function_name : str, optional
         The name of the function to be generated. Defaults to "data_wrangler".
     overwrite : bool, optional
-        Whether or not to overwrite the log file if it already exists. If False, a unique file name will be created. 
+        Whether or not to overwrite the log file if it already exists. If False, a unique file name will be created.
         Defaults to True.
     human_in_the_loop : bool, optional
-        Whether or not to use human in the loop. If True, adds an interrupt and human-in-the-loop 
+        Whether or not to use human in the loop. If True, adds an interrupt and human-in-the-loop
         step that asks the user to review the data wrangling instructions. Defaults to False.
     bypass_recommended_steps : bool, optional
         Bypass the recommendation step, by default False
@@ -501,49 +517,51 @@ def make_data_wrangling_agent(
     ``` python
     from langchain_openai import ChatOpenAI
     import pandas as pd
-    
+
     df = pd.DataFrame({
         'category': ['A', 'B', 'A', 'C'],
         'value': [10, 20, 15, 5]
     })
-    
+
     llm = ChatOpenAI(model="gpt-4o-mini")
-    
+
     data_wrangling_agent = make_data_wrangling_agent(llm)
 
     response = data_wrangling_agent.invoke({
         "user_instructions": "Calculate the sum and mean of 'value' by 'category'.",
         "data_raw": df.to_dict(),
-        "max_retries":3, 
+        "max_retries":3,
         "retry_count":0
     })
     pd.DataFrame(response['data_wrangled'])
     ```
-    
+
     Returns
     -------
     app : langchain.graphs.CompiledStateGraph
         The data wrangling agent as a state graph.
     """
     llm = model
-    
+
     if human_in_the_loop:
         if checkpointer is None:
-            print("Human in the loop is enabled. A checkpointer is required. Setting to MemorySaver().")
+            print(
+                "Human in the loop is enabled. A checkpointer is required. Setting to MemorySaver()."
+            )
             checkpointer = MemorySaver()
-    
+
     # Human in th loop requires recommended steps
     if bypass_recommended_steps and human_in_the_loop:
         bypass_recommended_steps = False
         print("Bypass recommended steps set to False to enable human in the loop.")
-    
+
     # Setup Log Directory
     if log:
         if log_path is None:
             log_path = LOG_PATH
         if not os.path.exists(log_path):
-            os.makedirs(log_path)    
-    
+            os.makedirs(log_path)
+
     class GraphState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], operator.add]
         user_instructions: str
@@ -569,7 +587,9 @@ def make_data_wrangling_agent(
             # Single dataset scenario
             primary_dataset_name = "main"
             datasets = {primary_dataset_name: data_raw}
-        elif isinstance(data_raw, list) and all(isinstance(item, dict) for item in data_raw):
+        elif isinstance(data_raw, list) and all(
+            isinstance(item, dict) for item in data_raw
+        ):
             # Multiple datasets scenario
             datasets = {f"dataset_{i}": d for i, d in enumerate(data_raw, start=1)}
             primary_dataset_name = "dataset_1"
@@ -581,7 +601,9 @@ def make_data_wrangling_agent(
 
         # Create a summary for all datasets
         # We'll include a short sample and info for each dataset
-        all_datasets_summary = get_dataframe_summary(dataframes, n_sample=n_samples, skip_stats=True)
+        all_datasets_summary = get_dataframe_summary(
+            dataframes, n_sample=n_samples, skip_stats=True
+        )
 
         # Join all datasets summaries into one big text block
         all_datasets_summary_str = "\n\n".join(all_datasets_summary)
@@ -616,33 +638,43 @@ def make_data_wrangling_agent(
             1. Do not include steps to save files.
             2. Do not include unrelated user instructions that are not related to the data wrangling.
             """,
-            input_variables=["user_instructions", "recommended_steps", "all_datasets_summary"]
+            input_variables=[
+                "user_instructions",
+                "recommended_steps",
+                "all_datasets_summary",
+            ],
         )
 
         steps_agent = recommend_steps_prompt | llm
-        recommended_steps = steps_agent.invoke({
-            "user_instructions": state.get("user_instructions"),
-            "recommended_steps": state.get("recommended_steps"),
-            "all_datasets_summary": all_datasets_summary_str,
-        }) 
+        recommended_steps = steps_agent.invoke(
+            {
+                "user_instructions": state.get("user_instructions"),
+                "recommended_steps": state.get("recommended_steps"),
+                "all_datasets_summary": all_datasets_summary_str,
+            }
+        )
 
         return {
-            "recommended_steps": format_recommended_steps(recommended_steps.content.strip(), heading="# Recommended Data Wrangling Steps:"),
+            "recommended_steps": format_recommended_steps(
+                recommended_steps.content.strip(),
+                heading="# Recommended Data Wrangling Steps:",
+            ),
             "all_datasets_summary": all_datasets_summary_str,
         }
 
-    
     def create_data_wrangler_code(state: GraphState):
         if bypass_recommended_steps:
             print(format_agent_name(AGENT_NAME))
-            
+
             data_raw = state.get("data_raw")
 
             if isinstance(data_raw, dict):
                 # Single dataset scenario
                 primary_dataset_name = "main"
                 datasets = {primary_dataset_name: data_raw}
-            elif isinstance(data_raw, list) and all(isinstance(item, dict) for item in data_raw):
+            elif isinstance(data_raw, list) and all(
+                isinstance(item, dict) for item in data_raw
+            ):
                 # Multiple datasets scenario
                 datasets = {f"dataset_{i}": d for i, d in enumerate(data_raw, start=1)}
                 primary_dataset_name = "dataset_1"
@@ -650,20 +682,24 @@ def make_data_wrangling_agent(
                 raise ValueError("data_raw must be a dict or a list of dicts.")
 
             # Convert all datasets to DataFrames for inspection
-            dataframes = {name: pd.DataFrame.from_dict(d) for name, d in datasets.items()}
+            dataframes = {
+                name: pd.DataFrame.from_dict(d) for name, d in datasets.items()
+            }
 
             # Create a summary for all datasets
             # We'll include a short sample and info for each dataset
-            all_datasets_summary = get_dataframe_summary(dataframes, n_sample=n_samples, skip_stats=True)
+            all_datasets_summary = get_dataframe_summary(
+                dataframes, n_sample=n_samples, skip_stats=True
+            )
 
             # Join all datasets summaries into one big text block
             all_datasets_summary_str = "\n\n".join(all_datasets_summary)
-        
+
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
-            
+
         print("    * CREATE DATA WRANGLER CODE")
-        
+
         data_wrangling_prompt = PromptTemplate(
             template="""
             You are a Pandas Data Wrangling Coding Agent. Your job is to create a {function_name}() function that can be run on the provided data. You should use Pandas and NumPy for data wrangling operations.
@@ -708,76 +744,92 @@ def make_data_wrangling_agent(
             
             
             """,
-            input_variables=["recommended_steps", "user_instructions", "all_datasets_summary", "function_name"]
+            input_variables=[
+                "recommended_steps",
+                "user_instructions",
+                "all_datasets_summary",
+                "function_name",
+            ],
         )
 
         data_wrangling_agent = data_wrangling_prompt | llm | PythonOutputParser()
 
-        response = data_wrangling_agent.invoke({
-            "recommended_steps": state.get("recommended_steps"),
-            "user_instructions": state.get("user_instructions"),
-            "all_datasets_summary": all_datasets_summary_str,
-            "function_name": function_name
-        })
-        
+        response = data_wrangling_agent.invoke(
+            {
+                "recommended_steps": state.get("recommended_steps"),
+                "user_instructions": state.get("user_instructions"),
+                "all_datasets_summary": all_datasets_summary_str,
+                "function_name": function_name,
+            }
+        )
+
         response = relocate_imports_inside_function(response)
         response = add_comments_to_top(response, agent_name=AGENT_NAME)
-        
+
         # For logging: store the code generated
         file_path, file_name_2 = log_ai_function(
             response=response,
             file_name=file_name,
             log=log,
             log_path=log_path,
-            overwrite=overwrite
+            overwrite=overwrite,
         )
 
         return {
-            "data_wrangler_function" : response,
+            "data_wrangler_function": response,
             "data_wrangler_function_path": file_path,
             "data_wrangler_file_name": file_name_2,
             "data_wrangler_function_name": function_name,
-            "all_datasets_summary": all_datasets_summary_str
+            "all_datasets_summary": all_datasets_summary_str,
         }
 
-    
-    def human_review(state: GraphState) -> Command[Literal["recommend_wrangling_steps", "create_data_wrangler_code"]]:
+    def human_review(
+        state: GraphState,
+    ) -> Command[Literal["recommend_wrangling_steps", "create_data_wrangler_code"]]:
         return node_func_human_review(
             state=state,
             prompt_text="Are the following data wrangling steps correct? (Answer 'yes' or provide modifications)\n{steps}",
             yes_goto="create_data_wrangler_code",
             no_goto="recommend_wrangling_steps",
             user_instructions_key="user_instructions",
-            recommended_steps_key="recommended_steps"            
+            recommended_steps_key="recommended_steps",
         )
-        
-    # Human Review   
-    
+
+    # Human Review
+
     prompt_text_human_review = "Are the following data wrangling instructions correct? (Answer 'yes' or provide modifications)\n{steps}"
-    
+
     if not bypass_explain_code:
-        def human_review(state: GraphState) -> Command[Literal["recommend_wrangling_steps", "explain_data_wrangler_code"]]:
+
+        def human_review(
+            state: GraphState,
+        ) -> Command[
+            Literal["recommend_wrangling_steps", "explain_data_wrangler_code"]
+        ]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto= 'explain_data_wrangler_code',
+                yes_goto="explain_data_wrangler_code",
                 no_goto="recommend_wrangling_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",
                 code_snippet_key="data_wrangler_function",
             )
     else:
-        def human_review(state: GraphState) -> Command[Literal["recommend_wrangling_steps", "__end__"]]:
+
+        def human_review(
+            state: GraphState,
+        ) -> Command[Literal["recommend_wrangling_steps", "__end__"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto= '__end__',
+                yes_goto="__end__",
                 no_goto="recommend_wrangling_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",
-                code_snippet_key="data_wrangler_function", 
+                code_snippet_key="data_wrangler_function",
             )
-    
+
     def execute_data_wrangler_code(state: GraphState):
         return node_func_execute_agent_code_on_data(
             state=state,
@@ -787,10 +839,12 @@ def make_data_wrangling_agent(
             code_snippet_key="data_wrangler_function",
             agent_function_name=state.get("data_wrangler_function_name"),
             # pre_processing=pre_processing,
-            post_processing=lambda df: df.to_dict() if isinstance(df, pd.DataFrame) else df,
-            error_message_prefix="An error occurred during data wrangling: "
+            post_processing=lambda df: df.to_dict()
+            if isinstance(df, pd.DataFrame)
+            else df,
+            error_message_prefix="An error occurred during data wrangling: ",
         )
-        
+
     def fix_data_wrangler_code(state: GraphState):
         data_wrangler_prompt = """
         You are a Data Wrangling Agent. Your job is to create a {function_name}() function that can be run on the data provided. The function is currently broken and needs to be fixed.
@@ -810,14 +864,14 @@ def make_data_wrangling_agent(
             state=state,
             code_snippet_key="data_wrangler_function",
             error_key="data_wrangler_error",
-            llm=llm,  
+            llm=llm,
             prompt_template=data_wrangler_prompt,
             agent_name=AGENT_NAME,
             log=log,
             file_path=state.get("data_wrangler_function_path"),
             function_name=state.get("data_wrangler_function_name"),
         )
-    
+
     # Final reporting node
     def report_agent_outputs(state: GraphState):
         return node_func_report_agent_outputs(
@@ -831,9 +885,9 @@ def make_data_wrangling_agent(
             ],
             result_key="messages",
             role=AGENT_NAME,
-            custom_title="Data Wrangling Agent Outputs"
+            custom_title="Data Wrangling Agent Outputs",
         )
-        
+
     # Define the graph
     node_functions = {
         "recommend_wrangling_steps": recommend_wrangling_steps,
@@ -843,7 +897,7 @@ def make_data_wrangling_agent(
         "fix_data_wrangler_code": fix_data_wrangler_code,
         "report_agent_outputs": report_agent_outputs,
     }
-    
+
     app = create_coding_agent_graph(
         GraphState=GraphState,
         node_functions=node_functions,
@@ -860,9 +914,5 @@ def make_data_wrangling_agent(
         bypass_explain_code=bypass_explain_code,
         agent_name=AGENT_NAME,
     )
-        
+
     return app
-
-
-
-
