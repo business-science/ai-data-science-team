@@ -5,6 +5,22 @@ import os
 
 from typing_extensions import Tuple, List, Dict, Optional
 
+ALLOW_UNSAFE_PICKLE_ENV_VAR = "ALLOW_UNSAFE_PICKLE"
+
+
+def _pickle_loading_allowed() -> bool:
+    """
+    Pickle deserialization executes arbitrary code.
+    This helper enforces an explicit opt-in via env var to avoid RCE on untrusted data.
+    """
+    return os.getenv(ALLOW_UNSAFE_PICKLE_ENV_VAR, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
 
 @tool(response_format="content_and_artifact")
 def load_directory(
@@ -59,7 +75,11 @@ def load_directory(
 
         try:
             # Attempt to auto-detect and load the file
-            data_frames[filename] = auto_load_file(file_path).to_dict()
+            df_or_error = auto_load_file(file_path)
+            if isinstance(df_or_error, pd.DataFrame):
+                data_frames[filename] = df_or_error.to_dict()
+            else:
+                data_frames[filename] = f"Error loading file: {df_or_error}"
         except Exception as e:
             # If loading fails, record the error message
             data_frames[filename] = f"Error loading file: {e}"
@@ -86,9 +106,17 @@ def load_file(file_path: str) -> Tuple[str, Dict]:
         A tuple containing a message and a dictionary of the data frame.
     """
     print(f"    * Tool: load_file | {file_path}")
+    df_or_error = auto_load_file(file_path)
+
+    if isinstance(df_or_error, pd.DataFrame):
+        return (
+            f"Returned the following data frame from this file: {file_path}",
+            df_or_error.to_dict(),
+        )
+
     return (
-        f"Returned the following data frame from this file: {file_path}",
-        auto_load_file(file_path).to_dict(),
+        f"Could not load file: {file_path}. {df_or_error}",
+        {"file_path": file_path, "error": str(df_or_error)},
     )
 
 
@@ -459,7 +487,17 @@ def load_pickle(file_path: str) -> pd.DataFrame:
     """
     Tool: load_pickle
     Description: Loads a Pickle file into a pandas DataFrame.
+    Security:
+    Pickle deserialization can execute arbitrary code. Loading pickle files is
+    disabled by default and requires explicit opt-in via the environment
+    variable ALLOW_UNSAFE_PICKLE=1. Only enable this for trusted data sources.
     """
     import pandas as pd
+
+    if not _pickle_loading_allowed():
+        raise ValueError(
+            "Pickle loading is disabled by default to avoid arbitrary code execution. "
+            f"Set {ALLOW_UNSAFE_PICKLE_ENV_VAR}=1 only when loading trusted data."
+        )
 
     return pd.read_pickle(file_path)
