@@ -680,11 +680,11 @@ def {function_name}(connection):
 
         def human_review(
             state: GraphState,
-        ) -> Command[Literal["recommend_sql_steps", "explain_sql_database_code"]]:
+        ) -> Command[Literal["recommend_sql_steps", "report_agent_outputs"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto="explain_sql_database_code",
+                yes_goto="report_agent_outputs",
                 no_goto="recommend_sql_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",

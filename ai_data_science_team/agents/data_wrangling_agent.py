@@ -804,12 +804,12 @@ def make_data_wrangling_agent(
         def human_review(
             state: GraphState,
         ) -> Command[
-            Literal["recommend_wrangling_steps", "explain_data_wrangler_code"]
+            Literal["recommend_wrangling_steps", "report_agent_outputs"]
         ]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto="explain_data_wrangler_code",
+                yes_goto="report_agent_outputs",
                 no_goto="recommend_wrangling_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",

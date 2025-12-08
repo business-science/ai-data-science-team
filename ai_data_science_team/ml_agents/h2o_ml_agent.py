@@ -760,11 +760,11 @@ def make_h2o_ml_agent(
 
         def human_review(
             state: GraphState,
-        ) -> Command[Literal["recommend_ml_steps", "explain_h2o_code"]]:
+        ) -> Command[Literal["recommend_ml_steps", "report_agent_outputs"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto="explain_h2o_code",
+                yes_goto="report_agent_outputs",
                 no_goto="recommend_ml_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",

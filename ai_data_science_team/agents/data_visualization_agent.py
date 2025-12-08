@@ -704,11 +704,11 @@ def make_data_visualization_agent(
 
         def human_review(
             state: GraphState,
-        ) -> Command[Literal["chart_instructor", "explain_data_visualization_code"]]:
+        ) -> Command[Literal["chart_instructor", "report_agent_outputs"]]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto="explain_data_visualization_code",
+                yes_goto="report_agent_outputs",
                 no_goto="chart_instructor",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",

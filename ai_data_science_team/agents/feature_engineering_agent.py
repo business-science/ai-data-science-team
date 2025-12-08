@@ -627,13 +627,13 @@ def make_feature_engineering_agent(
         ) -> Command[
             Literal[
                 "recommend_feature_engineering_steps",
-                "explain_feature_engineering_code",
+                "report_agent_outputs",
             ]
         ]:
             return node_func_human_review(
                 state=state,
                 prompt_text=prompt_text_human_review,
-                yes_goto="explain_feature_engineering_code",
+                yes_goto="report_agent_outputs",
                 no_goto="recommend_feature_engineering_steps",
                 user_instructions_key="user_instructions",
                 recommended_steps_key="recommended_steps",
