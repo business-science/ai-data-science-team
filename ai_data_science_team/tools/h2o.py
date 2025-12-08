@@ -1,9 +1,8 @@
-
-from typing import Optional, Dict, Any, Union, List
+from typing_extensions import Optional, Dict, Any, List
 from langchain.tools import tool
 
 
-@tool("train_h2o_automl", return_direct=True, response_format='content_and_artifact')
+@tool("train_h2o_automl", return_direct=True, response_format="content_and_artifact")
 def train_h2o_automl(
     data_raw: List[Dict[str, Any]],
     target: str = "Churn",
@@ -19,15 +18,15 @@ def train_h2o_automl(
     sort_metric: str = "AUC",
     model_directory: Optional[str] = None,
     log_path: Optional[str] = None,
-    enable_mlflow: bool = False,               
-    mlflow_tracking_uri: Optional[str] = None, 
+    enable_mlflow: bool = False,
+    mlflow_tracking_uri: Optional[str] = None,
     mlflow_experiment_name: str = "H2O AutoML",
     run_name: str = None,
-    **kwargs
+    **kwargs,
 ) -> str:
     """
     A tool to train an H2O AutoML model on the provided data.
-    Optionally logs results to MLflow if `enable_mlflow=True`. 
+    Optionally logs results to MLflow if `enable_mlflow=True`.
 
     Parameters
     ----------
@@ -86,6 +85,7 @@ def train_h2o_automl(
     # Optional MLflow usage
     if enable_mlflow:
         import mlflow
+
         if mlflow_tracking_uri:
             mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(mlflow_experiment_name)
@@ -93,6 +93,7 @@ def train_h2o_automl(
     else:
         # Dummy context manager to skip MLflow if not enabled
         from contextlib import nullcontext
+
         run_context = nullcontext()
 
     exclude_algos = exclude_algos or ["DeepLearning"]  # default if not provided
@@ -106,23 +107,26 @@ def train_h2o_automl(
         if enable_mlflow and run is not None:
             run_id = run.info.run_id
             import mlflow
+
             # Log user-specified parameters
-            mlflow.log_params({
-                "target": target,
-                "max_runtime_secs": max_runtime_secs,
-                "exclude_algos": str(exclude_algos),
-                "balance_classes": balance_classes,
-                "nfolds": nfolds,
-                "seed": seed,
-                "max_models": max_models,
-                "stopping_metric": stopping_metric,
-                "stopping_tolerance": stopping_tolerance,
-                "stopping_rounds": stopping_rounds,
-                "sort_metric": sort_metric,
-                "model_directory": model_directory,
-                "log_path": log_path,
-                **kwargs
-            })
+            mlflow.log_params(
+                {
+                    "target": target,
+                    "max_runtime_secs": max_runtime_secs,
+                    "exclude_algos": str(exclude_algos),
+                    "balance_classes": balance_classes,
+                    "nfolds": nfolds,
+                    "seed": seed,
+                    "max_models": max_models,
+                    "stopping_metric": stopping_metric,
+                    "stopping_tolerance": stopping_tolerance,
+                    "stopping_rounds": stopping_rounds,
+                    "sort_metric": sort_metric,
+                    "model_directory": model_directory,
+                    "log_path": log_path,
+                    **kwargs,
+                }
+            )
 
         # Initialize H2O
         h2o.init()
@@ -142,7 +146,7 @@ def train_h2o_automl(
             stopping_tolerance=stopping_tolerance,
             stopping_rounds=stopping_rounds,
             sort_metric=sort_metric,
-            **kwargs
+            **kwargs,
         )
 
         # Train
@@ -170,7 +174,7 @@ def train_h2o_automl(
             "model_flavor": "H2O AutoML",
             "model_path": model_path,
             "best_model_id": aml.leader.model_id,
-            "metrics": top_metrics  # all metrics from the top row
+            "metrics": top_metrics,  # all metrics from the top row
         }
 
         # If using MLflow, log the top metrics
@@ -190,7 +194,7 @@ def train_h2o_automl(
             "best_model_id": aml.leader.model_id,
             "model_path": model_path,
             "model_results": model_results,
-            "mlflow_run_id": run_id
+            "mlflow_run_id": run_id,
         }
 
     return json.dumps(output, indent=2)
@@ -541,7 +545,7 @@ The H2O AutoML algorithm was first released in H2O 3.12.0.1 on June 6, 2017 by E
 #     Returns
 #     -------
 #     str
-#         A stringified JSON of the H2O AutoML leaderboard. 
+#         A stringified JSON of the H2O AutoML leaderboard.
 #         (Use JSON or CSV format as desired for your tooling.)
 #     """
 #     leaderboard_df = h2o_agent.get_leaderboard()
@@ -588,8 +592,8 @@ The H2O AutoML algorithm was first released in H2O 3.12.0.1 on June 6, 2017 by E
 
 # @tool("predict_with_h2o_model", return_direct=True)
 # def predict_with_h2o_model(
-#     h2o_agent, 
-#     data: List[Dict[str, Any]], 
+#     h2o_agent,
+#     data: List[Dict[str, Any]],
 #     model_id_or_path: Optional[str] = None
 # ) -> str:
 #     """
@@ -640,4 +644,3 @@ The H2O AutoML algorithm was first released in H2O 3.12.0.1 on June 6, 2017 by E
 
 #     preds = model.predict(h2o_frame).as_data_frame()
 #     return preds.to_json(orient="records")
-

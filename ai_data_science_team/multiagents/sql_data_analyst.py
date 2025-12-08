@@ -7,10 +7,9 @@ from langgraph.graph import START, END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
 
-from typing import TypedDict, Annotated, Sequence
 import operator
 
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, Annotated, Sequence
 
 import pandas as pd
 import json

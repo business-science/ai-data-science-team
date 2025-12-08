@@ -4,7 +4,7 @@
 # * Agents: Data Wrangling Agent
 
 # Libraries
-from typing import TypedDict, Annotated, Sequence, Literal, Union, Optional
+from typing_extensions import TypedDict, Annotated, Sequence, Literal, Union, Optional
 import operator
 import os
 import json
@@ -13,7 +13,7 @@ from IPython.display import Markdown
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import BaseMessage
-from langgraph.types import Command, Checkpointer
+from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
 
 from ai_data_science_team.templates import (

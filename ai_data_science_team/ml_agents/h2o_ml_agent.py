@@ -5,7 +5,7 @@
 
 import os
 import json
-from typing import TypedDict, Annotated, Sequence, Literal, Optional
+from typing_extensions import TypedDict, Annotated, Sequence, Literal, Optional
 import operator
 
 import pandas as pd

@@ -5,7 +5,7 @@
 
 
 # Libraries
-from typing import TypedDict, Annotated, Sequence, Literal
+from typing_extensions import TypedDict, Annotated, Sequence, Literal
 import operator
 
 from langchain_core.prompts import PromptTemplate

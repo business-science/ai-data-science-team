@@ -5,7 +5,7 @@ from langgraph.types import Checkpointer
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from typing import TypedDict, Annotated, Sequence, Union
+from typing_extensions import TypedDict, Annotated, Sequence, Union
 import operator
 
 import pandas as pd

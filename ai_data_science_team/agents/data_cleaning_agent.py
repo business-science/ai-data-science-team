@@ -4,7 +4,7 @@
 # * Agents: Data Cleaning Agent
 
 # Libraries
-from typing import TypedDict, Annotated, Sequence, Literal
+from typing_extensions import TypedDict, Annotated, Sequence, Literal
 import operator
 
 from langchain_core.prompts import PromptTemplate
@@ -291,9 +291,9 @@ class DataCleaningAgent(BaseAgent):
                 log_details = f"""
 ## Data Cleaning Agent Log Summary:
 
-Function Path: {self.response.get('data_cleaner_function_path')}
+Function Path: {self.response.get("data_cleaner_function_path")}
 
-Function Name: {self.response.get('data_cleaner_function_name')}
+Function Name: {self.response.get("data_cleaner_function_name")}
                 """
                 if markdown:
                     return Markdown(log_details)

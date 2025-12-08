@@ -1,12 +1,18 @@
-from typing import Any, Optional, Annotated, Sequence, Dict
+from typing_extensions import Any, Optional, Annotated, Sequence, Dict
 import operator
 import pandas as pd
 
 from IPython.display import Markdown
 
 from langchain_core.messages import BaseMessage, AIMessage
-from langgraph.prebuilt import create_react_agent, ToolNode
-from langgraph.prebuilt.chat_agent_executor import AgentState
+from langgraph.prebuilt import ToolNode
+
+try:
+    from langgraph.prebuilt import create_react_agent
+    from langgraph.prebuilt.chat_agent_executor import AgentState
+except ImportError:
+    from langchain.agents import create_react_agent, AgentState
+
 from langgraph.graph import START, END, StateGraph
 from langgraph.types import Checkpointer
 

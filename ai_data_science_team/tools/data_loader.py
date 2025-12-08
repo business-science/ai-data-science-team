@@ -1,47 +1,44 @@
-
 from langchain.tools import tool
-from langgraph.prebuilt import InjectedState
 
 import pandas as pd
 import os
 
-from typing import Tuple, List, Dict, Optional, Annotated
+from typing_extensions import Tuple, List, Dict, Optional
 
 
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def load_directory(
-    directory_path: str = os.getcwd(),  
-    file_type: Optional[str] = None
+    directory_path: str = os.getcwd(), file_type: Optional[str] = None
 ) -> Tuple[str, Dict]:
     """
     Tool: load_directory
-    Description: Loads all recognized tabular files in a directory. 
-                 If file_type is specified (e.g., 'csv'), only files 
+    Description: Loads all recognized tabular files in a directory.
+                 If file_type is specified (e.g., 'csv'), only files
                  with that extension are loaded.
-    
+
     Parameters:
     ----------
     directory_path : str
         The path to the directory to load. Defaults to the current working directory.
 
     file_type : str, optional
-        The extension of the file type you want to load exclusively 
-        (e.g., 'csv', 'xlsx', 'parquet'). If None or not provided, 
+        The extension of the file type you want to load exclusively
+        (e.g., 'csv', 'xlsx', 'parquet'). If None or not provided,
         attempts to load all recognized tabular files.
-    
+
     Returns:
     -------
     Tuple[str, Dict]
         A tuple containing a message and a dictionary of data frames.
     """
     print(f"    * Tool: load_directory | {directory_path}")
-    
+
     import os
     import pandas as pd
-    
+
     if directory_path is None:
         return "No directory path provided.", {}
-    
+
     if not os.path.isdir(directory_path):
         return f"Directory not found: {directory_path}", {}
 
@@ -49,7 +46,7 @@ def load_directory(
 
     for filename in os.listdir(directory_path):
         file_path = os.path.join(directory_path, filename)
-        
+
         # Skip directories
         if os.path.isdir(file_path):
             continue
@@ -59,7 +56,7 @@ def load_directory(
             # Make sure extension check is case-insensitive
             if not filename.lower().endswith(f".{file_type.lower()}"):
                 continue
-        
+
         try:
             # Attempt to auto-detect and load the file
             data_frames[filename] = auto_load_file(file_path).to_dict()
@@ -69,33 +66,35 @@ def load_directory(
 
     return (
         f"Returned the following data frames: {list(data_frames.keys())}",
-        data_frames
+        data_frames,
     )
 
 
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def load_file(file_path: str) -> Tuple[str, Dict]:
     """
     Automatically loads a file based on its extension.
-    
+
     Parameters:
     ----------
     file_path : str
         The path to the file to load.
-        
+
     Returns:
     -------
     Tuple[str, Dict]
         A tuple containing a message and a dictionary of the data frame.
     """
     print(f"    * Tool: load_file | {file_path}")
-    return f"Returned the following data frame from this file: {file_path}", auto_load_file(file_path).to_dict()
+    return (
+        f"Returned the following data frame from this file: {file_path}",
+        auto_load_file(file_path).to_dict(),
+    )
 
 
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def list_directory_contents(
-    directory_path: str = os.getcwd(),  
-    show_hidden: bool = False
+    directory_path: str = os.getcwd(), show_hidden: bool = False
 ) -> Tuple[List[str], List[Dict]]:
     """
     Tool: list_directory_contents
@@ -106,30 +105,30 @@ def list_directory_contents(
     Returns:
         tuple:
             - content (list[str]): A list of filenames/folders (suitable for display)
-            - artifact (list[dict]): A list of dictionaries where each dict includes 
+            - artifact (list[dict]): A list of dictionaries where each dict includes
               the keys {"filename": <name>, "type": <'file' or 'directory'>}.
               This structure can be easily converted to a pandas DataFrame.
     """
     print(f"    * Tool: list_directory_contents | {directory_path}")
     import os
-    
+
     if directory_path is None:
         return "No directory path provided.", []
-    
+
     if not os.path.isdir(directory_path):
         return f"Directory not found: {directory_path}", []
-    
+
     items = []
     for item in os.listdir(directory_path):
         # If show_hidden is False, skip items starting with '.'
-        if not show_hidden and item.startswith('.'):
+        if not show_hidden and item.startswith("."):
             continue
         items.append(item)
     items.reverse()
 
     # content: just the raw list of item names (files/folders).
     content = items.copy()
-    
+
     content.append(f"Total items: {len(items)}")
     content.append(f"Directory: {directory_path}")
 
@@ -137,19 +136,19 @@ def list_directory_contents(
     artifact = []
     for item in items:
         item_path = os.path.join(directory_path, item)
-        artifact.append({
-            "filename": item,
-            "type": "directory" if os.path.isdir(item_path) else "file"
-        })
+        artifact.append(
+            {
+                "filename": item,
+                "type": "directory" if os.path.isdir(item_path) else "file",
+            }
+        )
 
     return content, artifact
 
 
-
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def list_directory_recursive(
-    directory_path: str = os.getcwd(), 
-    show_hidden: bool = False
+    directory_path: str = os.getcwd(), show_hidden: bool = False
 ) -> Tuple[str, List[Dict]]:
     """
     Tool: list_directory_recursive
@@ -177,13 +176,13 @@ def list_directory_recursive(
     # 1) lines for building the "tree" string
     # 2) records in a list of dicts for easy DataFrame creation
     import os
-    
+
     if directory_path is None:
         return "No directory path provided.", {}
-    
+
     if not os.path.isdir(directory_path):
         return f"Directory not found: {directory_path}", {}
-    
+
     lines = []
     records = []
 
@@ -200,7 +199,7 @@ def list_directory_recursive(
         items.sort()
 
         for item in items:
-            if not show_hidden and item.startswith('.'):
+            if not show_hidden and item.startswith("."):
                 continue
 
             full_path = os.path.join(path, item)
@@ -210,45 +209,53 @@ def list_directory_recursive(
             if os.path.isdir(full_path):
                 # Directory
                 lines.append(f"{prefix}{item}/")
-                records.append({
-                    "type": "directory",
-                    "name": item,
-                    "parent_path": path,
-                    "absolute_path": full_path
-                })
+                records.append(
+                    {
+                        "type": "directory",
+                        "name": item,
+                        "parent_path": path,
+                        "absolute_path": full_path,
+                    }
+                )
                 # Recursively descend
                 recurse(full_path, indent_level + 1)
             else:
                 # File
                 lines.append(f"{prefix}- {item}")
-                records.append({
-                    "type": "file",
-                    "name": item,
-                    "parent_path": path,
-                    "absolute_path": full_path
-                })
+                records.append(
+                    {
+                        "type": "file",
+                        "name": item,
+                        "parent_path": path,
+                        "absolute_path": full_path,
+                    }
+                )
 
     # Kick off recursion
     if os.path.isdir(directory_path):
         # Add the top-level directory to lines/records if you like
         dir_name = os.path.basename(os.path.normpath(directory_path)) or directory_path
         lines.append(f"{dir_name}/")  # Show the root as well
-        records.append({
-            "type": "directory",
-            "name": dir_name,
-            "parent_path": os.path.dirname(directory_path),
-            "absolute_path": os.path.abspath(directory_path)
-        })
+        records.append(
+            {
+                "type": "directory",
+                "name": dir_name,
+                "parent_path": os.path.dirname(directory_path),
+                "absolute_path": os.path.abspath(directory_path),
+            }
+        )
         recurse(directory_path, indent_level=1)
     else:
         # If the given path is not a directory, just return a note
         lines.append(f"{directory_path} is not a directory.")
-        records.append({
-            "type": "error",
-            "name": directory_path,
-            "parent_path": None,
-            "absolute_path": os.path.abspath(directory_path)
-        })
+        records.append(
+            {
+                "type": "error",
+                "name": directory_path,
+                "parent_path": None,
+                "absolute_path": os.path.abspath(directory_path),
+            }
+        )
 
     # content: multiline string with the entire tree
     content = "\n".join(lines)
@@ -258,7 +265,7 @@ def list_directory_recursive(
     return content, artifact
 
 
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def get_file_info(file_path: str) -> Tuple[str, List[Dict]]:
     """
     Tool: get_file_info
@@ -277,7 +284,7 @@ def get_file_info(file_path: str) -> Tuple[str, List[Dict]]:
         content, artifact = get_file_info("/path/to/mydata.csv")
     """
     print(f"    * Tool: get_file_info | {file_path}")
-    
+
     # Ensure the file exists
     import os
     import time
@@ -309,11 +316,9 @@ def get_file_info(file_path: str) -> Tuple[str, List[Dict]]:
     return content_str, artifact
 
 
-@tool(response_format='content_and_artifact')
+@tool(response_format="content_and_artifact")
 def search_files_by_pattern(
-    directory_path: str = os.getcwd(),  
-    pattern: str = "*.csv", 
-    recursive: bool = False
+    directory_path: str = os.getcwd(), pattern: str = "*.csv", recursive: bool = False
 ) -> Tuple[str, List[Dict]]:
     """
     Tool: search_files_by_pattern
@@ -337,7 +342,7 @@ def search_files_by_pattern(
         content, artifact = search_files_by_pattern("/path/to/folder", "*.csv", recursive=True)
     """
     print(f"    * Tool: search_files_by_pattern | {directory_path}")
-    
+
     import os
     import fnmatch
 
@@ -371,20 +376,22 @@ def search_files_by_pattern(
 
 # Loaders
 
+
 def auto_load_file(file_path: str) -> pd.DataFrame:
     """
     Auto loads a file based on its extension.
-    
+
     Parameters:
     ----------
     file_path : str
         The path to the file to load.
-    
+
     Returns:
     -------
     pd.DataFrame
     """
     import pandas as pd
+
     try:
         ext = file_path.split(".")[-1].lower()
         if ext == "csv":
@@ -402,6 +409,7 @@ def auto_load_file(file_path: str) -> pd.DataFrame:
     except Exception as e:
         return f"Error loading file: {e}"
 
+
 def load_csv(file_path: str) -> pd.DataFrame:
     """
     Tool: load_csv
@@ -412,7 +420,9 @@ def load_csv(file_path: str) -> pd.DataFrame:
       pd.DataFrame
     """
     import pandas as pd
+
     return pd.read_csv(file_path)
+
 
 def load_excel(file_path: str, sheet_name=None) -> pd.DataFrame:
     """
@@ -420,7 +430,9 @@ def load_excel(file_path: str, sheet_name=None) -> pd.DataFrame:
     Description: Loads an Excel file into a pandas DataFrame.
     """
     import pandas as pd
+
     return pd.read_excel(file_path, sheet_name=sheet_name)
+
 
 def load_json(file_path: str) -> pd.DataFrame:
     """
@@ -428,8 +440,10 @@ def load_json(file_path: str) -> pd.DataFrame:
     Description: Loads a JSON file or NDJSON into a pandas DataFrame.
     """
     import pandas as pd
+
     # For simple JSON arrays
     return pd.read_json(file_path, orient="records", lines=False)
+
 
 def load_parquet(file_path: str) -> pd.DataFrame:
     """
@@ -437,7 +451,9 @@ def load_parquet(file_path: str) -> pd.DataFrame:
     Description: Loads a Parquet file into a pandas DataFrame.
     """
     import pandas as pd
+
     return pd.read_parquet(file_path)
+
 
 def load_pickle(file_path: str) -> pd.DataFrame:
     """
@@ -445,4 +461,5 @@ def load_pickle(file_path: str) -> pd.DataFrame:
     Description: Loads a Pickle file into a pandas DataFrame.
     """
     import pandas as pd
+
     return pd.read_pickle(file_path)

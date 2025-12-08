@@ -4,13 +4,13 @@
 # * Agents: Feature Engineering Agent
 
 # Libraries
-from typing import TypedDict, Annotated, Sequence, Literal
+from typing_extensions import TypedDict, Annotated, Sequence, Literal
 import operator
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import BaseMessage
 
-from langgraph.types import Command, Checkpointer
+from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
 
 import os
