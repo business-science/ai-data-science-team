@@ -382,7 +382,20 @@ class SQLDataAnalyst(BaseAgent):
             If True, returns the summary as a Markdown-formatted string.
         """
         if self.response and self.response.get("messages"):
-            agents = [msg.role for msg in self.response["messages"]]
+            agents = []
+            seen = set()
+            allowed = {
+                "sql_database_agent",
+                "data_visualization_agent",
+            }
+            role_to_content = {}
+            for msg in self.response["messages"]:
+                role = getattr(msg, "role", None) or getattr(msg, "type", None)
+                if role in allowed and role not in seen:
+                    agents.append(role)
+                    seen.add(role)
+                if role in allowed and role not in role_to_content:
+                    role_to_content[role] = getattr(msg, "content", "")
             agent_labels = [
                 f"- **Agent {i + 1}:** {role}\n" for i, role in enumerate(agents)
             ]
@@ -391,11 +404,12 @@ class SQLDataAnalyst(BaseAgent):
                 + "\n".join(agent_labels)
             )
             reports = []
-            for msg in self.response["messages"]:
+            for role in agents:
+                content = role_to_content.get(role, "")
                 try:
-                    reports.append(get_generic_summary(json.loads(msg.content)))
+                    reports.append(get_generic_summary(json.loads(content)))
                 except Exception:
-                    reports.append(msg.content)
+                    reports.append(content)
             summary = "\n\n" + header + "\n\n".join(reports)
             return Markdown(summary) if markdown else summary
 
