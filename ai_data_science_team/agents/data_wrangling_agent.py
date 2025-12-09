@@ -32,12 +32,14 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
 
 # Setup Logging Path
 AGENT_NAME = "data_wrangling_agent"
 LOG_PATH = os.path.join(os.getcwd(), "logs/")
+MAX_SUMMARY_COLUMNS = 30
+MAX_SUMMARY_CHARS = 5000
 
 # Class
 
@@ -543,6 +545,36 @@ def make_data_wrangling_agent(
     """
     llm = model
 
+    DEFAULT_WRANGLING_STEPS = format_recommended_steps(
+        """
+1. Inspect and standardize column names (lowercase, strip spaces) if needed.
+2. Normalize data types (numeric/categorical/datetime); coerce where reasonable.
+3. Handle missing values (simple imputation or flagging) without dropping data unless instructed.
+4. For multiple datasets, identify join keys and merge appropriately; avoid Cartesian products.
+5. Handle categorical encoding where necessary (one-hot or category cleanup).
+6. Remove duplicates and obvious anomalies, but avoid dropping rows unless requested.
+7. Return a single pandas DataFrame with the wrangled data.
+        """,
+        heading="# Recommended Data Wrangling Steps:",
+    )
+
+    def _summarize_data_raw(data_raw) -> str:
+        """Lightweight schema summary for dict or list-of-dict inputs."""
+        if isinstance(data_raw, dict):
+            dataframes = {"main": pd.DataFrame.from_dict(data_raw)}
+        elif isinstance(data_raw, list) and all(isinstance(item, dict) for item in data_raw):
+            dataframes = {f"dataset_{i}": pd.DataFrame.from_dict(d) for i, d in enumerate(data_raw, start=1)}
+        else:
+            raise ValueError("data_raw must be a dict or a list of dicts.")
+
+        summaries = get_dataframe_summary(
+            dataframes,
+            n_sample=min(n_samples, 5),
+            skip_stats=True,
+        )
+        summary_text = "\n\n".join([s[:MAX_SUMMARY_CHARS] for s in summaries])
+        return summary_text
+
     if human_in_the_loop:
         if checkpointer is None:
             print(
@@ -574,6 +606,8 @@ def make_data_wrangling_agent(
         data_wrangler_function_path: str
         data_wrangler_function_name: str
         data_wrangler_error: str
+        data_wrangler_error_log_path: str
+        data_wrangling_summary: str
         max_retries: int
         retry_count: int
 
@@ -583,30 +617,7 @@ def make_data_wrangling_agent(
 
         data_raw = state.get("data_raw")
 
-        if isinstance(data_raw, dict):
-            # Single dataset scenario
-            primary_dataset_name = "main"
-            datasets = {primary_dataset_name: data_raw}
-        elif isinstance(data_raw, list) and all(
-            isinstance(item, dict) for item in data_raw
-        ):
-            # Multiple datasets scenario
-            datasets = {f"dataset_{i}": d for i, d in enumerate(data_raw, start=1)}
-            primary_dataset_name = "dataset_1"
-        else:
-            raise ValueError("data_raw must be a dict or a list of dicts.")
-
-        # Convert all datasets to DataFrames for inspection
-        dataframes = {name: pd.DataFrame.from_dict(d) for name, d in datasets.items()}
-
-        # Create a summary for all datasets
-        # We'll include a short sample and info for each dataset
-        all_datasets_summary = get_dataframe_summary(
-            dataframes, n_sample=n_samples, skip_stats=True
-        )
-
-        # Join all datasets summaries into one big text block
-        all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+        all_datasets_summary_str = _summarize_data_raw(data_raw)
 
         # Prepare the prompt:
         # We now include summaries for all datasets, not just the primary dataset.
@@ -663,42 +674,19 @@ def make_data_wrangling_agent(
         }
 
     def create_data_wrangler_code(state: GraphState):
-        if bypass_recommended_steps:
-            print(format_agent_name(AGENT_NAME))
-
-            data_raw = state.get("data_raw")
-
-            if isinstance(data_raw, dict):
-                # Single dataset scenario
-                primary_dataset_name = "main"
-                datasets = {primary_dataset_name: data_raw}
-            elif isinstance(data_raw, list) and all(
-                isinstance(item, dict) for item in data_raw
-            ):
-                # Multiple datasets scenario
-                datasets = {f"dataset_{i}": d for i, d in enumerate(data_raw, start=1)}
-                primary_dataset_name = "dataset_1"
-            else:
-                raise ValueError("data_raw must be a dict or a list of dicts.")
-
-            # Convert all datasets to DataFrames for inspection
-            dataframes = {
-                name: pd.DataFrame.from_dict(d) for name, d in datasets.items()
-            }
-
-            # Create a summary for all datasets
-            # We'll include a short sample and info for each dataset
-            all_datasets_summary = get_dataframe_summary(
-                dataframes, n_sample=n_samples, skip_stats=True
-            )
-
-            # Join all datasets summaries into one big text block
-            all_datasets_summary_str = "\n\n".join(all_datasets_summary)
-
-        else:
-            all_datasets_summary_str = state.get("all_datasets_summary")
-
+        print(format_agent_name(AGENT_NAME))
         print("    * CREATE DATA WRANGLER CODE")
+
+        data_raw = state.get("data_raw")
+
+        if bypass_recommended_steps:
+            all_datasets_summary_str = _summarize_data_raw(data_raw)
+            steps_for_prompt = state.get("recommended_steps") or DEFAULT_WRANGLING_STEPS
+        else:
+            all_datasets_summary_str = state.get("all_datasets_summary") or _summarize_data_raw(
+                data_raw
+            )
+            steps_for_prompt = state.get("recommended_steps") or DEFAULT_WRANGLING_STEPS
 
         data_wrangling_prompt = PromptTemplate(
             template="""
@@ -735,10 +723,12 @@ def make_data_wrangling_agent(
             Avoid Errors:
             1. If the incoming data is not a list. Convert it to a list first. 
             2. Do not specify data types inside the function arguments.
+            3. Do not hardcode column names; derive column usage from the provided data structures and user instructions.
             
             Important Notes:
             1. Do Not use Print statements to display the data. Return the data frame instead with the data wrangling operation performed.
             2. Do not plot graphs. Only return the data frame.
+            3. Only return a single pandas DataFrame and nothing else.
             
             Make sure to explain any non-trivial steps with inline comments. Follow user instructions. Comment code thoroughly.
             
@@ -756,7 +746,7 @@ def make_data_wrangling_agent(
 
         response = data_wrangling_agent.invoke(
             {
-                "recommended_steps": state.get("recommended_steps"),
+                "recommended_steps": steps_for_prompt,
                 "user_instructions": state.get("user_instructions"),
                 "all_datasets_summary": all_datasets_summary_str,
                 "function_name": function_name,
@@ -781,6 +771,7 @@ def make_data_wrangling_agent(
             "data_wrangler_file_name": file_name_2,
             "data_wrangler_function_name": function_name,
             "all_datasets_summary": all_datasets_summary_str,
+            "recommended_steps": steps_for_prompt,
         }
 
     def human_review(
@@ -842,13 +833,74 @@ def make_data_wrangling_agent(
             data_format="dataframe_list",
         )
 
+        validation_error = error
+        wrangling_summary = None
+        df_out = None
+
+        if error is None:
+            try:
+                # result can be dict or list (depending on user code)
+                if isinstance(result, list):
+                    df_list = [pd.DataFrame(r) for r in result]
+                    df_out = pd.concat(df_list, ignore_index=True)
+                else:
+                    df_out = pd.DataFrame(result)
+
+                df_raw = state.get("data_raw")
+                if isinstance(df_raw, list):
+                    df_raw_df = pd.concat([pd.DataFrame(r) for r in df_raw], ignore_index=True)
+                else:
+                    df_raw_df = pd.DataFrame(df_raw)
+
+                rows_before, rows_after = len(df_raw_df), len(df_out)
+                cols_before, cols_after = set(df_raw_df.columns), set(df_out.columns)
+                dropped_cols = sorted(list(cols_before - cols_after))
+                added_cols = sorted(list(cols_after - cols_before))
+                dtype_changes = []
+                for col in df_raw_df.columns:
+                    if col in df_out.columns:
+                        before = str(df_raw_df[col].dtype)
+                        after = str(df_out[col].dtype)
+                        if before != after:
+                            dtype_changes.append(f"{col}: {before} -> {after}")
+
+                wrangling_summary = "\n".join(
+                    [
+                        "# Data Wrangling Summary",
+                        f"Rows: {rows_before} -> {rows_after} (Δ {rows_after - rows_before})",
+                        f"Columns: {len(cols_before)} -> {len(cols_after)} (Δ {len(cols_after) - len(cols_before)})",
+                        f"Dropped Columns: {', '.join(dropped_cols) if dropped_cols else 'None'}",
+                        f"Added Columns: {', '.join(added_cols) if added_cols else 'None'}",
+                        "Dtype Changes:",
+                        "\n".join(dtype_changes) if dtype_changes else "None",
+                    ]
+                )
+            except Exception as exc:
+                validation_error = f"Wrangled output is not a valid table: {exc}"
+
         error_prefixed = (
-            f"An error occurred during data wrangling: {error}" if error else None
+            f"An error occurred during data wrangling: {validation_error}"
+            if validation_error
+            else None
         )
 
+        error_log_path = None
+        if error_prefixed and log:
+            error_log_path = log_ai_error(
+                error_message=error_prefixed,
+                file_name=f"{file_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else LOG_PATH,
+                overwrite=False,
+            )
+            if error_log_path:
+                print(f"      Error logged to: {error_log_path}")
+
         return {
-            "data_wrangled": result,
+            "data_wrangled": df_out.to_dict() if error_prefixed is None else None,
             "data_wrangler_error": error_prefixed,
+            "data_wrangler_error_log_path": error_log_path,
+            "data_wrangling_summary": wrangling_summary,
         }
 
     def fix_data_wrangler_code(state: GraphState):
@@ -888,6 +940,8 @@ def make_data_wrangling_agent(
                 "data_wrangler_function_path",
                 "data_wrangler_function_name",
                 "data_wrangler_error",
+                "data_wrangler_error_log_path",
+                "data_wrangling_summary",
             ],
             result_key="messages",
             role=AGENT_NAME,
