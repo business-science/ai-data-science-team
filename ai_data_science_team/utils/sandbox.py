@@ -122,6 +122,13 @@ def _build_runner_script() -> str:
                 "TypeError",
                 "KeyError",
                 "Exception",
+                "object",
+                "type",
+                "getattr",
+                "setattr",
+                "property",
+                "__build_class__",
+                "str",
             ]
             if hasattr(builtins, name)
         }
@@ -136,7 +143,19 @@ def _build_runner_script() -> str:
             def _blocked(*args, **kwargs):
                 raise RuntimeError("Network access is disabled in sandboxed execution.")
 
-            socket.socket = _blocked  # type: ignore
+            try:
+                class NoNetSocket(socket.socket):  # type: ignore
+                    def connect(self, *args, **kwargs):
+                        raise RuntimeError("Network access is disabled in sandboxed execution.")
+
+                    def connect_ex(self, *args, **kwargs):
+                        raise RuntimeError("Network access is disabled in sandboxed execution.")
+
+                socket.socket = NoNetSocket  # type: ignore
+            except Exception:
+                # Fallback: if subclassing fails, at least block create_connection/getaddrinfo
+                pass
+
             socket.create_connection = _blocked  # type: ignore
             socket.getaddrinfo = _blocked  # type: ignore
             socket.create_server = _blocked  # type: ignore
@@ -224,7 +243,12 @@ def _build_runner_script() -> str:
                 result = _to_jsonable(result)
                 sys.stdout.write(json.dumps({"result": result, "error": None}))
             except Exception as exc:
-                sys.stdout.write(json.dumps({"result": None, "error": f"Function execution failed: {exc}"}))
+                try:
+                    import traceback
+                    tb = traceback.format_exc()
+                except Exception:
+                    tb = ""
+                sys.stdout.write(json.dumps({"result": None, "error": f"Function execution failed: {exc}\\n{tb}"}))
 
         if __name__ == "__main__":
             main()

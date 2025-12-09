@@ -35,7 +35,7 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
 
 # Setup
@@ -514,6 +514,50 @@ def make_feature_engineering_agent(
         if not os.path.exists(log_path):
             os.makedirs(log_path)
 
+    # Defaults and helpers
+    MAX_SUMMARY_COLUMNS = 30
+
+    DEFAULT_FEATURE_STEPS = format_recommended_steps(
+        """
+1. Convert features to appropriate data types based on sample values.
+2. Remove string/categorical features with unique values equal to the dataset size.
+3. Remove constant features (single unique value).
+4. For high-cardinality categoricals (category frequency < 5%): bucket infrequent values to "Other".
+5. One-hot encode categorical variables after bucketing.
+6. Convert boolean features to integers (0/1) after encoding.
+7. Create datetime-based features when datetime columns exist (year, month, day, etc.).
+8. If a target variable is provided:
+   - If categorical, label-encode it.
+   - Otherwise, convert to numeric if needed and keep in the returned DataFrame.
+9. Return a single DataFrame with engineered features (and target if provided).
+        """,
+        heading="# Recommended Feature Engineering Steps:",
+    )
+
+    def _summarize_df_for_prompt(df: pd.DataFrame) -> str:
+        """
+        Lightweight schema summary to keep prompts small and focused.
+        """
+        df_limited = df.iloc[:, :MAX_SUMMARY_COLUMNS] if df.shape[1] > MAX_SUMMARY_COLUMNS else df
+        schema = []
+        n_rows = len(df_limited)
+        for col in df_limited.columns:
+            series = df_limited[col]
+            dtype = str(series.dtype)
+            missing_pct = float(series.isna().mean() * 100) if n_rows > 0 else 0.0
+            n_unique = int(series.nunique(dropna=True))
+            sample_vals = series.dropna().unique()[:3].tolist()
+            schema.append(
+                {
+                    "column": col,
+                    "dtype": dtype,
+                    "missing_pct": round(missing_pct, 2),
+                    "n_unique": n_unique,
+                    "sample_values": sample_vals,
+                }
+            )
+        return json.dumps({"n_rows": n_rows, "n_cols": df_limited.shape[1], "schema": schema}, indent=2)
+
     # Define GraphState for the router
     class GraphState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], operator.add]
@@ -528,6 +572,7 @@ def make_feature_engineering_agent(
         feature_engineer_file_name: str
         feature_engineer_function_name: str
         feature_engineer_error: str
+        feature_engineer_error_log_path: str
         max_retries: int
         retry_count: int
 
@@ -595,9 +640,7 @@ def make_feature_engineering_agent(
         data_raw = state.get("data_raw")
         df = pd.DataFrame.from_dict(data_raw)
 
-        all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-
-        all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+        all_datasets_summary_str = _summarize_df_for_prompt(df)
 
         steps_agent = recommend_steps_prompt | llm
         recommended_steps = steps_agent.invoke(
@@ -661,12 +704,14 @@ def make_feature_engineering_agent(
             data_raw = state.get("data_raw")
             df = pd.DataFrame.from_dict(data_raw)
 
-            all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-
-            all_datasets_summary_str = "\n\n".join(all_datasets_summary)
-
+            all_datasets_summary_str = _summarize_df_for_prompt(df)
+            steps_for_prompt = DEFAULT_FEATURE_STEPS
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
+            steps_for_prompt = state.get("recommended_steps", DEFAULT_FEATURE_STEPS)
+
+            if not steps_for_prompt:
+                steps_for_prompt = DEFAULT_FEATURE_STEPS
 
         print("    * CREATE FEATURE ENGINEERING CODE")
 
@@ -677,29 +722,34 @@ def make_feature_engineering_agent(
             Recommended Steps:
             {recommended_steps}
             
-            Use this information about the data to help determine how to feature engineer the data:
-            
+            Use the schema summary below to decide appropriate transformations. Keep the prompt small; do not request more data.
+
             Target Variable (if provided): {target_variable}
-            
-            Below are summaries of all datasets provided. Use this information about the data to help determine how to feature engineer the data:
+
+            Dataset Schema Summary (capped columns):
             {all_datasets_summary}
             
             You can use Pandas, Numpy, and Scikit Learn libraries to feature engineer the data.
-            
-            Return Python code in ```python``` format with a single function definition, {function_name}(data_raw), including all imports inside the function.
+            Prefer deterministic, dependency-light transforms (use pandas and numpy; avoid external libraries unless necessary). If you must use sklearn, include the import and keep it minimal.
+            Do NOT hardcode domain-specific column names or derived features unless explicitly requested by the user. Derive column lists from the schema (dtypes, unique counts) and user instructions only.
+            Do NOT invent domain-specific engineered features (e.g., tenure buckets, custom ratios) unless the user requested them. Stick to generic transformations: type coercion, missing imputation, high-cardinality bucketing, one-hot encoding, boolean to int.
+            Bucket high-cardinality categoricals using a frequency threshold (<5% -> "Other") before one-hot encoding.
 
-            Return code to provide the feature engineering function:
-            
-            def {function_name}(data_raw):
-                import pandas as pd
-                import numpy as np
-                ...
-                return data_engineered
+            Return Python code in ```python``` format with a single function definition, {function_name}(data_raw), including all imports inside the function. The function must:
+            - Separate features and target (if provided), encode the target only if categorical, and reattach target to the returned DataFrame.
+            - Impute missing values (simple strategies are fine).
+            - One-hot encode categorical columns, with high-cardinality bucketing first.
+            - Convert booleans to integers after encoding.
+            - Return a pandas DataFrame (not fit objects), and do not persist models.
             
             Best Practices and Error Preventions:
             - Handle missing values in numeric and categorical features before transformations.
             - Avoid creating highly correlated features unless explicitly instructed.
             - Convert Boolean to integer values (0/1) after one-hot encoding unless otherwise instructed.
+            - Preserve the target variable in the returned DataFrame when provided.
+            - Do not return fit objects (encoders/imputers); only return the transformed DataFrame.
+            - For high-cardinality categoricals: bucket categories with frequency < 5% to 'Other' before encoding.
+            - Avoid hardcoded column names; build feature lists programmatically from the schema and user instructions.
             
             Avoid the following errors:
             
@@ -714,7 +764,7 @@ def make_feature_engineering_agent(
 
             """,
             input_variables=[
-                "recommeded_steps",
+                "recommended_steps",
                 "target_variable",
                 "all_datasets_summary",
                 "function_name",
@@ -727,7 +777,7 @@ def make_feature_engineering_agent(
 
         response = feature_engineering_agent.invoke(
             {
-                "recommended_steps": state.get("recommended_steps"),
+                "recommended_steps": steps_for_prompt,
                 "target_variable": state.get("target_variable"),
                 "all_datasets_summary": all_datasets_summary_str,
                 "function_name": function_name,
@@ -766,13 +816,46 @@ def make_feature_engineering_agent(
             data_format="dataframe",
         )
 
+        # Validate result structure
+        validation_error = None
+        df_out = None
+        if error is None:
+            try:
+                df_out = pd.DataFrame(result)
+                target = state.get("target_variable")
+                if target and target not in df_out.columns:
+                    validation_error = (
+                        f"Target column '{target}' missing from engineered output."
+                    )
+            except Exception as exc:
+                validation_error = f"Engineered output is not a valid table: {exc}"
+        else:
+            validation_error = error
+
         error_prefixed = (
-            f"An error occurred during feature engineering: {error}" if error else None
+            f"An error occurred during feature engineering: {validation_error}"
+            if validation_error
+            else None
         )
 
+        error_log_path = None
+        if error_prefixed and log:
+            error_log_path = log_ai_error(
+                error_message=error_prefixed,
+                file_name=f"{function_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else "logs/",
+                overwrite=False,
+            )
+            if error_log_path:
+                print(f"      Error logged to: {error_log_path}")
+
+        result_payload = df_out.to_dict() if error_prefixed is None else None
+
         return {
-            "data_engineered": result,
+            "data_engineered": result_payload,
             "feature_engineer_error": error_prefixed,
+            "feature_engineer_error_log_path": error_log_path,
         }
 
     def fix_feature_engineering_code(state: GraphState):
@@ -812,6 +895,7 @@ def make_feature_engineering_agent(
                 "feature_engineer_function_path",
                 "feature_engineer_function_name",
                 "feature_engineer_error",
+                "feature_engineer_error_log_path",
             ],
             result_key="messages",
             role=AGENT_NAME,

@@ -59,3 +59,38 @@ def log_ai_function(response: str, file_name: str, log: bool = True, log_path: s
     
     else:
         return (None, None)
+
+
+def log_ai_error(error_message: str, file_name: str = "errors.log", log: bool = True, log_path: str = "./logs/", overwrite: bool = False):
+    """
+    Logs an error message to a file.
+
+    Parameters
+    ----------
+    error_message : str
+        The error message to log.
+    file_name : str, optional
+        Name of the error log file. Defaults to "errors.log".
+    log : bool, optional
+        Whether to log the error. Defaults to True.
+    log_path : str, optional
+        Directory path to store the log file. Defaults to "./logs/".
+    overwrite : bool, optional
+        If True, overwrite the file. If False, append to the file. Defaults to False.
+
+    Returns
+    -------
+    str or None
+        The path to the log file if logging occurred, otherwise None.
+    """
+    if not log:
+        return None
+
+    os.makedirs(log_path, exist_ok=True)
+    file_path = os.path.join(log_path, file_name)
+    mode = "w" if overwrite else "a"
+    with open(file_path, mode, encoding="utf-8") as f:
+        f.write(error_message + "\n")
+
+    print(f"      Error logged to: {file_path}")
+    return file_path
