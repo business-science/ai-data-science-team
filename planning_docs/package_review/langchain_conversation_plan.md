@@ -34,8 +34,11 @@ Goal: migrate agents to a message-first structure (`HumanMessage`/`AIMessage`) f
 - [x] mlflow_tools_agent (ml_agents)
 
 ### Next phase: non-core modules
-- ds_agents: eda_tools_agent
-- ml_agents: h2o_ml_agent, mlflow_tools_agent
+- Multiagents:
+  - sql_data_analyst (wrap sub-agents with message-first, system hint; expose subgraph; add demo)
+  - pandas_data_analyst (same: message-first entrypoints, system hint, subgraph visibility; add demo)
+  - supervised/team variants (if any) should align to message-first and expose subgraphs
+- Apps: update notebooks/demos to use `invoke_messages` where appropriate
 
 ### Risks & Mitigations
 - **Transcript bloat**: use `log_tool_calls` to toggle tool-call messages.
