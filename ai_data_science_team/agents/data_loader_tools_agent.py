@@ -209,6 +209,15 @@ class DataLoaderToolsAgent(BaseAgent):
         if self.response:
             artifact = self.response.get("data_loader_artifacts")
 
+        # Back-compat: if exactly one tool artifact and caller didn't request DF, unwrap to legacy shape
+        if (
+            not as_dataframe
+            and isinstance(artifact, dict)
+            and len(artifact) == 1
+            and isinstance(next(iter(artifact.values())), dict)
+        ):
+            artifact = next(iter(artifact.values()))
+
         # Handle directory-style artifacts: {filename: {"status","data","error"}}
         if isinstance(artifact, dict) and all(
             isinstance(v, dict) and "data" in v for v in artifact.values()
@@ -351,15 +360,20 @@ def make_data_loader_tools_agent(
 
         last_ai_message = AIMessage(getattr(last_ai, "content", ""), role=AGENT_NAME)
 
-        # Grab the last tool artifact, if any
+        # Collect artifacts per tool if possible
+        artifacts = {}
         last_tool_artifact = None
-        for msg in reversed(internal_messages):
-            if hasattr(msg, "artifact"):
-                last_tool_artifact = msg.artifact
-                break
-            if isinstance(msg, dict) and "artifact" in msg:
+        for msg in internal_messages:
+            art = getattr(msg, "artifact", None)
+            name = getattr(msg, "name", None)
+            if art is not None:
+                key = name or f"artifact_{len(artifacts)+1}"
+                artifacts[key] = art
+                last_tool_artifact = art
+            elif isinstance(msg, dict) and "artifact" in msg:
+                key = msg.get("name") or f"artifact_{len(artifacts)+1}"
+                artifacts[key] = msg["artifact"]
                 last_tool_artifact = msg["artifact"]
-                break
 
         tool_calls = get_tool_call_names(internal_messages)
         if tool_calls and log_tool_calls:
@@ -382,7 +396,7 @@ def make_data_loader_tools_agent(
         return {
             "messages": [last_ai_message],
             "internal_messages": internal_messages,
-            "data_loader_artifacts": last_tool_artifact,
+            "data_loader_artifacts": artifacts if artifacts else last_tool_artifact,
             "tool_calls": tool_calls,
         }
 

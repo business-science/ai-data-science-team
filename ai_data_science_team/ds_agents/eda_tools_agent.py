@@ -202,6 +202,15 @@ class EDAToolsAgent(BaseAgent):
         artifact = None
         if self.response:
             artifact = self.response.get("eda_artifacts")
+        # Back-compat: if there is exactly one tool artifact, unwrap it so older
+        # callers that expected a flat dict still work.
+        if (
+            not as_dataframe
+            and isinstance(artifact, dict)
+            and len(artifact) == 1
+            and isinstance(next(iter(artifact.values())), dict)
+        ):
+            artifact = next(iter(artifact.values()))
         if not as_dataframe:
             return artifact
         # Try to coerce to DataFrame sensibly

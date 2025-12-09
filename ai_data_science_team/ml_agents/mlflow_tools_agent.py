@@ -225,10 +225,27 @@ class MLflowToolsAgent(BaseAgent):
         """
         Returns the MLflow artifacts from the agent's response.
         """
-        if as_dataframe:
-            return pd.DataFrame(self.response["mlflow_artifacts"])
-        else:
-            return self.response["mlflow_artifacts"]
+        artifact = None
+        if self.response:
+            artifact = self.response.get("mlflow_artifacts")
+
+        # Back-compat: if exactly one tool artifact and caller didn't request DF, unwrap to legacy shape
+        if (
+            not as_dataframe
+            and isinstance(artifact, dict)
+            and len(artifact) == 1
+            and isinstance(next(iter(artifact.values())), dict)
+        ):
+            artifact = next(iter(artifact.values()))
+
+        if not as_dataframe:
+            return artifact
+
+        # Try to convert to DataFrame sensibly
+        try:
+            return pd.DataFrame(artifact)
+        except Exception:
+            return pd.DataFrame({"artifact": [artifact]})
 
     def get_ai_message(self, markdown: bool = False):
         """
@@ -338,21 +355,27 @@ def make_mlflow_tools_agent(
         # Get the last AI message
         last_ai_message = AIMessage(internal_messages[-1].content, role=AGENT_NAME)
 
-        # Get the last tool artifact safely
+        # Collect artifacts per tool if possible
+        artifacts = {}
         last_tool_artifact = None
-        if len(internal_messages) > 1:
-            last_message = internal_messages[-2]  # Get second-to-last message
-            if hasattr(last_message, "artifact"):  # Check if it has an "artifact"
-                last_tool_artifact = last_message.artifact
-            elif isinstance(last_message, dict) and "artifact" in last_message:
-                last_tool_artifact = last_message["artifact"]
+        for msg in internal_messages:
+            art = getattr(msg, "artifact", None)
+            name = getattr(msg, "name", None)
+            if art is not None:
+                key = name or f"artifact_{len(artifacts)+1}"
+                artifacts[key] = art
+                last_tool_artifact = art
+            elif isinstance(msg, dict) and "artifact" in msg:
+                key = msg.get("name") or f"artifact_{len(artifacts)+1}"
+                artifacts[key] = msg["artifact"]
+                last_tool_artifact = msg["artifact"]
 
         tool_calls = get_tool_call_names(internal_messages)
 
         return {
             "messages": [last_ai_message],
             "internal_messages": internal_messages,
-            "mlflow_artifacts": last_tool_artifact,
+            "mlflow_artifacts": artifacts if artifacts else last_tool_artifact,
             "tool_calls": tool_calls,
         }
 
