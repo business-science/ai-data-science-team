@@ -21,7 +21,6 @@ import pandas as pd
 from IPython.display import Markdown
 
 from ai_data_science_team.templates import (
-    node_func_execute_agent_code_on_data,
     node_func_human_review,
     node_func_fix_agent_code,
     node_func_report_agent_outputs,
@@ -39,6 +38,7 @@ from ai_data_science_team.utils.regex import (
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
 from ai_data_science_team.utils.logging import log_ai_function
 from ai_data_science_team.utils.plotly import plotly_from_dict
+from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
 
 # Setup
 AGENT_NAME = "data_visualization_agent"
@@ -730,17 +730,25 @@ def make_data_visualization_agent(
             )
 
     def execute_data_visualization_code(state):
-        return node_func_execute_agent_code_on_data(
-            state=state,
-            data_key="data_raw",
-            result_key="plotly_graph",
-            error_key="data_visualization_error",
-            code_snippet_key="data_visualization_function",
-            agent_function_name=state.get("data_visualization_function_name"),
-            pre_processing=lambda data: pd.DataFrame.from_dict(data),
-            # post_processing=lambda df: df.to_dict() if isinstance(df, pd.DataFrame) else df,
-            error_message_prefix="An error occurred during data visualization: ",
+        print("    * EXECUTE DATA VISUALIZATION CODE (SANDBOXED)")
+
+        result, error = run_code_sandboxed_subprocess(
+            code_snippet=state.get("data_visualization_function"),
+            function_name=state.get("data_visualization_function_name"),
+            data=state.get("data_raw"),
+            timeout=15,
+            memory_limit_mb=512,
+            data_format="dataframe",
         )
+
+        error_prefixed = (
+            f"An error occurred during data visualization: {error}" if error else None
+        )
+
+        return {
+            "plotly_graph": result,
+            "data_visualization_error": error_prefixed,
+        }
 
     def fix_data_visualization_code(state: GraphState):
         prompt = """
