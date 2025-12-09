@@ -34,11 +34,24 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.tools.h2o import H2O_AUTOML_DOCUMENTATION
 
 AGENT_NAME = "h2o_ml_agent"
 LOG_PATH = os.path.join(os.getcwd(), "logs/")
+MAX_SUMMARY_COLUMNS = 30
+MAX_SUMMARY_CHARS = 5000
+
+DEFAULT_ML_STEPS = format_recommended_steps(
+    """
+1. Verify target column exists and has sufficient non-null values; ensure target is categorical for classification or numeric for regression.
+2. Review column types; let H2OAutoML handle encoding, avoid heavy feature engineering here.
+3. Cap runtime and/or max_models to fit resource budget; disable deep learning if not needed.
+4. Use stratified folds (nfolds) if target is imbalanced; consider balance_classes=True for classification.
+5. Save leaderboard and best model; optionally log metrics/artifacts to MLflow if enabled.
+    """,
+    heading="# Recommended ML Steps:",
+)
 
 
 class H2OMLAgent(BaseAgent):
@@ -477,6 +490,7 @@ def make_h2o_ml_agent(
         h2o_train_file_name: str
         h2o_train_function_name: str
         h2o_train_error: str
+        h2o_train_error_log_path: str
         max_retries: int
         retry_count: int
 
@@ -523,8 +537,12 @@ def make_h2o_ml_agent(
 
         data_raw = state.get("data_raw")
         df = pd.DataFrame.from_dict(data_raw)
-        all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-        all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+        all_datasets_summary = get_dataframe_summary(
+            [df], n_sample=min(n_samples, 5), skip_stats=True
+        )
+        all_datasets_summary_str = "\n\n".join(
+            [s[:MAX_SUMMARY_CHARS] for s in all_datasets_summary]
+        )
 
         steps_agent = recommend_steps_prompt | llm
         recommended_steps = steps_agent.invoke(
@@ -549,10 +567,16 @@ def make_h2o_ml_agent(
 
             data_raw = state.get("data_raw")
             df = pd.DataFrame.from_dict(data_raw)
-            all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-            all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+            all_datasets_summary = get_dataframe_summary(
+                [df], n_sample=min(n_samples, 5), skip_stats=True
+            )
+            all_datasets_summary_str = "\n\n".join(
+                [s[:MAX_SUMMARY_CHARS] for s in all_datasets_summary]
+            )
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
+
+        steps_for_prompt = state.get("recommended_steps") or DEFAULT_ML_STEPS
 
         print("    * CREATE H2O AUTOML CODE")
 
@@ -582,11 +606,13 @@ def make_h2o_ml_agent(
             - Use Recommended Steps to guide any advanced parameters (e.g., cross-validation folds, 
             balancing classes, extended training time, stacking) that might improve performance.
             - If the user does not specify anything special, use H2OAutoML defaults (including stacked ensembles).
+            - Include safe defaults: max_runtime_secs (e.g., 30) and max_models (e.g., 20) to avoid runaway jobs; exclude deep learning by default.
             - Focus on maximizing accuracy (or the most relevant metric if it's not classification) 
             while remaining flexible to user instructions.
             - Return a dict with keys: leaderboard, best_model_id, model_path, and model_results.
             - If enable_mlfow is True, log the top metrics and save the model as an artifact. (See example function)
             - IMPORTANT: if enable_mlflow is True, make sure to set enable_mlflow to True in the function definition.
+            - Function signature must be valid Python: place **kwargs at the end of the parameter list.
             
             Initial User Instructions (Disregard any instructions that are unrelated to modeling):
                 {user_instructions}
@@ -769,7 +795,7 @@ def make_h2o_ml_agent(
             ],
         )
 
-        recommended_steps = state.get("recommended_steps", "")
+        recommended_steps = steps_for_prompt
         h2o_code_agent = code_prompt | llm | PythonOutputParser()
 
         resp = h2o_code_agent.invoke(
@@ -841,6 +867,18 @@ def make_h2o_ml_agent(
 
     # 3) Execute code
     def execute_h2o_code(state):
+        target_col = state.get("target_variable")
+
+        def _preprocess(data_dict):
+            df = pd.DataFrame.from_dict(data_dict)
+            if target_col:
+                if target_col not in df.columns:
+                    raise ValueError(f"Target variable '{target_col}' not found in data.")
+                non_null = df[target_col].notnull().sum()
+                if non_null == 0:
+                    raise ValueError(f"Target variable '{target_col}' has no non-null values.")
+            return df
+
         result = node_func_execute_agent_code_on_data(
             state=state,
             data_key="data_raw",
@@ -848,7 +886,7 @@ def make_h2o_ml_agent(
             result_key="h2o_train_result",
             error_key="h2o_train_error",
             agent_function_name=state.get("h2o_train_function_name"),
-            pre_processing=lambda data: pd.DataFrame.from_dict(data),
+            pre_processing=_preprocess,
             post_processing=lambda x: x,
             error_message_prefix="Error occurred during H2O AutoML: ",
         )
@@ -867,6 +905,16 @@ def make_h2o_ml_agent(
                 result["best_model_id"] = best_id
                 result["model_path"] = mpath
                 result["model_results"] = model_results
+
+        if result.get("h2o_train_error") and log:
+            error_log_path = log_ai_error(
+                error_message=result["h2o_train_error"],
+                file_name=f"{file_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else LOG_PATH,
+                overwrite=False,
+            )
+            result["h2o_train_error_log_path"] = error_log_path
 
         return result
 
@@ -904,6 +952,7 @@ def make_h2o_ml_agent(
                 "h2o_train_function_path",
                 "h2o_train_function_name",
                 "h2o_train_error",
+                "h2o_train_error_log_path",
                 "model_path",
                 "best_model_id",
             ],
