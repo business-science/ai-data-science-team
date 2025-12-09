@@ -2,6 +2,7 @@ from typing_extensions import Annotated, Dict, Tuple, Union
 
 import os
 import tempfile
+import warnings
 
 from langchain.tools import tool
 
@@ -77,7 +78,9 @@ def describe_dataset(
     df = pd.DataFrame(data_raw)
     description_df = df.describe(include="all")
     content = "Summary statistics computed using pandas describe()."
-    artifact = {"describe_df": description_df.to_dict()}
+    # Flatten: orient="index" gives rows=stat, columns=columns
+    flattened = description_df.reset_index().rename(columns={"index": "stat"})
+    artifact = {"describe_df_flat": flattened.to_dict(orient="list")}
     return content, artifact
 
 
@@ -335,7 +338,18 @@ def generate_sweetviz_report(
             os.makedirs(report_directory)
 
     # Create the Sweetviz report.
-    report = sv.analyze(df, target_feat=target)
+    # Sweetviz internally calls warnings.filterwarnings on np.VisibleDeprecationWarning; this is removed in numpy>=2.
+    import numpy as np
+
+    # NumPy >= 2 removed VisibleDeprecationWarning; Sweetviz still references it directly.
+    if not hasattr(np, "VisibleDeprecationWarning"):
+        # Provide a compatible placeholder to avoid AttributeError inside Sweetviz.
+        np.VisibleDeprecationWarning = DeprecationWarning
+
+    visible_dep = getattr(np, "VisibleDeprecationWarning", DeprecationWarning)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=visible_dep)
+        report = sv.analyze(df, target_feat=target)
 
     # Determine the full path for the report.
     full_report_path = os.path.join(report_directory, report_name)
