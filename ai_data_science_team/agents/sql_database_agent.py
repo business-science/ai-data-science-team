@@ -31,11 +31,24 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.sql import get_database_metadata
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 
 # Setup
 AGENT_NAME = "sql_database_agent"
 LOG_PATH = os.path.join(os.getcwd(), "logs/")
+MAX_SCHEMA_CHARS = 5000
+
+DEFAULT_SQL_STEPS = format_recommended_steps(
+    """
+1. Inspect available schemas/tables and note key columns and primary keys.
+2. Identify tables needed to answer the question and the join keys between them.
+3. Select only the columns required; avoid SELECT * unless explicitly requested.
+4. Apply filters from user instructions; avoid modifying data (read-only SELECT).
+5. Aggregate or sort as instructed; do not add LIMIT unless the user asks.
+6. Return a single SELECT query that can run on the provided database dialect.
+    """,
+    heading="# Recommended SQL Database Steps:",
+)
 
 # Class
 
@@ -78,6 +91,8 @@ class SQLDatabaseAgent(BaseAgent):
         A checkpointer to save and load the agent's state. Defaults to None.
     smart_schema_pruning : bool, optional
         If True, filters the tables and columns based on the user instructions and recommended steps. Defaults to False.
+    safe_mode : bool, optional
+        If True (default), enforces read-only SELECT queries; set to False to allow non-SELECT queries at your own risk.
 
     Methods
     -------
@@ -160,6 +175,7 @@ class SQLDatabaseAgent(BaseAgent):
         bypass_explain_code=False,
         checkpointer=None,
         smart_schema_pruning=False,
+        safe_mode=True,
     ):
         self._params = {
             "model": model,
@@ -175,6 +191,7 @@ class SQLDatabaseAgent(BaseAgent):
             "bypass_explain_code": bypass_explain_code,
             "checkpointer": checkpointer,
             "smart_schema_pruning": smart_schema_pruning,
+            "safe_mode": safe_mode,
         }
         self._compiled_graph = self._make_compiled_graph()
         self.response = None
@@ -302,7 +319,7 @@ Function Name: {self.response.get("sql_database_function_name")}
             or None if no data is found.
         """
         if self.response and "data_sql" in self.response:
-            return pd.DataFrame(self.response["data_sql"])
+            return self.response["data_sql"]
         return None
 
     def get_sql_query_code(self, markdown=False):
@@ -384,6 +401,7 @@ def make_sql_database_agent(
     bypass_explain_code=False,
     checkpointer=None,
     smart_schema_pruning=False,
+    safe_mode=True,
 ):
     """
     Creates a SQL Database Agent that can recommend SQL steps and generate SQL code to query a database.
@@ -416,6 +434,8 @@ def make_sql_database_agent(
         A checkpointer to save and load the agent's state. Defaults to None.
     smart_schema_pruning : bool, optional
         If True, filters the tables and columns with an extra LLM step to reduce tokens for large databases. Increases processing time but can avoid errors due to hitting max token limits with large databases. Defaults to False.
+    safe_mode : bool, optional
+        If True (default), enforces read-only SELECT queries. Set to False to allow non-SELECT queries at your own risk.
 
     Returns
     -------
@@ -487,13 +507,16 @@ def make_sql_database_agent(
         sql_database_function_file_name: str
         sql_database_function_name: str
         sql_database_error: str
+        sql_database_error_log_path: str
         max_retries: int
         retry_count: int
 
     def recommend_sql_steps(state: GraphState):
         print(format_agent_name(AGENT_NAME))
 
-        all_sql_database_summary = get_database_metadata(conn, n_samples=n_samples)
+        all_sql_database_summary = _truncate_metadata(
+            get_database_metadata(conn, n_samples=n_samples)
+        )
 
         all_sql_database_summary = smart_schema_filter(
             llm,
@@ -573,15 +596,19 @@ def make_sql_database_agent(
     def create_sql_query_code(state: GraphState):
         if bypass_recommended_steps:
             print(format_agent_name(AGENT_NAME))
-            all_sql_database_summary = get_database_metadata(conn, n_samples=n_samples)
+            all_sql_database_summary = _truncate_metadata(
+                get_database_metadata(conn, n_samples=n_samples)
+            )
             all_sql_database_summary = smart_schema_filter(
                 llm,
                 state.get("user_instructions"),
                 all_sql_database_summary,
                 smart_filtering=smart_schema_pruning,
             )
+            steps_for_prompt = state.get("recommended_steps") or DEFAULT_SQL_STEPS
         else:
             all_sql_database_summary = state.get("all_sql_database_summary")
+            steps_for_prompt = state.get("recommended_steps") or DEFAULT_SQL_STEPS
         print("    * CREATE SQL QUERY CODE")
 
         # Prompt to get the SQL code from the LLM
@@ -631,10 +658,19 @@ def make_sql_database_agent(
         sql_query_code = sql_query_code_agent.invoke(
             {
                 "user_instructions": state.get("user_instructions"),
-                "recommended_steps": state.get("recommended_steps"),
+                "recommended_steps": steps_for_prompt,
                 "all_sql_database_summary": all_sql_database_summary,
             }
         )
+
+        validation_error = _validate_sql(sql_query_code, safe_mode=safe_mode)
+        if validation_error:
+            return {
+                "sql_query_code": sql_query_code,
+                "sql_database_error": validation_error,
+                "all_sql_database_summary": all_sql_database_summary,
+                "recommended_steps": steps_for_prompt,
+            }
 
         print("    * CREATE PYTHON FUNCTION TO RUN SQL CODE")
 
@@ -645,12 +681,12 @@ def {function_name}(connection):
     
     # Create a connection if needed
     is_engine = isinstance(connection, sql.engine.base.Engine)
-    conn = connection.connect() if is_engine else connection
-
     sql_query = '''
     {sql_query_code}
-    '''
-    
+    '''.strip()
+    if is_engine:
+        with connection.connect() as conn:
+            return pd.read_sql(sql_query, conn)
     return pd.read_sql(sql_query, connection)
         """
 
@@ -672,6 +708,7 @@ def {function_name}(connection):
             "sql_database_function_file_name": file_name_2,
             "sql_database_function_name": function_name,
             "all_sql_database_summary": all_sql_database_summary,
+            "recommended_steps": steps_for_prompt,
         }
 
     # Human Review
@@ -708,10 +745,30 @@ def {function_name}(connection):
             )
 
     def execute_sql_database_code(state: GraphState):
+        # If validation failed earlier, short-circuit and log
+        if state.get("sql_database_error"):
+            error_prefixed = state.get("sql_database_error")
+            error_log_path = None
+            if log:
+                error_log_path = log_ai_error(
+                    error_message=error_prefixed,
+                    file_name=f"{file_name}_errors.log",
+                    log=log,
+                    log_path=log_path if log_path is not None else LOG_PATH,
+                    overwrite=False,
+                )
+                if error_log_path:
+                    print(f"      Error logged to: {error_log_path}")
+            return {
+                "data_sql": None,
+                "sql_database_error": error_prefixed,
+                "sql_database_error_log_path": error_log_path,
+            }
+
         is_engine = isinstance(connection, sql.engine.base.Engine)
         conn = connection.connect() if is_engine else connection
 
-        return node_func_execute_agent_from_sql_connection(
+        result = node_func_execute_agent_from_sql_connection(
             state=state,
             connection=conn,
             result_key="data_sql",
@@ -723,6 +780,22 @@ def {function_name}(connection):
             else df,
             error_message_prefix="An error occurred during executing the sql database pipeline: ",
         )
+
+        error_prefixed = result.get("sql_database_error")
+        error_log_path = None
+        if error_prefixed and log:
+            error_log_path = log_ai_error(
+                error_message=error_prefixed,
+                file_name=f"{file_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else LOG_PATH,
+                overwrite=False,
+            )
+            if error_log_path:
+                print(f"      Error logged to: {error_log_path}")
+
+        result["sql_database_error_log_path"] = error_log_path
+        return result
 
     def fix_sql_database_code(state: GraphState):
         prompt = """
@@ -760,7 +833,9 @@ def {function_name}(connection):
                 "sql_database_function",
                 "sql_database_function_path",
                 "sql_database_function_name",
+                "sql_query_code",
                 "sql_database_error",
+                "sql_database_error_log_path",
             ],
             result_key="messages",
             role=AGENT_NAME,
@@ -826,18 +901,47 @@ def smart_schema_filter(
 
             Return a valid JSON object. Do not include any additional explanation or text outside of the JSON.
             """,
-            input_variables=["user_instructions", "full_metadata_json"],
+            input_variables=["user_instructions", "all_sql_database_summary"],
         )
 
         filter_schema_agent = filter_schema_prompt | llm | JsonOutputParser()
 
-        response = filter_schema_agent.invoke(
-            {
-                "user_instructions": user_instructions,
-                "all_sql_database_summary": all_sql_database_summary,
-            }
-        )
-
-        return response
+        try:
+            response = filter_schema_agent.invoke(
+                {
+                    "user_instructions": user_instructions,
+                    "all_sql_database_summary": all_sql_database_summary,
+                }
+            )
+            return response
+        except Exception:
+            return all_sql_database_summary
     else:
         return all_sql_database_summary
+
+
+def _truncate_metadata(metadata: str) -> str:
+    """Truncate metadata text to avoid overruns."""
+    if metadata is None:
+        return ""
+    if len(metadata) <= MAX_SCHEMA_CHARS:
+        return metadata
+    return metadata[:MAX_SCHEMA_CHARS] + "\n\n[truncated]"
+
+
+def _validate_sql(sql_text: str, safe_mode: bool = True):
+    """
+    Basic safety checks to keep execution read-only.
+    Returns an error message string if unsafe, else None.
+    """
+    if not sql_text:
+        return "SQL generation failed: empty query."
+    if not safe_mode:
+        return None
+    lowered = sql_text.strip().lower()
+    if not lowered.startswith("select"):
+        return "Only read-only SELECT queries are allowed (safe_mode=True)."
+    unsafe_keywords = ["insert", "update", "delete", "drop", "alter", "truncate", "create", "replace"]
+    if any(kw in lowered for kw in unsafe_keywords):
+        return "Write operations are not allowed; ensure the query is read-only (safe_mode=True)."
+    return None
