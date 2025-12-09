@@ -17,10 +17,25 @@ Goal: migrate agents to a message-first structure (`HumanMessage`/`AIMessage`) f
 7) **Supervisors/teams**: with `messages` standardized, supervisors can route and evaluate full conversations.
 
 ### Rollout order
-1) Pilot on one agent (e.g., `data_loader_tools_agent`).
+1) Pilot on one agent (e.g., `data_loader_tools_agent`). ✅ done (message-first, sync/async message entrypoints, tool logging flag, directory/file artifact handling).
 2) Extend to utility agents (cleaning, wrangling, visualization).
 3) Extend to SQL and feature engineering agents.
 4) Update team/supervisor harnesses to rely solely on `messages`.
+
+### Agent conversion checklist
+- [x] data_loader_tools_agent
+- [ ] data_cleaning_agent
+- [ ] data_wrangling_agent
+- [ ] data_visualization_agent
+- [ ] sql_database_agent
+- [ ] feature_engineering_agent
+- [ ] eda_tools_agent (ds_agents)
+- [ ] h2o_ml_agent (ml_agents)
+- [ ] mlflow_tools_agent (ml_agents)
+
+### Next phase: non-core modules
+- ds_agents: eda_tools_agent
+- ml_agents: h2o_ml_agent, mlflow_tools_agent
 
 ### Risks & Mitigations
 - **Transcript bloat**: use `log_tool_calls` to toggle tool-call messages.
