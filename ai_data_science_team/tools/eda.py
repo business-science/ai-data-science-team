@@ -80,7 +80,7 @@ def describe_dataset(
     content = "Summary statistics computed using pandas describe()."
     # Flatten: orient="index" gives rows=stat, columns=columns
     flattened = description_df.reset_index().rename(columns={"index": "stat"})
-    artifact = {"describe_df_flat": flattened.to_dict(orient="list")}
+    artifact = {"describe_df": flattened.to_dict(orient="list")}
     return content, artifact
 
 

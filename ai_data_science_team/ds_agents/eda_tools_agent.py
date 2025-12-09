@@ -5,7 +5,6 @@ import pandas as pd
 from IPython.display import Markdown
 
 from langchain_core.messages import BaseMessage, AIMessage
-from langgraph.prebuilt import ToolNode
 
 try:
     from langgraph.prebuilt import create_react_agent
@@ -220,8 +219,10 @@ class EDAToolsAgent(BaseAgent):
                             continue
                         except Exception:
                             pass
-                    if isinstance(v, dict) and "describe_df" in v and isinstance(
-                        v["describe_df"], dict
+                    if (
+                        isinstance(v, dict)
+                        and "describe_df" in v
+                        and isinstance(v["describe_df"], dict)
                     ):
                         converted[k] = pd.DataFrame.from_dict(v["describe_df"]).T
                     elif isinstance(v, dict) and all(
@@ -308,30 +309,34 @@ def make_eda_tools_agent(
         eda_artifacts: dict
         tool_calls: list
 
-    def exploratory_agent(state):
+    # Build the React subgraph once so it shows in .show(xray=1)
+    react_agent = create_react_agent(
+        model,
+        tools=EDA_TOOLS,
+        state_schema=GraphState,
+        **create_react_agent_kwargs,
+        checkpointer=checkpointer,
+    )
+
+    def prepare_messages(state: GraphState):
         print(format_agent_name(AGENT_NAME))
+        print("    * PREPARE MESSAGES")
+        if state.get("messages"):
+            return {}
+        return {"messages": [("user", state.get("user_instructions"))]}
+
+    def run_react_agent(state: GraphState):
         print("    * RUN REACT TOOL-CALLING AGENT FOR EDA")
-
-        tool_node = ToolNode(tools=EDA_TOOLS)
-
-        eda_agent = create_react_agent(
-            model,
-            tools=tool_node,
-            state_schema=GraphState,
-            **create_react_agent_kwargs,
-            checkpointer=checkpointer,
-        )
-
-        base_messages = state.get("messages", []) or [
-            ("user", state.get("user_instructions"))
-        ]
         data_raw = state.get("data_raw")
-        # Lightweight debug so users can see whether data was provided
         if data_raw is None:
             print("    * No data_raw provided to EDA agent")
         else:
             try:
-                n_rows = len(next(iter(data_raw.values()))) if isinstance(data_raw, dict) else "?"
+                n_rows = (
+                    len(next(iter(data_raw.values())))
+                    if isinstance(data_raw, dict)
+                    else "?"
+                )
             except Exception:
                 n_rows = "?"
             print(f"    * data_raw rows: {n_rows}")
@@ -340,19 +345,21 @@ def make_eda_tools_agent(
             "You are an EDA agent. You have access to the dataset in state as data_raw. "
             "Use the provided EDA tools to summarize or visualize the data, then return concise results."
         )
+        base_messages = state.get("messages", []) or [
+            ("user", state.get("user_instructions"))
+        ]
         messages = [("system", system_hint)] + base_messages
 
-        response = eda_agent.invoke(
-            {
-                "messages": messages,
-                "data_raw": state.get("data_raw"),
-            },
-            invoke_react_agent_kwargs,
-        )
+        input_payload = {
+            "messages": messages,
+            "data_raw": data_raw,
+        }
+        return react_agent.invoke(input_payload, invoke_react_agent_kwargs)
 
+    def post_process(state: GraphState):
         print("    * POST-PROCESSING EDA RESULTS")
 
-        internal_messages = response.get("messages", [])
+        internal_messages = state.get("messages", [])
         if not internal_messages:
             return {"messages": [], "eda_artifacts": None, "tool_calls": []}
 
@@ -383,10 +390,10 @@ def make_eda_tools_agent(
             art = getattr(msg, "artifact", None)
             name = getattr(msg, "name", None)
             if art is not None:
-                key = name or f"artifact_{len(artifacts)+1}"
+                key = name or f"artifact_{len(artifacts) + 1}"
                 artifacts[key] = art
             elif isinstance(msg, dict) and "artifact" in msg:
-                key = msg.get("name") or f"artifact_{len(artifacts)+1}"
+                key = msg.get("name") or f"artifact_{len(artifacts) + 1}"
                 artifacts[key] = msg["artifact"]
         # Fallback to last artifact
         last_tool_artifact = None
@@ -412,10 +419,9 @@ def make_eda_tools_agent(
                     elif "describe_df" in last_tool_artifact and isinstance(
                         last_tool_artifact["describe_df"], dict
                     ):
-                        df_preview = (
-                            pd.DataFrame.from_dict(last_tool_artifact["describe_df"])
-                            .T.head()
-                        )
+                        df_preview = pd.DataFrame.from_dict(
+                            last_tool_artifact["describe_df"]
+                        ).T.head()
                         summary_snippet = df_preview.to_markdown()
                     elif all(isinstance(v, dict) for v in last_tool_artifact.values()):
                         df_preview = pd.DataFrame(last_tool_artifact).T.head()
@@ -439,8 +445,6 @@ def make_eda_tools_agent(
         if log_tool_calls and tool_calls:
             for name in tool_calls:
                 print(f"    * Tool: {name}")
-        if log_tool_calls and not tool_calls:
-            print("    * No tool calls detected – check that data_raw was provided and instructions ask for EDA.")
 
         return {
             "messages": [last_ai_message],
@@ -450,9 +454,13 @@ def make_eda_tools_agent(
         }
 
     workflow = StateGraph(GraphState)
-    workflow.add_node("exploratory_agent", exploratory_agent)
-    workflow.add_edge(START, "exploratory_agent")
-    workflow.add_edge("exploratory_agent", END)
+    workflow.add_node("prepare_messages", prepare_messages)
+    workflow.add_node("react_agent", react_agent)
+    workflow.add_node("post_process", post_process)
+    workflow.add_edge(START, "prepare_messages")
+    workflow.add_edge("prepare_messages", "react_agent")
+    workflow.add_edge("react_agent", "post_process")
+    workflow.add_edge("post_process", END)
 
     app = workflow.compile(
         checkpointer=checkpointer,
