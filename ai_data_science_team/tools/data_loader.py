@@ -2,10 +2,15 @@ from langchain.tools import tool
 
 import pandas as pd
 import os
+from pathlib import Path
 
 from typing_extensions import Tuple, List, Dict, Optional
 
 ALLOW_UNSAFE_PICKLE_ENV_VAR = "ALLOW_UNSAFE_PICKLE"
+DEFAULT_MAX_MB = 20  # cap file size we attempt to load
+DEFAULT_MAX_ROWS = 5000  # cap rows read per file to avoid OOM
+DEFAULT_MAX_ENTRIES = 1000  # cap directory recursion output
+DEFAULT_MAX_DEPTH = 5  # cap directory recursion depth
 
 
 def _pickle_loading_allowed() -> bool:
@@ -24,7 +29,10 @@ def _pickle_loading_allowed() -> bool:
 
 @tool(response_format="content_and_artifact")
 def load_directory(
-    directory_path: str = os.getcwd(), file_type: Optional[str] = None
+    directory_path: str = os.getcwd(),
+    file_type: Optional[str] = None,
+    max_mb: int = DEFAULT_MAX_MB,
+    max_rows: int = DEFAULT_MAX_ROWS,
 ) -> Tuple[str, Dict]:
     """
     Tool: load_directory
@@ -55,16 +63,22 @@ def load_directory(
     if directory_path is None:
         return "No directory path provided.", {}
 
-    if not os.path.isdir(directory_path):
-        return f"Directory not found: {directory_path}", {}
+    try:
+        base_path = Path(directory_path).expanduser().resolve()
+    except Exception as exc:
+        return f"Invalid directory path: {exc}", {}
 
-    data_frames = {}
+    if not base_path.is_dir():
+        return f"Directory not found: {base_path}", {}
 
-    for filename in os.listdir(directory_path):
-        file_path = os.path.join(directory_path, filename)
+    data_frames: Dict[str, Dict] = {}
+    max_bytes = max_mb * 1024 * 1024 if max_mb else None
+
+    for filename in sorted(os.listdir(base_path)):
+        file_path = base_path / filename
 
         # Skip directories
-        if os.path.isdir(file_path):
+        if file_path.is_dir():
             continue
 
         # If file_type is specified, only process files that match.
@@ -73,19 +87,39 @@ def load_directory(
             if not filename.lower().endswith(f".{file_type.lower()}"):
                 continue
 
+        if max_bytes is not None and file_path.stat().st_size > max_bytes:
+            data_frames[filename] = {
+                "status": "skipped",
+                "data": None,
+                "error": f"Skipped: file larger than {max_mb}MB",
+            }
+            continue
+
         try:
             # Attempt to auto-detect and load the file
-            df_or_error = auto_load_file(file_path)
+            df_or_error = auto_load_file(str(file_path), max_rows=max_rows)
             if isinstance(df_or_error, pd.DataFrame):
-                data_frames[filename] = df_or_error.to_dict()
+                data_frames[filename] = {
+                    "status": "ok",
+                    "data": df_or_error.to_dict(),
+                    "error": None,
+                }
             else:
-                data_frames[filename] = f"Error loading file: {df_or_error}"
+                data_frames[filename] = {
+                    "status": "error",
+                    "data": None,
+                    "error": f"{df_or_error}",
+                }
         except Exception as e:
             # If loading fails, record the error message
-            data_frames[filename] = f"Error loading file: {e}"
+            data_frames[filename] = {
+                "status": "error",
+                "data": None,
+                "error": f"Error loading file: {e}",
+            }
 
     return (
-        f"Returned the following data frames: {list(data_frames.keys())}",
+        f"Returned the following files: {list(data_frames.keys())}",
         data_frames,
     )
 
@@ -106,17 +140,17 @@ def load_file(file_path: str) -> Tuple[str, Dict]:
         A tuple containing a message and a dictionary of the data frame.
     """
     print(f"    * Tool: load_file | {file_path}")
-    df_or_error = auto_load_file(file_path)
+    df_or_error = auto_load_file(file_path, max_rows=DEFAULT_MAX_ROWS)
 
     if isinstance(df_or_error, pd.DataFrame):
         return (
             f"Returned the following data frame from this file: {file_path}",
-            df_or_error.to_dict(),
+            {"status": "ok", "data": df_or_error.to_dict(), "error": None},
         )
 
     return (
         f"Could not load file: {file_path}. {df_or_error}",
-        {"file_path": file_path, "error": str(df_or_error)},
+        {"status": "error", "data": None, "error": str(df_or_error)},
     )
 
 
@@ -143,11 +177,16 @@ def list_directory_contents(
     if directory_path is None:
         return "No directory path provided.", []
 
-    if not os.path.isdir(directory_path):
-        return f"Directory not found: {directory_path}", []
+    try:
+        base_path = Path(directory_path).expanduser().resolve()
+    except Exception as exc:
+        return f"Invalid directory path: {exc}", []
+
+    if not base_path.is_dir():
+        return f"Directory not found: {base_path}", []
 
     items = []
-    for item in os.listdir(directory_path):
+    for item in os.listdir(base_path):
         # If show_hidden is False, skip items starting with '.'
         if not show_hidden and item.startswith("."):
             continue
@@ -176,7 +215,10 @@ def list_directory_contents(
 
 @tool(response_format="content_and_artifact")
 def list_directory_recursive(
-    directory_path: str = os.getcwd(), show_hidden: bool = False
+    directory_path: str = os.getcwd(),
+    show_hidden: bool = False,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    max_entries: int = DEFAULT_MAX_ENTRIES,
 ) -> Tuple[str, List[Dict]]:
     """
     Tool: list_directory_recursive
@@ -206,15 +248,27 @@ def list_directory_recursive(
     import os
 
     if directory_path is None:
-        return "No directory path provided.", {}
+        return "No directory path provided.", []
 
-    if not os.path.isdir(directory_path):
-        return f"Directory not found: {directory_path}", {}
+    try:
+        base_path = Path(directory_path).expanduser().resolve()
+    except Exception as exc:
+        return f"Invalid directory path: {exc}", []
+
+    if not base_path.is_dir():
+        return f"Directory not found: {base_path}", []
 
     lines = []
     records = []
+    entry_count = 0
 
     def recurse(path: str, indent_level: int = 0):
+        nonlocal entry_count
+        if indent_level > max_depth:
+            lines.append("  " * indent_level + "[max depth reached]")
+            return
+        if entry_count >= max_entries:
+            return
         # List items in the current directory
         try:
             items = os.listdir(path)
@@ -236,6 +290,8 @@ def list_directory_recursive(
 
             if os.path.isdir(full_path):
                 # Directory
+                if entry_count >= max_entries:
+                    continue
                 lines.append(f"{prefix}{item}/")
                 records.append(
                     {
@@ -245,10 +301,13 @@ def list_directory_recursive(
                         "absolute_path": full_path,
                     }
                 )
+                entry_count += 1
                 # Recursively descend
                 recurse(full_path, indent_level + 1)
             else:
                 # File
+                if entry_count >= max_entries:
+                    continue
                 lines.append(f"{prefix}- {item}")
                 records.append(
                     {
@@ -258,32 +317,22 @@ def list_directory_recursive(
                         "absolute_path": full_path,
                     }
                 )
+                entry_count += 1
 
     # Kick off recursion
-    if os.path.isdir(directory_path):
-        # Add the top-level directory to lines/records if you like
-        dir_name = os.path.basename(os.path.normpath(directory_path)) or directory_path
-        lines.append(f"{dir_name}/")  # Show the root as well
-        records.append(
-            {
-                "type": "directory",
-                "name": dir_name,
-                "parent_path": os.path.dirname(directory_path),
-                "absolute_path": os.path.abspath(directory_path),
-            }
-        )
-        recurse(directory_path, indent_level=1)
-    else:
-        # If the given path is not a directory, just return a note
-        lines.append(f"{directory_path} is not a directory.")
-        records.append(
-            {
-                "type": "error",
-                "name": directory_path,
-                "parent_path": None,
-                "absolute_path": os.path.abspath(directory_path),
-            }
-        )
+    # Add the top-level directory to lines/records if you like
+    dir_name = os.path.basename(os.path.normpath(base_path)) or str(base_path)
+    lines.append(f"{dir_name}/")  # Show the root as well
+    records.append(
+        {
+            "type": "directory",
+            "name": dir_name,
+            "parent_path": os.path.dirname(base_path),
+            "absolute_path": os.path.abspath(base_path),
+        }
+    )
+    entry_count += 1
+    recurse(str(base_path), indent_level=1)
 
     # content: multiline string with the entire tree
     content = "\n".join(lines)
@@ -318,7 +367,9 @@ def get_file_info(file_path: str) -> Tuple[str, List[Dict]]:
     import time
 
     if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"{file_path} is not a valid file.")
+        return f"{file_path} is not a valid file.", [
+            {"type": "error", "file_path": file_path}
+        ]
 
     file_stats = os.stat(file_path)
 
@@ -374,16 +425,24 @@ def search_files_by_pattern(
     import os
     import fnmatch
 
+    try:
+        base_path = Path(directory_path).expanduser().resolve()
+    except Exception as exc:
+        return f"Invalid directory path: {exc}", []
+
+    if not base_path.is_dir():
+        return f"Directory not found: {base_path}", []
+
     matched_files = []
     if recursive:
-        for root, dirs, files in os.walk(directory_path):
+        for root, dirs, files in os.walk(base_path):
             for filename in files:
                 if fnmatch.fnmatch(filename, pattern):
                     matched_files.append(os.path.join(root, filename))
     else:
         # Non-recursive
-        for filename in os.listdir(directory_path):
-            full_path = os.path.join(directory_path, filename)
+        for filename in os.listdir(base_path):
+            full_path = os.path.join(base_path, filename)
             if os.path.isfile(full_path) and fnmatch.fnmatch(filename, pattern):
                 matched_files.append(full_path)
 
@@ -405,7 +464,7 @@ def search_files_by_pattern(
 # Loaders
 
 
-def auto_load_file(file_path: str) -> pd.DataFrame:
+def auto_load_file(file_path: str, max_rows: Optional[int] = None) -> pd.DataFrame:
     """
     Auto loads a file based on its extension.
 
@@ -420,25 +479,33 @@ def auto_load_file(file_path: str) -> pd.DataFrame:
     """
     import pandas as pd
 
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        return f"File not found: {file_path}"
+
+    suffixes = "".join(path.suffixes).lower()
+    ext = path.suffix.lower()
+
     try:
-        ext = file_path.split(".")[-1].lower()
-        if ext == "csv":
-            return load_csv(file_path)
-        elif ext in ["xlsx", "xls"]:
-            return load_excel(file_path)
-        elif ext == "json":
-            return load_json(file_path)
-        elif ext == "parquet":
-            return load_parquet(file_path)
-        elif ext == "pkl":
-            return load_pickle(file_path)
-        else:
-            return f"Unsupported file extension: {ext}"
+        if suffixes in {".csv", ".csv.gz"} or ext in {".csv", ".tsv"}:
+            sep = "\t" if ext == ".tsv" else ","
+            return load_csv(str(path), sep=sep, nrows=max_rows)
+        if ext in [".xlsx", ".xls"]:
+            return load_excel(str(path), nrows=max_rows)
+        if suffixes in {".jsonl", ".ndjson"} or ext in {".jsonl", ".ndjson"}:
+            return load_json(str(path), lines=True, nrows=max_rows)
+        if ext == ".json":
+            return load_json(str(path), lines=False, nrows=max_rows)
+        if ext == ".parquet":
+            return load_parquet(str(path), max_rows=max_rows)
+        if ext == ".pkl":
+            return load_pickle(str(path))
+        return f"Unsupported file extension: {suffixes or ext}"
     except Exception as e:
         return f"Error loading file: {e}"
 
 
-def load_csv(file_path: str) -> pd.DataFrame:
+def load_csv(file_path: str, sep: str = ",", nrows: Optional[int] = None) -> pd.DataFrame:
     """
     Tool: load_csv
     Description: Loads a CSV file into a pandas DataFrame.
@@ -449,38 +516,41 @@ def load_csv(file_path: str) -> pd.DataFrame:
     """
     import pandas as pd
 
-    return pd.read_csv(file_path)
+    return pd.read_csv(file_path, sep=sep, nrows=nrows)
 
 
-def load_excel(file_path: str, sheet_name=None) -> pd.DataFrame:
+def load_excel(file_path: str, sheet_name=None, nrows: Optional[int] = None) -> pd.DataFrame:
     """
     Tool: load_excel
     Description: Loads an Excel file into a pandas DataFrame.
     """
     import pandas as pd
 
-    return pd.read_excel(file_path, sheet_name=sheet_name)
+    return pd.read_excel(file_path, sheet_name=sheet_name, nrows=nrows)
 
 
-def load_json(file_path: str) -> pd.DataFrame:
+def load_json(file_path: str, lines: bool = False, nrows: Optional[int] = None) -> pd.DataFrame:
     """
     Tool: load_json
     Description: Loads a JSON file or NDJSON into a pandas DataFrame.
     """
     import pandas as pd
 
-    # For simple JSON arrays
-    return pd.read_json(file_path, orient="records", lines=False)
+    # For simple JSON arrays or line-delimited JSON
+    return pd.read_json(file_path, orient="records", lines=lines, nrows=nrows)
 
 
-def load_parquet(file_path: str) -> pd.DataFrame:
+def load_parquet(file_path: str, max_rows: Optional[int] = None) -> pd.DataFrame:
     """
     Tool: load_parquet
     Description: Loads a Parquet file into a pandas DataFrame.
     """
     import pandas as pd
 
-    return pd.read_parquet(file_path)
+    df = pd.read_parquet(file_path)
+    if max_rows is not None and len(df) > max_rows:
+        return df.head(max_rows)
+    return df
 
 
 def load_pickle(file_path: str) -> pd.DataFrame:

@@ -2,6 +2,7 @@ from typing_extensions import Any, Optional, Annotated, Sequence, List, Dict
 import operator
 
 import pandas as pd
+import os
 
 from IPython.display import Markdown
 
@@ -166,19 +167,68 @@ class DataLoaderToolsAgent(BaseAgent):
         """
         Returns the MLflow artifacts from the agent's response.
         """
-        if as_dataframe:
-            return pd.DataFrame(self.response["data_loader_artifacts"])
-        else:
-            return self.response["data_loader_artifacts"]
+        artifact = None
+        if self.response:
+            artifact = self.response.get("data_loader_artifacts")
+
+        # Handle directory-style artifacts: {filename: {"status","data","error"}}
+        if isinstance(artifact, dict) and all(
+            isinstance(v, dict) and "data" in v for v in artifact.values()
+        ):
+            dataframes = {
+                k: pd.DataFrame(v["data"]) if v.get("data") is not None else pd.DataFrame()
+                for k, v in artifact.items()
+            }
+            return dataframes if as_dataframe else dataframes
+
+        if not as_dataframe:
+            return artifact
+
+        # Try to coerce to a DataFrame sensibly
+        if isinstance(artifact, pd.DataFrame):
+            return artifact
+        if isinstance(artifact, dict):
+            if "data" in artifact:
+                try:
+                    return pd.DataFrame(artifact["data"])
+                except Exception:
+                    return pd.DataFrame([artifact])
+            try:
+                return pd.DataFrame(artifact)
+            except Exception:
+                return pd.DataFrame({"artifact": [artifact]})
+        if isinstance(artifact, list):
+            try:
+                return pd.DataFrame(artifact)
+            except Exception:
+                return pd.DataFrame({"artifact": artifact})
+
+        return pd.DataFrame()
 
     def get_ai_message(self, markdown: bool = False):
         """
         Returns the AI message from the agent's response.
         """
+        if not self.response or "messages" not in self.response:
+            return None
+
+        msgs = self.response.get("messages", [])
+        last_ai = None
+        for msg in reversed(msgs):
+            role = getattr(msg, "role", None) or getattr(msg, "type", None)
+            if role in ("assistant", "ai"):
+                last_ai = msg
+                break
+        if last_ai is None and msgs:
+            last_ai = msgs[-1]
+
+        if last_ai is None:
+            return None
+
+        content = getattr(last_ai, "content", "")
         if markdown:
-            return Markdown(self.response["messages"][0].content)
-        else:
-            return self.response["messages"][0].content
+            return Markdown(content)
+        return content
 
     def get_tool_calls(self):
         """
@@ -213,59 +263,81 @@ def make_data_loader_tools_agent(
         An agent that can interact with data loading tools.
     """
 
+    react_agent = create_react_agent(
+        model,
+        tools=tools,
+        state_schema=AgentState,
+        checkpointer=checkpointer,
+        **create_react_agent_kwargs,
+    )
+
     class GraphState(AgentState):
-        internal_messages: Annotated[Sequence[BaseMessage], operator.add]
         user_instructions: str
+        internal_messages: Annotated[Sequence[BaseMessage], operator.add]
         data_loader_artifacts: dict
         tool_calls: List[str]
 
-    def data_loader_agent(state):
+    def prepare_messages(state: GraphState):
         print(format_agent_name(AGENT_NAME))
-        print("    ")
+        print("    * PREPARE MESSAGES")
+        return {"messages": [("user", state["user_instructions"])]}
 
+    def run_react_agent(state: GraphState):
         print("    * RUN REACT TOOL-CALLING AGENT")
+        input_payload = {"messages": state.get("messages", [])}
+        return react_agent.invoke(input_payload, invoke_react_agent_kwargs)
 
-        tool_node = ToolNode(tools=tools)
-
-        data_loader_agent = create_react_agent(
-            model,
-            tools=tool_node,
-            state_schema=GraphState,
-            checkpointer=checkpointer,
-            **create_react_agent_kwargs,
-        )
-
-        response = data_loader_agent.invoke(
-            {
-                "messages": [("user", state["user_instructions"])],
-            },
-            invoke_react_agent_kwargs,
-        )
-
+    def post_process(state: GraphState):
         print("    * POST-PROCESS RESULTS")
+        internal_messages = state.get("messages", [])
 
-        internal_messages = response["messages"]
-
-        # Ensure there is at least one AI message
         if not internal_messages:
             return {
-                "internal_messages": [],
-                "mlflow_artifacts": None,
-            }
+                "messages": [],
+            "internal_messages": [],
+            "data_loader_artifacts": None,
+            "tool_calls": [],
+        }
 
-        # Get the last AI message
-        last_ai_message = AIMessage(internal_messages[-1].content, role=AGENT_NAME)
+        # Prefer the last assistant/ai message; fall back to last message
+        last_ai = None
+        for msg in reversed(internal_messages):
+            role = getattr(msg, "role", None) or getattr(msg, "type", None)
+            if role in ("assistant", "ai"):
+                last_ai = msg
+                break
+        if last_ai is None:
+            last_ai = internal_messages[-1]
 
-        # Get the last tool artifact safely
+        last_ai_message = AIMessage(getattr(last_ai, "content", ""), role=AGENT_NAME)
+
+        # Grab the last tool artifact, if any
         last_tool_artifact = None
-        if len(internal_messages) > 1:
-            last_message = internal_messages[-2]  # Get second-to-last message
-            if hasattr(last_message, "artifact"):  # Check if it has an "artifact"
-                last_tool_artifact = last_message.artifact
-            elif isinstance(last_message, dict) and "artifact" in last_message:
-                last_tool_artifact = last_message["artifact"]
+        for msg in reversed(internal_messages):
+            if hasattr(msg, "artifact"):
+                last_tool_artifact = msg.artifact
+                break
+            if isinstance(msg, dict) and "artifact" in msg:
+                last_tool_artifact = msg["artifact"]
+                break
 
         tool_calls = get_tool_call_names(internal_messages)
+        if tool_calls:
+            for name in tool_calls:
+                # try to include artifact path if present in the prior message
+                path_hint = ""
+                # search for first artifact-bearing message
+                for msg in reversed(internal_messages):
+                    art = getattr(msg, "artifact", None)
+                    if art:
+                        # if the artifact looks like a dict with path info
+                        if isinstance(art, dict):
+                            for k, v in art.items():
+                                if isinstance(v, str) and os.path.exists(v):
+                                    path_hint = f" | {v}"
+                                    break
+                        break
+                print(f"    * Tool: {name}{path_hint}")
 
         return {
             "messages": [last_ai_message],
@@ -276,10 +348,14 @@ def make_data_loader_tools_agent(
 
     workflow = StateGraph(GraphState)
 
-    workflow.add_node("data_loader_agent", data_loader_agent)
+    workflow.add_node("prepare_messages", prepare_messages)
+    workflow.add_node("react_agent", run_react_agent)
+    workflow.add_node("post_process", post_process)
 
-    workflow.add_edge(START, "data_loader_agent")
-    workflow.add_edge("data_loader_agent", END)
+    workflow.add_edge(START, "prepare_messages")
+    workflow.add_edge("prepare_messages", "react_agent")
+    workflow.add_edge("react_agent", "post_process")
+    workflow.add_edge("post_process", END)
 
     app = workflow.compile(
         checkpointer=checkpointer,
