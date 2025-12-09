@@ -24,11 +24,11 @@ Goal: migrate agents to a message-first structure (`HumanMessage`/`AIMessage`) f
 
 ### Agent conversion checklist
 - [x] data_loader_tools_agent
-- [ ] data_cleaning_agent
-- [ ] data_wrangling_agent
-- [ ] data_visualization_agent
-- [ ] sql_database_agent
-- [ ] feature_engineering_agent
+- [x] data_cleaning_agent (message-first entrypoints and demo added)
+- [x] data_wrangling_agent (message-first entrypoints and demo added)
+- [x] data_visualization_agent (message-first entrypoints and demo added)
+- [x] sql_database_agent (message-first entrypoints and demo added)
+- [x] feature_engineering_agent (message-first entrypoints and demo added)
 - [ ] eda_tools_agent (ds_agents)
 - [ ] h2o_ml_agent (ml_agents)
 - [ ] mlflow_tools_agent (ml_agents)

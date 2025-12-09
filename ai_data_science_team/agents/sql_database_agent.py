@@ -234,8 +234,12 @@ class SQLDatabaseAgent(BaseAgent):
         -------
         None
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = await self._compiled_graph.ainvoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
                 "max_retries": max_retries,
                 "retry_count": retry_count,
@@ -266,11 +270,47 @@ class SQLDatabaseAgent(BaseAgent):
         -------
         None
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = self._compiled_graph.invoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
                 "max_retries": max_retries,
                 "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    def invoke_messages(self, messages: Sequence[BaseMessage], **kwargs):
+        """
+        Runs the agent given an explicit message list (preferred for supervisors/teams).
+        """
+        response = self._compiled_graph.invoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+                "max_retries": kwargs.pop("max_retries", 3),
+                "retry_count": kwargs.pop("retry_count", 0),
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    async def ainvoke_messages(self, messages: Sequence[BaseMessage], **kwargs):
+        """
+        Async version of invoke_messages.
+        """
+        response = await self._compiled_graph.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+                "max_retries": kwargs.pop("max_retries", 3),
+                "retry_count": kwargs.pop("retry_count", 0),
             },
             **kwargs,
         )

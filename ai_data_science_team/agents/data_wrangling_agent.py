@@ -254,6 +254,7 @@ class DataWranglingAgent(BaseAgent):
         data_input = self._convert_data_input(data_raw)
         response = await self._compiled_graph.ainvoke(
             {
+                "messages": [("user", user_instructions)] if user_instructions else [],
                 "user_instructions": user_instructions,
                 "data_raw": data_input,
                 "max_retries": max_retries,
@@ -297,7 +298,58 @@ class DataWranglingAgent(BaseAgent):
         data_input = self._convert_data_input(data_raw)
         response = self._compiled_graph.invoke(
             {
+                "messages": [("user", user_instructions)] if user_instructions else [],
                 "user_instructions": user_instructions,
+                "data_raw": data_input,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    def invoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        data_raw: Union[pd.DataFrame, dict, list],
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Invokes the agent with an explicit message list (preferred for supervisors/teams).
+        """
+        data_input = self._convert_data_input(data_raw)
+        response = self._compiled_graph.invoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+                "data_raw": data_input,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    async def ainvoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        data_raw: Union[pd.DataFrame, dict, list],
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Async version of invoke_messages for supervisors/teams.
+        """
+        data_input = self._convert_data_input(data_raw)
+        response = await self._compiled_graph.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
                 "data_raw": data_input,
                 "max_retries": max_retries,
                 "retry_count": retry_count,
