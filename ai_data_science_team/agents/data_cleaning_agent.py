@@ -37,12 +37,16 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
 
 # Setup
 AGENT_NAME = "data_cleaning_agent"
 LOG_PATH = os.path.join(os.getcwd(), "logs/")
+MAX_SUMMARY_COLUMNS = 30
+
+# Prompt/summarization caps
+MAX_SUMMARY_COLUMNS = 30
 
 
 # Class
@@ -182,12 +186,27 @@ class DataCleaningAgent(BaseAgent):
         self._compiled_graph = self._make_compiled_graph()
         self.response = None
 
-    def _make_compiled_graph(self):
+    def invoke_agent(
+        self,
+        data_raw: pd.DataFrame,
+        user_instructions: str = None,
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
         """
-        Create the compiled graph for the data cleaning agent. Running this method will reset the response to None.
+        Invokes the agent. Returns the response and stores it in the response attribute.
         """
-        self.response = None
-        return make_data_cleaning_agent(**self._params)
+        self.response = self.invoke(
+            {
+                "user_instructions": user_instructions,
+                "data_raw": data_raw.to_dict(),
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        return None
 
     async def ainvoke_agent(
         self,
@@ -198,26 +217,9 @@ class DataCleaningAgent(BaseAgent):
         **kwargs,
     ):
         """
-        Asynchronously invokes the agent. The response is stored in the response attribute.
-
-        Parameters:
-        ----------
-            data_raw (pd.DataFrame):
-                The raw dataset to be cleaned.
-            user_instructions (str):
-                Instructions for data cleaning agent.
-            max_retries (int):
-                Maximum retry attempts for cleaning.
-            retry_count (int):
-                Current retry attempt.
-            **kwargs
-                Additional keyword arguments to pass to ainvoke().
-
-        Returns:
-        --------
-            None. The response is stored in the response attribute.
+        Asynchronously invokes the agent. Returns the response and stores it in the response attribute.
         """
-        response = await self._compiled_graph.ainvoke(
+        self.response = await self.ainvoke(
             {
                 "user_instructions": user_instructions,
                 "data_raw": data_raw.to_dict(),
@@ -226,48 +228,14 @@ class DataCleaningAgent(BaseAgent):
             },
             **kwargs,
         )
-        self.response = response
         return None
-
-    def invoke_agent(
-        self,
-        data_raw: pd.DataFrame,
-        user_instructions: str = None,
-        max_retries: int = 3,
-        retry_count: int = 0,
-        **kwargs,
-    ):
+    def _make_compiled_graph(self):
         """
-        Invokes the agent. The response is stored in the response attribute.
-
-        Parameters:
-        ----------
-            data_raw (pd.DataFrame):
-                The raw dataset to be cleaned.
-            user_instructions (str):
-                Instructions for data cleaning agent.
-            max_retries (int):
-                Maximum retry attempts for cleaning.
-            retry_count (int):
-                Current retry attempt.
-            **kwargs
-                Additional keyword arguments to pass to invoke().
-
-        Returns:
-        --------
-            None. The response is stored in the response attribute.
+        Create the compiled graph for the data cleaning agent. Running this method will reset the response to None.
         """
-        response = self._compiled_graph.invoke(
-            {
-                "user_instructions": user_instructions,
-                "data_raw": data_raw.to_dict(),
-                "max_retries": max_retries,
-                "retry_count": retry_count,
-            },
-            **kwargs,
-        )
-        self.response = response
-        return None
+        self.response = None
+        return make_data_cleaning_agent(**self._params)
+
 
     def get_workflow_summary(self, markdown=False):
         """
@@ -433,6 +401,34 @@ def make_data_cleaning_agent(
     """
     llm = model
 
+    # Prompt/summarization caps
+    MAX_SUMMARY_COLUMNS = 30
+
+    DEFAULT_CLEANING_STEPS = format_recommended_steps(
+        """
+1. Remove columns with >40% missing values.
+2. Impute numeric missing values with the mean; impute categorical missing with the mode.
+3. Convert columns to appropriate data types (numeric/categorical/datetime).
+4. Remove duplicate rows.
+5. Optionally drop rows with remaining missing values if still present.
+6. Remove extreme outliers (values beyond 3x IQR) for numeric columns unless instructed otherwise.
+        """,
+        heading="# Recommended Data Cleaning Steps:",
+    )
+
+    def _summarize_df_for_prompt(df: pd.DataFrame) -> str:
+        df_limited = df.iloc[:, :MAX_SUMMARY_COLUMNS] if df.shape[1] > MAX_SUMMARY_COLUMNS else df
+        summary = "\n\n".join(
+            get_dataframe_summary(
+                [df_limited],
+                n_sample=min(n_samples, 5),
+                skip_stats=True,
+            )
+        )
+        # Truncate to avoid token bloat
+        MAX_CHARS = 5000
+        return summary[:MAX_CHARS]
+
     if human_in_the_loop:
         if checkpointer is None:
             print(
@@ -465,6 +461,8 @@ def make_data_cleaning_agent(
         data_cleaner_file_name: str
         data_cleaner_function_name: str
         data_cleaner_error: str
+        data_cleaning_summary: str
+        data_cleaner_error_log_path: str
         max_retries: int
         retry_count: int
 
@@ -528,9 +526,7 @@ def make_data_cleaning_agent(
         data_raw = state.get("data_raw")
         df = pd.DataFrame.from_dict(data_raw)
 
-        all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-
-        all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+        all_datasets_summary_str = _summarize_df_for_prompt(df)
 
         steps_agent = recommend_steps_prompt | llm
         recommended_steps = steps_agent.invoke(
@@ -558,11 +554,11 @@ def make_data_cleaning_agent(
             data_raw = state.get("data_raw")
             df = pd.DataFrame.from_dict(data_raw)
 
-            all_datasets_summary = get_dataframe_summary([df], n_sample=n_samples)
-
-            all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+            all_datasets_summary_str = _summarize_df_for_prompt(df)
+            steps_for_prompt = DEFAULT_CLEANING_STEPS
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
+            steps_for_prompt = state.get("recommended_steps") or DEFAULT_CLEANING_STEPS
 
         data_cleaning_prompt = PromptTemplate(
             template="""
@@ -590,6 +586,7 @@ def make_data_cleaning_agent(
             Best Practices and Error Preventions:
 
             Always ensure that when assigning the output of fit_transform() from SimpleImputer to a Pandas DataFrame column, you call .ravel() or flatten the array, because fit_transform() returns a 2D array while a DataFrame column is 1D.
+            - Do NOT hardcode column names; derive columns programmatically from the provided data and user instructions.
             
             """,
             input_variables=[
@@ -603,7 +600,7 @@ def make_data_cleaning_agent(
 
         response = data_cleaning_agent.invoke(
             {
-                "recommended_steps": state.get("recommended_steps"),
+                "recommended_steps": steps_for_prompt,
                 "all_datasets_summary": all_datasets_summary_str,
                 "function_name": function_name,
             }
@@ -627,6 +624,7 @@ def make_data_cleaning_agent(
             "data_cleaner_file_name": file_name_2,
             "data_cleaner_function_name": function_name,
             "all_datasets_summary": all_datasets_summary_str,
+            "recommended_steps": steps_for_prompt,
         }
 
     # Human Review
@@ -673,13 +671,65 @@ def make_data_cleaning_agent(
             memory_limit_mb=512,
         )
 
+        data_cleaning_summary = None
+        df_out = None
+        validation_error = None
+        if error is None:
+            try:
+                df_out = pd.DataFrame(result)
+                df_raw = pd.DataFrame(state.get("data_raw"))
+
+                rows_before, rows_after = len(df_raw), len(df_out)
+                cols_before, cols_after = set(df_raw.columns), set(df_out.columns)
+                dropped_cols = sorted(list(cols_before - cols_after))
+                added_cols = sorted(list(cols_after - cols_before))
+                dtype_changes = []
+                for col in df_raw.columns:
+                    if col in df_out.columns:
+                        before = str(df_raw[col].dtype)
+                        after = str(df_out[col].dtype)
+                        if before != after:
+                            dtype_changes.append(f"{col}: {before} -> {after}")
+
+                data_cleaning_summary = "\n".join(
+                    [
+                        "# Data Cleaning Summary",
+                        f"Rows: {rows_before} -> {rows_after} (Δ {rows_after - rows_before})",
+                        f"Columns: {len(cols_before)} -> {len(cols_after)} (Δ {len(cols_after) - len(cols_before)})",
+                        f"Dropped Columns: {', '.join(dropped_cols) if dropped_cols else 'None'}",
+                        f"Added Columns: {', '.join(added_cols) if added_cols else 'None'}",
+                        "Dtype Changes:",
+                        "\n".join(dtype_changes) if dtype_changes else "None",
+                    ]
+                )
+            except Exception as exc:
+                validation_error = f"Cleaned output is not a valid table: {exc}"
+        else:
+            validation_error = error
+
         error_prefixed = (
-            f"An error occurred during data cleaning: {error}" if error else None
+            f"An error occurred during data cleaning: {validation_error}"
+            if validation_error
+            else None
         )
 
+        error_log_path = None
+        if error_prefixed and log:
+            error_log_path = log_ai_error(
+                error_message=error_prefixed,
+                file_name=f"{file_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else LOG_PATH,
+                overwrite=False,
+            )
+            if error_log_path:
+                print(f"      Error logged to: {error_log_path}")
+
         return {
-            "data_cleaned": result,
+            "data_cleaned": df_out.to_dict() if error_prefixed is None else None,
             "data_cleaner_error": error_prefixed,
+            "data_cleaning_summary": data_cleaning_summary,
+            "data_cleaner_error_log_path": error_log_path,
         }
 
     def fix_data_cleaner_code(state: GraphState):
@@ -719,6 +769,8 @@ def make_data_cleaning_agent(
                 "data_cleaner_function_path",
                 "data_cleaner_function_name",
                 "data_cleaner_error",
+                "data_cleaner_error_log_path",
+                "data_cleaning_summary",
             ],
             result_key="messages",
             role=AGENT_NAME,
