@@ -1,4 +1,4 @@
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -241,6 +241,67 @@ class SQLDataAnalyst(BaseAgent):
 
         self.response = response
 
+    def invoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Invoke the multi-agent with an explicit message list (preferred for supervisors/teams).
+        """
+        # If user_instructions not provided, derive from last human message if present
+        user_instructions = kwargs.pop("user_instructions", None)
+        if user_instructions is None:
+            for msg in reversed(messages):
+                if getattr(msg, "type", None) == "human" or getattr(msg, "role", None) == "user":
+                    user_instructions = msg.content
+                    break
+        response = self._compiled_graph.invoke(
+            {
+                "messages": messages,
+                "user_instructions": user_instructions,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        if response.get("messages"):
+            response["messages"] = remove_consecutive_duplicates(response["messages"])
+        self.response = response
+        return None
+
+    async def ainvoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Async version of invoke_messages.
+        """
+        user_instructions = kwargs.pop("user_instructions", None)
+        if user_instructions is None:
+            for msg in reversed(messages):
+                if getattr(msg, "type", None) == "human" or getattr(msg, "role", None) == "user":
+                    user_instructions = msg.content
+                    break
+        response = await self._compiled_graph.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": user_instructions,
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        if response.get("messages"):
+            response["messages"] = remove_consecutive_duplicates(response["messages"])
+        self.response = response
+        return None
+
     def get_data_sql(self):
         """
         Returns the SQL data as a Pandas DataFrame.
@@ -329,10 +390,12 @@ class SQLDataAnalyst(BaseAgent):
                 f"# SQL Data Analyst Workflow Summary\n\nThis workflow contains {len(agents)} agents:\n\n"
                 + "\n".join(agent_labels)
             )
-            reports = [
-                get_generic_summary(json.loads(msg.content))
-                for msg in self.response["messages"]
-            ]
+            reports = []
+            for msg in self.response["messages"]:
+                try:
+                    reports.append(get_generic_summary(json.loads(msg.content)))
+                except Exception:
+                    reports.append(msg.content)
             summary = "\n\n" + header + "\n\n".join(reports)
             return Markdown(summary) if markdown else summary
 
@@ -411,24 +474,64 @@ def make_sql_data_analyst(
         max_retries: int
         retry_count: int
 
-    def preprocess_routing(state: PrimaryState):
+    def prepare_messages(state: PrimaryState):
         print("---SQL DATA ANALYST---")
         print("*************************")
+        print("---PREPARE MESSAGES---")
+        msgs = state.get("messages", [])
+        ui = state.get("user_instructions")
+        if not msgs:
+            system_hint = (
+                "You are a SQL data analyst orchestrator. Route the user's question to SQL querying "
+                "and optional visualization. Prefer tables unless the user clearly requests a chart."
+            )
+            msgs = [("system", system_hint), ("user", ui)]
+        if not ui:
+            for msg in reversed(msgs):
+                if getattr(msg, "type", None) == "human" or getattr(msg, "role", None) == "user":
+                    ui = msg.content
+                    break
+        # Normalize any tuple messages into BaseMessage objects
+        normalized = []
+        for msg in msgs:
+            if isinstance(msg, BaseMessage):
+                normalized.append(msg)
+            elif isinstance(msg, tuple) and len(msg) == 2:
+                role, content = msg
+                if role in ("user", "human"):
+                    normalized.append(HumanMessage(content=content))
+                elif role == "system":
+                    normalized.append(SystemMessage(content=content))
+                elif role in ("assistant", "ai"):
+                    normalized.append(AIMessage(content=content))
+                else:
+                    normalized.append(HumanMessage(content=str(content)))
+            else:
+                normalized.append(HumanMessage(content=str(msg)))
+
+        return {"messages": normalized, "user_instructions": ui}
+
+    def preprocess_routing(state: PrimaryState):
         print("---PREPROCESS ROUTER---")
         question = state.get("user_instructions")
-
-        # Chart Routing and SQL Prep
-        response = routing_preprocessor.invoke({"user_instructions": question})
+        try:
+            response = routing_preprocessor.invoke({"user_instructions": question})
+        except Exception:
+            response = {
+                "user_instructions_sql_database": question,
+                "user_instructions_data_visualization": None,
+                "routing_preprocessor_decision": "table",
+            }
 
         return {
             "user_instructions_sql_database": response.get(
-                "user_instructions_sql_database"
+                "user_instructions_sql_database", question
             ),
             "user_instructions_data_visualization": response.get(
                 "user_instructions_data_visualization"
             ),
             "routing_preprocessor_decision": response.get(
-                "routing_preprocessor_decision"
+                "routing_preprocessor_decision", "table"
             ),
         }
 
@@ -457,10 +560,18 @@ def make_sql_data_analyst(
         }
 
     def invoke_data_visualization_agent(state: PrimaryState):
+        data_sql = state.get("data_sql")
+        if data_sql is None or (isinstance(data_sql, dict) and len(data_sql) == 0):
+            return {
+                "messages": [],
+                "data_visualization_function": None,
+                "plotly_graph": None,
+                "plotly_error": "No data returned from SQL step; visualization skipped.",
+            }
         response = data_visualization_agent.invoke(
             {
                 "user_instructions": state.get("user_instructions_data_visualization"),
-                "data_raw": state.get("data_sql"),
+                "data_raw": data_sql,
                 "max_retries": state.get("max_retries"),
                 "retry_count": state.get("retry_count"),
             }
@@ -473,30 +584,53 @@ def make_sql_data_analyst(
             "plotly_error": response.get("data_visualization_error"),
         }
 
-    def route_printer(state: PrimaryState):
-        print("---ROUTE PRINTER---")
-        print(f"    Route: {state.get('routing_preprocessor_decision')}")
-        print("---END---")
-        return {}
+    def finalize_output(state: PrimaryState):
+        print("---FINALIZE OUTPUT---")
+        route = state.get("routing_preprocessor_decision", "table")
+        data_sql = state.get("data_sql")
+        plot = state.get("plotly_graph")
+        plot_err = state.get("plotly_error")
+        sql_query = state.get("sql_query_code")
+        parts = []
+        if sql_query:
+            parts.append("SQL query generated and executed.")
+        if data_sql:
+            try:
+                df = pd.DataFrame(data_sql)
+                parts.append(f"Returned table shape: {df.shape[0]} rows x {df.shape[1]} cols.")
+            except Exception:
+                parts.append("Returned table available.")
+        if route == "chart":
+            if plot:
+                parts.append("Chart created from query results.")
+            elif plot_err:
+                parts.append(f"Chart not created: {plot_err}")
+        summary = " ".join(parts) or "Workflow completed."
+        ai_msg = AIMessage(content=summary, role=AGENT_NAME)
+        msgs = state.get("messages", [])
+        msgs = msgs + [ai_msg]
+        return {"messages": msgs}
 
     workflow = StateGraph(PrimaryState)
 
+    workflow.add_node("prepare_messages", prepare_messages)
     workflow.add_node("routing_preprocessor", preprocess_routing)
     workflow.add_node("sql_database_agent", invoke_sql_database_agent)
     workflow.add_node("data_visualization_agent", invoke_data_visualization_agent)
-    workflow.add_node("route_printer", route_printer)
+    workflow.add_node("finalize_output", finalize_output)
 
-    workflow.add_edge(START, "routing_preprocessor")
+    workflow.add_edge(START, "prepare_messages")
+    workflow.add_edge("prepare_messages", "routing_preprocessor")
     workflow.add_edge("routing_preprocessor", "sql_database_agent")
 
     workflow.add_conditional_edges(
         "sql_database_agent",
         router_chart_or_table,
-        {"chart": "data_visualization_agent", "table": "route_printer"},
+        {"chart": "data_visualization_agent", "table": "finalize_output"},
     )
 
-    workflow.add_edge("data_visualization_agent", "route_printer")
-    workflow.add_edge("route_printer", END)
+    workflow.add_edge("data_visualization_agent", "finalize_output")
+    workflow.add_edge("finalize_output", END)
 
     app = workflow.compile(checkpointer=checkpointer, name=AGENT_NAME)
 
