@@ -199,6 +199,7 @@ class DataCleaningAgent(BaseAgent):
         """
         self.response = self.invoke(
             {
+                "messages": [("user", user_instructions)] if user_instructions else [],
                 "user_instructions": user_instructions,
                 "data_raw": data_raw.to_dict(),
                 "max_retries": max_retries,
@@ -221,7 +222,54 @@ class DataCleaningAgent(BaseAgent):
         """
         self.response = await self.ainvoke(
             {
+                "messages": [("user", user_instructions)] if user_instructions else [],
                 "user_instructions": user_instructions,
+                "data_raw": data_raw.to_dict(),
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        return None
+
+    def invoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        data_raw: pd.DataFrame,
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Invokes the agent with an explicit message list (preferred for supervisors/teams).
+        """
+        self.response = self.invoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+                "data_raw": data_raw.to_dict(),
+                "max_retries": max_retries,
+                "retry_count": retry_count,
+            },
+            **kwargs,
+        )
+        return None
+
+    async def ainvoke_messages(
+        self,
+        messages: Sequence[BaseMessage],
+        data_raw: pd.DataFrame,
+        max_retries: int = 3,
+        retry_count: int = 0,
+        **kwargs,
+    ):
+        """
+        Async version of invoke_messages for supervisors/teams.
+        """
+        self.response = await self.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
                 "data_raw": data_raw.to_dict(),
                 "max_retries": max_retries,
                 "retry_count": retry_count,
