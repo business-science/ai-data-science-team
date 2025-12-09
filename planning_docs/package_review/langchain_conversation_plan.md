@@ -29,9 +29,9 @@ Goal: migrate agents to a message-first structure (`HumanMessage`/`AIMessage`) f
 - [x] data_visualization_agent (message-first entrypoints and demo added)
 - [x] sql_database_agent (message-first entrypoints and demo added)
 - [x] feature_engineering_agent (message-first entrypoints and demo added)
-- [ ] eda_tools_agent (ds_agents)
+- [x] eda_tools_agent (ds_agents)
 - [x] h2o_ml_agent (message-first entrypoints, validation tweaks, and demo added)
-- [ ] mlflow_tools_agent (ml_agents)
+- [x] mlflow_tools_agent (ml_agents)
 
 ### Next phase: non-core modules
 - ds_agents: eda_tools_agent

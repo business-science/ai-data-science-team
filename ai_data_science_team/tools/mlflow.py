@@ -1,6 +1,7 @@
 from typing_extensions import Optional, Union, List, Annotated
 from langgraph.prebuilt import InjectedState
 from langchain.tools import tool
+import psutil
 
 
 @tool(response_format="content_and_artifact")
@@ -298,20 +299,34 @@ def mlflow_stop_ui(port: int = 5000) -> str:
     print("    * Tool: mlflow_stop_ui")
     import psutil
 
-    # Gather system-wide inet connections
-    for conn in psutil.net_connections(kind="inet"):
-        # Check if this connection has a local address (laddr) and if
-        # the port matches the one we're trying to free
-        if conn.laddr and conn.laddr.port == port:
-            # Some connections may not have an associated PID
-            if conn.pid is not None:
-                try:
-                    p = psutil.Process(conn.pid)
-                    p_name = p.name()  # optional: get process name for clarity
-                    p.kill()  # forcibly terminate the process
-                    return f"Killed process {conn.pid} ({p_name}) listening on port {port}."
-                except psutil.NoSuchProcess:
-                    return "Process was already terminated before we could kill it."
+    # Attempt to find processes listening on port; on macOS this may require elevated perms.
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except psutil.AccessDenied:
+        return (
+            "Unable to enumerate network connections (permission denied). "
+            "Try running with elevated permissions or stop the MLflow UI manually."
+        )
+    except Exception as e:
+        return f"Failed to inspect network connections: {e}"
+
+    for conn in conns:
+        if conn.laddr and conn.laddr.port == port and conn.pid is not None:
+            try:
+                p = psutil.Process(conn.pid)
+                p_name = p.name()
+                p.kill()
+                return f"Killed process {conn.pid} ({p_name}) listening on port {port}."
+            except psutil.NoSuchProcess:
+                return "Process was already terminated before we could kill it."
+            except psutil.AccessDenied:
+                return (
+                    f"Process {conn.pid} is listening on port {port} but cannot be killed "
+                    "due to insufficient permissions."
+                )
+            except Exception as e:
+                return f"Failed to kill process {conn.pid} on port {port}: {e}"
+
     return f"No process found listening on port {port}."
 
 
@@ -552,6 +567,138 @@ def mlflow_get_model_version_details(
     }
 
     return (f"Model version details retrieved for {name} v{version}", data)
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_get_run_details(
+    run_id: str,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+) -> tuple:
+    """
+    Retrieve run info, params, metrics, tags, and a shallow artifact listing.
+    """
+    print("    * Tool: mlflow_get_run_details")
+    from mlflow.tracking import MlflowClient
+    import pandas as pd
+
+    client = MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
+    run = client.get_run(run_id)
+    info = run.info
+    data = run.data
+
+    # Shallow artifact listing at root
+    artifacts = client.list_artifacts(run_id, "")
+    artifacts_data = [
+        {"path": a.path, "is_dir": a.is_dir, "file_size": a.file_size}
+        for a in artifacts
+    ]
+
+    flattened = {
+        "run_id": info.run_id,
+        "run_name": info.run_name,
+        "status": info.status,
+        "start_time": pd.to_datetime(info.start_time, unit="ms"),
+        "end_time": pd.to_datetime(info.end_time, unit="ms") if info.end_time else None,
+        "experiment_id": info.experiment_id,
+        "user_id": info.user_id,
+        "artifact_uri": info.artifact_uri,
+        "metrics": data.metrics,
+        "params": data.params,
+        "tags": data.tags,
+        "artifacts": artifacts_data,
+    }
+    return (f"Details retrieved for run_id='{run_id}'.", flattened)
+
+
+@tool(response_format="content")
+def mlflow_transition_model_version_stage(
+    name: str,
+    version: str,
+    stage: str,
+    archive_existing_versions: bool = False,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+) -> str:
+    """
+    Transition a registered model version to a new stage (e.g., Staging, Production, Archived).
+    """
+    print("    * Tool: mlflow_transition_model_version_stage")
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
+    client.transition_model_version_stage(
+        name=name,
+        version=version,
+        stage=stage,
+        archive_existing_versions=archive_existing_versions,
+    )
+    return (
+        f"Model '{name}' version '{version}' transitioned to stage '{stage}'. "
+        f"archive_existing_versions={archive_existing_versions}"
+    )
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_tracking_info() -> tuple:
+    """
+    Return current tracking URI, registry URI, and active run info (if any).
+    """
+    print("    * Tool: mlflow_tracking_info")
+    import mlflow
+
+    tracking_uri = mlflow.get_tracking_uri()
+    registry_uri = mlflow.get_registry_uri()
+    active = mlflow.active_run()
+    active_info = None
+    if active:
+        active_info = {
+            "run_id": active.info.run_id,
+            "experiment_id": active.info.experiment_id,
+            "artifact_uri": active.info.artifact_uri,
+            "status": active.info.status,
+        }
+    msg = "MLflow tracking info retrieved."
+    artifact = {
+        "tracking_uri": tracking_uri,
+        "registry_uri": registry_uri,
+        "active_run": active_info,
+    }
+    return msg, artifact
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_ui_status(port: int = 5000) -> tuple:
+    """
+    Check if a process appears to be serving MLflow UI on the given port.
+    """
+    print("    * Tool: mlflow_ui_status")
+    ui_procs = []
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                if any("mlflow" in part for part in cmdline) and "ui" in cmdline:
+                    ui_procs.append(proc.info)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        ui_procs = []
+
+    listening = []
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.laddr and conn.laddr.port == port and conn.pid is not None:
+                listening.append(conn.pid)
+    except Exception:
+        listening = []
+
+    running = any(p["pid"] in listening for p in ui_procs) if ui_procs else bool(listening)
+    msg = (
+        f"MLflow UI {'appears to be running' if running else 'not detected'} "
+        f"on port {port}."
+    )
+    return msg, {"ui_processes": ui_procs, "listening_pids_on_port": listening}
 
 
 # @tool

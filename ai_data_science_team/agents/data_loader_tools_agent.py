@@ -8,8 +8,6 @@ from IPython.display import Markdown
 
 from langchain_core.messages import BaseMessage, AIMessage
 
-from langgraph.prebuilt import ToolNode
-
 try:
     from langgraph.prebuilt import create_react_agent
     from langgraph.prebuilt.chat_agent_executor import AgentState
@@ -223,7 +221,9 @@ class DataLoaderToolsAgent(BaseAgent):
             isinstance(v, dict) and "data" in v for v in artifact.values()
         ):
             dataframes = {
-                k: pd.DataFrame(v["data"]) if v.get("data") is not None else pd.DataFrame()
+                k: pd.DataFrame(v["data"])
+                if v.get("data") is not None
+                else pd.DataFrame()
                 for k, v in artifact.items()
             }
             return dataframes if as_dataframe else dataframes
@@ -344,9 +344,9 @@ def make_data_loader_tools_agent(
         if not internal_messages:
             return {
                 "messages": [],
-            "data_loader_artifacts": None,
-            "tool_calls": [],
-        }
+                "data_loader_artifacts": None,
+                "tool_calls": [],
+            }
 
         # Prefer the last assistant/ai message; fall back to last message
         last_ai = None
@@ -367,11 +367,11 @@ def make_data_loader_tools_agent(
             art = getattr(msg, "artifact", None)
             name = getattr(msg, "name", None)
             if art is not None:
-                key = name or f"artifact_{len(artifacts)+1}"
+                key = name or f"artifact_{len(artifacts) + 1}"
                 artifacts[key] = art
                 last_tool_artifact = art
             elif isinstance(msg, dict) and "artifact" in msg:
-                key = msg.get("name") or f"artifact_{len(artifacts)+1}"
+                key = msg.get("name") or f"artifact_{len(artifacts) + 1}"
                 artifacts[key] = msg["artifact"]
                 last_tool_artifact = msg["artifact"]
 

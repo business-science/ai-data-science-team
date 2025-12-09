@@ -7,8 +7,6 @@ from IPython.display import Markdown
 
 from langchain_core.messages import BaseMessage, AIMessage
 
-from langgraph.prebuilt import ToolNode
-
 try:
     from langgraph.prebuilt import create_react_agent
     from langgraph.prebuilt.chat_agent_executor import AgentState
@@ -32,6 +30,10 @@ from ai_data_science_team.tools.mlflow import (
     mlflow_list_registered_models,
     mlflow_search_registered_models,
     mlflow_get_model_version_details,
+    mlflow_get_run_details,
+    mlflow_transition_model_version_stage,
+    mlflow_tracking_info,
+    mlflow_ui_status,
 )
 from ai_data_science_team.utils.messages import get_tool_call_names
 
@@ -50,6 +52,10 @@ tools = [
     mlflow_list_registered_models,
     mlflow_search_registered_models,
     mlflow_get_model_version_details,
+    mlflow_get_run_details,
+    mlflow_transition_model_version_stage,
+    mlflow_tracking_info,
+    mlflow_ui_status,
 ]
 
 
@@ -129,6 +135,7 @@ class MLflowToolsAgent(BaseAgent):
         create_react_agent_kwargs: Optional[Dict] = {},
         invoke_react_agent_kwargs: Optional[Dict] = {},
         checkpointer: Optional[Checkpointer] = None,
+        log_tool_calls: bool = True,
     ):
         self._params = {
             "model": model,
@@ -137,6 +144,7 @@ class MLflowToolsAgent(BaseAgent):
             "create_react_agent_kwargs": create_react_agent_kwargs,
             "invoke_react_agent_kwargs": invoke_react_agent_kwargs,
             "checkpointer": checkpointer,
+            "log_tool_calls": log_tool_calls,
         }
         self._compiled_graph = self._make_compiled_graph()
         self.response = None
@@ -172,8 +180,12 @@ class MLflowToolsAgent(BaseAgent):
             Additional keyword arguments to pass to the agents ainvoke method.
 
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = await self._compiled_graph.ainvoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
                 "data_raw": data_raw.to_dict() if data_raw is not None else None,
             },
@@ -196,9 +208,47 @@ class MLflowToolsAgent(BaseAgent):
             The raw data to pass to the agent. Used for prediction and tool calls where data is required.
 
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = self._compiled_graph.invoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
+                "data_raw": data_raw.to_dict() if data_raw is not None else None,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    def invoke_messages(
+        self, messages: Sequence[BaseMessage], data_raw: pd.DataFrame = None, **kwargs
+    ):
+        """
+        Runs the agent with an explicit message list (preferred for supervisors/teams).
+        """
+        response = self._compiled_graph.invoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+                "data_raw": data_raw.to_dict() if data_raw is not None else None,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    async def ainvoke_messages(
+        self, messages: Sequence[BaseMessage], data_raw: pd.DataFrame = None, **kwargs
+    ):
+        """
+        Async version of invoke_messages.
+        """
+        response = await self._compiled_graph.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
                 "data_raw": data_raw.to_dict() if data_raw is not None else None,
             },
             **kwargs,
@@ -251,10 +301,23 @@ class MLflowToolsAgent(BaseAgent):
         """
         Returns the AI message from the agent's response.
         """
+        if not self.response or "messages" not in self.response:
+            return None
+        msgs = self.response.get("messages", [])
+        last_ai = None
+        for msg in reversed(msgs):
+            role = getattr(msg, "role", None) or getattr(msg, "type", None)
+            if role in ("assistant", "ai"):
+                last_ai = msg
+                break
+        if last_ai is None and msgs:
+            last_ai = msgs[-1]
+        if last_ai is None:
+            return None
+        content = getattr(last_ai, "content", "")
         if markdown:
-            return Markdown(self.response["messages"][0].content)
-        else:
-            return self.response["messages"][0].content
+            return Markdown(content)
+        return content
 
     def get_tool_calls(self):
         """
@@ -270,6 +333,7 @@ def make_mlflow_tools_agent(
     create_react_agent_kwargs: Optional[Dict] = {},
     invoke_react_agent_kwargs: Optional[Dict] = {},
     checkpointer: Optional[Checkpointer] = None,
+    log_tool_calls: bool = True,
 ):
     """
     MLflow Tool Calling Agent
@@ -299,8 +363,8 @@ def make_mlflow_tools_agent(
     try:
         import mlflow
     except ImportError:
-        return (
-            "MLflow is not installed. Please install it by running: !pip install mlflow"
+        raise ImportError(
+            "MLflow is not installed. Please install it by running: pip install mlflow"
         )
 
     if mlflow_tracking_uri is not None:
@@ -310,50 +374,57 @@ def make_mlflow_tools_agent(
         mlflow.set_registry_uri(mlflow_registry_uri)
 
     class GraphState(AgentState):
-        internal_messages: Annotated[Sequence[BaseMessage], operator.add]
+        messages: Annotated[Sequence[BaseMessage], operator.add]
         user_instructions: str
         data_raw: dict
         mlflow_artifacts: dict
+        tool_calls: list
 
-    def mflfow_tools_agent(state):
-        """
-        Postprocesses the MLflow state, keeping only the last message
-        and extracting the last tool artifact.
-        """
+    # Build React subgraph once so it appears in .show(xray=1)
+    react_agent = create_react_agent(
+        model,
+        tools=tools,
+        state_schema=GraphState,
+        checkpointer=checkpointer,
+        **create_react_agent_kwargs,
+    )
+    if invoke_react_agent_kwargs:
+        react_agent = react_agent.with_config(invoke_react_agent_kwargs)
+
+    def prepare_messages(state: GraphState):
         print(format_agent_name(AGENT_NAME))
-        print("    * RUN REACT TOOL-CALLING AGENT")
-
-        tool_node = ToolNode(tools=tools)
-
-        mlflow_agent = create_react_agent(
-            model,
-            tools=tool_node,
-            state_schema=GraphState,
-            checkpointer=checkpointer,
-            **create_react_agent_kwargs,
+        print("    * PREPARE MESSAGES")
+        if state.get("messages"):
+            return {}
+        system_hint = (
+            "You are an MLflow tools agent. Use the provided MLflow tools to inspect or manage MLflow, "
+            "and return concise results. The tracking URI and registry URI are already configured."
         )
+        base_messages = [("user", state.get("user_instructions"))]
+        return {"messages": [("system", system_hint)] + base_messages}
 
-        response = mlflow_agent.invoke(
-            {
-                "messages": [("user", state["user_instructions"])],
-                "data_raw": state["data_raw"],
-            },
-            invoke_react_agent_kwargs,
-        )
-
+    def post_process(state: GraphState):
         print("    * POST-PROCESS RESULTS")
+        internal_messages = state.get("messages", [])
 
-        internal_messages = response["messages"]
-
-        # Ensure there is at least one AI message
         if not internal_messages:
             return {
-                "internal_messages": [],
+                "messages": [],
                 "mlflow_artifacts": None,
+                "tool_calls": [],
             }
 
-        # Get the last AI message
-        last_ai_message = AIMessage(internal_messages[-1].content, role=AGENT_NAME)
+        # Prefer the last assistant/ai message; fall back to last message
+        last_ai = None
+        for msg in reversed(internal_messages):
+            role = getattr(msg, "role", None) or getattr(msg, "type", None)
+            if role in ("assistant", "ai"):
+                last_ai = msg
+                break
+        if last_ai is None:
+            last_ai = internal_messages[-1]
+
+        last_ai_message = AIMessage(getattr(last_ai, "content", ""), role=AGENT_NAME)
 
         # Collect artifacts per tool if possible
         artifacts = {}
@@ -371,6 +442,9 @@ def make_mlflow_tools_agent(
                 last_tool_artifact = msg["artifact"]
 
         tool_calls = get_tool_call_names(internal_messages)
+        if log_tool_calls and tool_calls:
+            for name in tool_calls:
+                print(f"    * Tool: {name}")
 
         return {
             "messages": [last_ai_message],
@@ -381,10 +455,14 @@ def make_mlflow_tools_agent(
 
     workflow = StateGraph(GraphState)
 
-    workflow.add_node("mlflow_tools_agent", mflfow_tools_agent)
+    workflow.add_node("prepare_messages", prepare_messages)
+    workflow.add_node("react_agent", react_agent)
+    workflow.add_node("post_process", post_process)
 
-    workflow.add_edge(START, "mlflow_tools_agent")
-    workflow.add_edge("mlflow_tools_agent", END)
+    workflow.add_edge(START, "prepare_messages")
+    workflow.add_edge("prepare_messages", "react_agent")
+    workflow.add_edge("react_agent", "post_process")
+    workflow.add_edge("post_process", END)
 
     app = workflow.compile(
         checkpointer=checkpointer,
