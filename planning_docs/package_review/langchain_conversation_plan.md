@@ -1,4 +1,4 @@
-## LangChain Conversation Migration Plan
+## [STATUS: ACTIVE, IN REVIEW] LangChain Conversation Migration Plan
 
 Goal: migrate agents to a message-first structure (`HumanMessage`/`AIMessage`) for compatibility with supervisor/team architectures, without breaking existing APIs.
 

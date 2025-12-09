@@ -1,4 +1,4 @@
-# Sandbox Rollout Plan
+# [STATUS: COMPLETED] Sandbox Rollout Plan
 
 ## Goal
 Replace in-process `exec` across agents with the new subprocess-based sandbox for generated code execution.
