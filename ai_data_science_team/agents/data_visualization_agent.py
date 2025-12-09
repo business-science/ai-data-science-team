@@ -36,7 +36,7 @@ from ai_data_science_team.utils.regex import (
     get_generic_summary,
 )
 from ai_data_science_team.tools.dataframe import get_dataframe_summary
-from ai_data_science_team.utils.logging import log_ai_function
+from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.utils.plotly import plotly_from_dict
 from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
 
@@ -485,6 +485,26 @@ def make_data_visualization_agent(
 
     llm = model
 
+    MAX_SUMMARY_COLUMNS = 30
+    MAX_SUMMARY_CHARS = 5000
+
+    DEFAULT_VISUALIZATION_INSTRUCTIONS = """
+Use an appropriate chart type based on column types (categorical vs numeric). Derive columns from the provided schema; do not hardcode names. Handle missing values gracefully. Prefer plotly express for simplicity. Do not save files or print; just return a JSON-serializable Plotly figure dictionary.
+    """
+
+    def _summarize_df_for_prompt(df: pd.DataFrame) -> str:
+        df_limited = (
+            df.iloc[:, :MAX_SUMMARY_COLUMNS] if df.shape[1] > MAX_SUMMARY_COLUMNS else df
+        )
+        summary = "\n\n".join(
+            get_dataframe_summary(
+                [df_limited],
+                n_sample=min(n_samples, 5),
+                skip_stats=True,
+            )
+        )
+        return summary[:MAX_SUMMARY_CHARS]
+
     if human_in_the_loop:
         if checkpointer is None:
             print(
@@ -518,6 +538,8 @@ def make_data_visualization_agent(
         data_visualization_function_file_name: str
         data_visualization_function_name: str
         data_visualization_error: str
+        data_visualization_error_log_path: str
+        data_visualization_summary: str
         max_retries: int
         retry_count: int
 
@@ -573,11 +595,7 @@ def make_data_visualization_agent(
         data_raw = state.get("data_raw")
         df = pd.DataFrame.from_dict(data_raw)
 
-        all_datasets_summary = get_dataframe_summary(
-            [df], n_sample=n_samples, skip_stats=False
-        )
-
-        all_datasets_summary_str = "\n\n".join(all_datasets_summary)
+        all_datasets_summary_str = _summarize_df_for_prompt(df)
 
         chart_instructor = recommend_steps_prompt | llm
 
@@ -592,7 +610,7 @@ def make_data_visualization_agent(
         return {
             "recommended_steps": format_recommended_steps(
                 recommended_steps.content.strip(),
-                heading="# Recommended Data Cleaning Steps:",
+                heading="# Recommended Data Visualization Steps:",
             ),
             "all_datasets_summary": all_datasets_summary_str,
         }
@@ -606,17 +624,17 @@ def make_data_visualization_agent(
             data_raw = state.get("data_raw")
             df = pd.DataFrame.from_dict(data_raw)
 
-            all_datasets_summary = get_dataframe_summary(
-                [df], n_sample=n_samples, skip_stats=False
+            all_datasets_summary_str = _summarize_df_for_prompt(df)
+
+            chart_generator_instructions = (
+                state.get("user_instructions") or DEFAULT_VISUALIZATION_INSTRUCTIONS
             )
-
-            all_datasets_summary_str = "\n\n".join(all_datasets_summary)
-
-            chart_generator_instructions = state.get("user_instructions")
 
         else:
             all_datasets_summary_str = state.get("all_datasets_summary")
-            chart_generator_instructions = state.get("recommended_steps")
+            chart_generator_instructions = (
+                state.get("recommended_steps") or DEFAULT_VISUALIZATION_INSTRUCTIONS
+            )
 
         prompt_template = PromptTemplate(
             template="""
@@ -741,13 +759,43 @@ def make_data_visualization_agent(
             data_format="dataframe",
         )
 
+        validation_error = error
+        viz_summary = None
+
+        if error is None:
+            try:
+                fig = plotly_from_dict(result)
+                if fig is None:
+                    validation_error = "Plotly figure could not be reconstructed."
+                else:
+                    traces = len(fig.data) if hasattr(fig, "data") else 0
+                    viz_summary = f"Plotly figure with {traces} trace(s) generated."
+            except Exception as exc:
+                validation_error = f"Plotly reconstruction failed: {exc}"
+
         error_prefixed = (
-            f"An error occurred during data visualization: {error}" if error else None
+            f"An error occurred during data visualization: {validation_error}"
+            if validation_error
+            else None
         )
 
+        error_log_path = None
+        if error_prefixed and log:
+            error_log_path = log_ai_error(
+                error_message=error_prefixed,
+                file_name=f"{file_name}_errors.log",
+                log=log,
+                log_path=log_path if log_path is not None else LOG_PATH,
+                overwrite=False,
+            )
+            if error_log_path:
+                print(f"      Error logged to: {error_log_path}")
+
         return {
-            "plotly_graph": result,
+            "plotly_graph": result if error_prefixed is None else None,
             "data_visualization_error": error_prefixed,
+            "data_visualization_error_log_path": error_log_path,
+            "data_visualization_summary": viz_summary,
         }
 
     def fix_data_visualization_code(state: GraphState):
@@ -787,6 +835,8 @@ def make_data_visualization_agent(
                 "data_visualization_function_path",
                 "data_visualization_function_name",
                 "data_visualization_error",
+                "data_visualization_error_log_path",
+                "data_visualization_summary",
             ],
             result_key="messages",
             role=AGENT_NAME,

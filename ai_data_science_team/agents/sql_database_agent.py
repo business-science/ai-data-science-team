@@ -226,6 +226,7 @@ class SQLDatabaseAgent(BaseAgent):
             **kwargs,
         )
         self.response = response
+        return None
 
     def invoke_agent(
         self, user_instructions: str = None, max_retries=3, retry_count=0, **kwargs
@@ -257,6 +258,7 @@ class SQLDatabaseAgent(BaseAgent):
             **kwargs,
         )
         self.response = response
+        return None
 
     def get_workflow_summary(self, markdown=False):
         """
