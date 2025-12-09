@@ -81,12 +81,14 @@ class DataLoaderToolsAgent(BaseAgent):
         create_react_agent_kwargs: Optional[Dict] = {},
         invoke_react_agent_kwargs: Optional[Dict] = {},
         checkpointer: Optional[Checkpointer] = None,
+        log_tool_calls: bool = True,
     ):
         self._params = {
             "model": model,
             "create_react_agent_kwargs": create_react_agent_kwargs,
             "invoke_react_agent_kwargs": invoke_react_agent_kwargs,
             "checkpointer": checkpointer,
+            "log_tool_calls": log_tool_calls,
         }
         self._compiled_graph = self._make_compiled_graph()
         self.response = None
@@ -118,8 +120,12 @@ class DataLoaderToolsAgent(BaseAgent):
             Additional keyword arguments to pass to the agents ainvoke method.
 
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = await self._compiled_graph.ainvoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
             },
             **kwargs,
@@ -139,9 +145,41 @@ class DataLoaderToolsAgent(BaseAgent):
             Additional keyword arguments to pass to the agents invoke method.
 
         """
+        messages = kwargs.pop("messages", None)
+        if messages is None:
+            messages = [("user", user_instructions)]
         response = self._compiled_graph.invoke(
             {
+                "messages": messages,
                 "user_instructions": user_instructions,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    def invoke_messages(self, messages: Sequence[BaseMessage], **kwargs):
+        """
+        Runs the agent given an explicit message list (preferred for supervisors/teams).
+        """
+        response = self._compiled_graph.invoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
+            },
+            **kwargs,
+        )
+        self.response = response
+        return None
+
+    async def ainvoke_messages(self, messages: Sequence[BaseMessage], **kwargs):
+        """
+        Async version of invoke_messages for supervisors/teams.
+        """
+        response = await self._compiled_graph.ainvoke(
+            {
+                "messages": messages,
+                "user_instructions": None,
             },
             **kwargs,
         )
@@ -242,6 +280,7 @@ def make_data_loader_tools_agent(
     create_react_agent_kwargs: Optional[Dict] = {},
     invoke_react_agent_kwargs: Optional[Dict] = {},
     checkpointer: Optional[Checkpointer] = None,
+    log_tool_calls: bool = True,
 ):
     """
     Creates a Data Loader Agent that can interact with data loading tools.
@@ -273,14 +312,16 @@ def make_data_loader_tools_agent(
 
     class GraphState(AgentState):
         user_instructions: str
-        internal_messages: Annotated[Sequence[BaseMessage], operator.add]
+        messages: Annotated[Sequence[BaseMessage], operator.add]
         data_loader_artifacts: dict
         tool_calls: List[str]
 
     def prepare_messages(state: GraphState):
         print(format_agent_name(AGENT_NAME))
         print("    * PREPARE MESSAGES")
-        return {"messages": [("user", state["user_instructions"])]}
+        if state.get("messages"):
+            return {}
+        return {"messages": [("user", state.get("user_instructions"))]}
 
     def run_react_agent(state: GraphState):
         print("    * RUN REACT TOOL-CALLING AGENT")
@@ -294,7 +335,6 @@ def make_data_loader_tools_agent(
         if not internal_messages:
             return {
                 "messages": [],
-            "internal_messages": [],
             "data_loader_artifacts": None,
             "tool_calls": [],
         }
@@ -322,7 +362,7 @@ def make_data_loader_tools_agent(
                 break
 
         tool_calls = get_tool_call_names(internal_messages)
-        if tool_calls:
+        if tool_calls and log_tool_calls:
             for name in tool_calls:
                 # try to include artifact path if present in the prior message
                 path_hint = ""
