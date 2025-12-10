@@ -336,6 +336,17 @@ Rules:
         merged = _trim_messages(merged)
         return {"messages": merged}
 
+    def _tag_messages(msgs: Sequence[BaseMessage], default_name: str):
+        tagged = []
+        for m in msgs or []:
+            if isinstance(m, AIMessage) and not getattr(m, "name", None):
+                tagged.append(
+                    AIMessage(content=getattr(m, "content", ""), name=default_name)
+                )
+            else:
+                tagged.append(m)
+        return tagged
+
     def _ensure_df(data):
         try:
             import pandas as pd
@@ -390,16 +401,24 @@ Rules:
 
                 df = pd.DataFrame(data_raw)
                 summary_msg = AIMessage(
-                    content=f"Loaded dataset with shape {df.shape}. What would you like to do next? I can clean, explore, visualize, engineer features, run SQL, or train a model."
+                    content=f"Loaded dataset with shape {df.shape}. What would you like to do next? I can clean, explore, visualize, engineer features, run SQL, or train a model.",
+                    name="data_loader_agent",
                 )
             except Exception:
-                summary_msg = AIMessage(content="Loaded dataset successfully. What would you like to do next?")
+                summary_msg = AIMessage(
+                    content="Loaded dataset successfully. What would you like to do next?",
+                    name="data_loader_agent",
+                )
         elif data_raw is not None:
-            summary_msg = AIMessage(content="Loaded dataset successfully. What would you like to do next?")
+            summary_msg = AIMessage(
+                content="Loaded dataset successfully. What would you like to do next?",
+                name="data_loader_agent",
+            )
 
         if summary_msg:
             merged["messages"] = merged.get("messages", []) + [summary_msg]
 
+        merged["messages"] = _tag_messages(merged.get("messages"), "data_loader_agent")
         return {
             **merged,
             "data_raw": data_raw,
@@ -417,6 +436,9 @@ Rules:
             data_raw=_ensure_df(state.get("data_raw")),
         )
         merged = _merge_messages(state, data_wrangling_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "data_wrangling_agent"
+        )
         return {
             **merged,
             "data_wrangled": (data_wrangling_agent.response or {}).get("data_wrangled"),
@@ -436,6 +458,9 @@ Rules:
             data_raw=_ensure_df(state.get("data_wrangled") or state.get("data_raw")),
         )
         merged = _merge_messages(state, data_cleaning_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "data_cleaning_agent"
+        )
         return {
             **merged,
             "data_cleaned": (data_cleaning_agent.response or {}).get("data_cleaned"),
@@ -454,6 +479,9 @@ Rules:
             messages=state.get("messages", []),
         )
         merged = _merge_messages(state, sql_database_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "sql_database_agent"
+        )
         return {
             **merged,
             "data_sql": (sql_database_agent.response or {}).get("data_sql"),
@@ -483,6 +511,7 @@ Rules:
             ),
         )
         merged = _merge_messages(state, eda_tools_agent.response or {})
+        merged["messages"] = _tag_messages(merged.get("messages"), "eda_tools_agent")
         print(f"  eda artifacts keys={(eda_tools_agent.response or {}).get('eda_artifacts') and list((eda_tools_agent.response or {}).get('eda_artifacts').keys())}")
         return {
             **merged,
@@ -506,6 +535,9 @@ Rules:
             ),
         )
         merged = _merge_messages(state, data_visualization_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "data_visualization_agent"
+        )
         return {
             **merged,
             "viz_graph": (data_visualization_agent.response or {}).get("plotly_graph"),
@@ -535,6 +567,9 @@ Rules:
             ),
         )
         merged = _merge_messages(state, feature_engineering_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "feature_engineering_agent"
+        )
         return {
             **merged,
             "feature_data": (feature_engineering_agent.response or {}).get(
@@ -559,6 +594,7 @@ Rules:
             ),
         )
         merged = _merge_messages(state, h2o_ml_agent.response or {})
+        merged["messages"] = _tag_messages(merged.get("messages"), "h2o_ml_agent")
         return {
             **merged,
             "model_info": (h2o_ml_agent.response or {}).get("leaderboard"),
@@ -575,6 +611,9 @@ Rules:
             messages=state.get("messages", []),
         )
         merged = _merge_messages(state, mlflow_tools_agent.response or {})
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "mlflow_tools_agent"
+        )
         return {
             **merged,
             "mlflow_artifacts": (mlflow_tools_agent.response or {}).get(

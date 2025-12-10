@@ -361,10 +361,16 @@ if prompt:
             role = getattr(message, "role", getattr(message, "type", None))
             if role in ("assistant", "ai"):
                 name = getattr(message, "name", None) or "assistant"
+                # Heuristic: infer agent name from content if not provided
+                if name == "assistant":
+                    txt_lower = (getattr(message, "content", "") or "").lower()
+                    if "loader" in txt_lower:
+                        name = "data_loader_agent"
+                display_name = name.replace("_", " ").title()
                 content = getattr(message, "content", "")
                 if content:
-                    reasoning_items.append((name, content))
-                    reasoning += f"##### {name}:\n\n{content}\n\n---\n\n"
+                    reasoning_items.append((display_name, content))
+                    reasoning += f"##### {display_name}:\n\n{content}\n\n---\n\n"
 
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
