@@ -226,16 +226,26 @@ def render_history(history: list[BaseMessage]):
                             "Data (raw/clean)",
                             "Charts",
                             "Models/MLflow",
-                            "Artifacts",
+                            # "Artifacts",
                         ]
                     )
                     # AI Reasoning
                     with tabs[0]:
-                        st.write(
-                            detail.get(
-                                "reasoning", detail.get("ai_reply", "_(No reply)_")
-                            )
-                        )
+                        reasoning_items = detail.get("reasoning_items", [])
+                        if reasoning_items:
+                            for name, text in reasoning_items:
+                                if not text:
+                                    continue
+                                st.markdown(f"**{name}:**")
+                                st.write(text)
+                                st.markdown("---")
+                        else:
+                            # fallback to single string if provided
+                            txt = detail.get("reasoning", detail.get("ai_reply", ""))
+                            if txt:
+                                st.write(txt)
+                            else:
+                                st.info("No reasoning available.")
                     # Data
                     with tabs[1]:
                         raw_df = detail.get("data_raw_df")
@@ -280,8 +290,8 @@ def render_history(history: list[BaseMessage]):
                         if model_info is None and mlflow_art is None:
                             st.info("No model/MLflow artifacts.")
                     # Artifacts
-                    with tabs[4]:
-                        st.json(detail.get("artifacts", {}))
+                    # with tabs[4]:
+                    #     st.json(detail.get("artifacts", {}))
             else:
                 st.write(content)
 
@@ -341,6 +351,7 @@ if prompt:
 
         # Collect reasoning from AI messages after latest human
         reasoning = ""
+        reasoning_items = []
         latest_human_index = -1
         for i, message in enumerate(result.get("messages", [])):
             role = getattr(message, "role", getattr(message, "type", None))
@@ -349,10 +360,11 @@ if prompt:
         for message in result.get("messages", [])[latest_human_index + 1 :]:
             role = getattr(message, "role", getattr(message, "type", None))
             if role in ("assistant", "ai"):
-                name = getattr(message, "name", "assistant")
-                reasoning += (
-                    f"##### {name}:\n\n{getattr(message, 'content', '')}\n\n---\n\n"
-                )
+                name = getattr(message, "name", None) or "assistant"
+                content = getattr(message, "content", "")
+                if content:
+                    reasoning_items.append((name, content))
+                    reasoning += f"##### {name}:\n\n{content}\n\n---\n\n"
 
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
@@ -363,9 +375,38 @@ if prompt:
             except Exception:
                 return None
 
+        def _summarize_artifacts(artifacts: dict) -> dict:
+            """
+            Produce a lightweight summary to keep the UI responsive.
+            """
+            if not isinstance(artifacts, dict):
+                return {}
+            summary = {}
+            for k, v in artifacts.items():
+                # Table-like payload
+                if isinstance(v, dict) and "data" in v:
+                    try:
+                        df_tmp = pd.DataFrame(v["data"])
+                        summary[k] = {
+                            "type": "table",
+                            "shape": tuple(df_tmp.shape),
+                            "preview_head": df_tmp.head(5).to_dict(),
+                        }
+                    except Exception:
+                        summary[k] = {"type": "table", "note": "preview unavailable"}
+                # Plotly figure
+                elif isinstance(v, dict) and "plotly_graph" in v:
+                    summary[k] = {"type": "plot", "note": "plotly figure returned"}
+                else:
+                    summary[k] = (
+                        v if isinstance(v, (str, int, float, list, dict)) else str(v)
+                    )
+            return summary
+
         detail = {
             "ai_reply": getattr(last_ai, "content", "") if last_ai else "",
             "reasoning": reasoning or getattr(last_ai, "content", ""),
+            "reasoning_items": reasoning_items,
             "data_raw_df": _to_df(result.get("data_raw")),
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
@@ -375,7 +416,8 @@ if prompt:
             "model_info": result.get("model_info") or artifacts.get("h2o"),
             "mlflow_artifacts": result.get("mlflow_artifacts")
             or artifacts.get("mlflow"),
-            "artifacts": artifacts,
+            # Store only a summarized version to avoid rendering huge payloads
+            "artifacts": _summarize_artifacts(artifacts),
         }
         idx = len(st.session_state.details)
         st.session_state.details.append(detail)
