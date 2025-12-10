@@ -1,7 +1,8 @@
 from typing import Sequence, TypedDict, Annotated, Optional, Dict, Any
 import operator
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from IPython.display import Markdown
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers.openai_functions import JsonOutputFunctionsParser
 from langchain_openai import ChatOpenAI
@@ -135,9 +136,26 @@ Rules:
         | JsonOutputFunctionsParser()
     )
 
+    def _clean_messages(msgs: Sequence[BaseMessage]) -> Sequence[BaseMessage]:
+        """
+        Strip tool call payloads to avoid OpenAI 'tool_calls' vs 'functions' conflicts.
+        Skip tool/function role messages; drop tool_calls field from AI messages.
+        """
+        cleaned: list[BaseMessage] = []
+        for m in msgs or []:
+            role = getattr(m, "role", getattr(m, "type", None))
+            if role in ("tool", "function"):
+                continue
+            if hasattr(m, "tool_calls"):
+                cleaned.append(AIMessage(content=getattr(m, "content", ""), name=getattr(m, "name", None)))
+            else:
+                cleaned.append(m)
+        return cleaned
+
     def supervisor_node(state: SupervisorDSState):
         print("---SUPERVISOR---")
-        result = supervisor_chain.invoke({"messages": state.get("messages", [])})
+        clean_msgs = _clean_messages(state.get("messages", []))
+        result = supervisor_chain.invoke({"messages": clean_msgs})
         return {"next": result.get("next")}
 
     def _merge_messages(state: SupervisorDSState, response: dict):
@@ -360,3 +378,135 @@ Rules:
 
     app = workflow.compile(checkpointer=checkpointer, name="supervisor_ds_team")
     return app
+
+
+class SupervisorDSTeam:
+    """
+    OO wrapper for the supervisor-led data science team.
+
+    Mirrors the pattern used by other agents: holds a compiled graph,
+    exposes message-first helpers, and keeps the latest response.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        data_loader_agent,
+        data_wrangling_agent,
+        data_cleaning_agent,
+        eda_tools_agent,
+        data_visualization_agent,
+        sql_database_agent,
+        feature_engineering_agent,
+        h2o_ml_agent,
+        mlflow_tools_agent,
+        checkpointer: Optional[Checkpointer] = None,
+        temperature: float = 0.0,
+    ):
+        self._params = {
+            "model": model,
+            "data_loader_agent": data_loader_agent,
+            "data_wrangling_agent": data_wrangling_agent,
+            "data_cleaning_agent": data_cleaning_agent,
+            "eda_tools_agent": eda_tools_agent,
+            "data_visualization_agent": data_visualization_agent,
+            "sql_database_agent": sql_database_agent,
+            "feature_engineering_agent": feature_engineering_agent,
+            "h2o_ml_agent": h2o_ml_agent,
+            "mlflow_tools_agent": mlflow_tools_agent,
+            "checkpointer": checkpointer,
+            "temperature": temperature,
+        }
+        self._compiled_graph = self._make_compiled_graph()
+        self.response: Optional[dict] = None
+
+    def _make_compiled_graph(self):
+        self.response = None
+        return make_supervisor_ds_team(
+            model=self._params["model"],
+            data_loader_agent=self._params["data_loader_agent"],
+            data_wrangling_agent=self._params["data_wrangling_agent"],
+            data_cleaning_agent=self._params["data_cleaning_agent"],
+            eda_tools_agent=self._params["eda_tools_agent"],
+            data_visualization_agent=self._params["data_visualization_agent"],
+            sql_database_agent=self._params["sql_database_agent"],
+            feature_engineering_agent=self._params["feature_engineering_agent"],
+            h2o_ml_agent=self._params["h2o_ml_agent"],
+            mlflow_tools_agent=self._params["mlflow_tools_agent"],
+            checkpointer=self._params["checkpointer"],
+            temperature=self._params["temperature"],
+        )
+
+    def update_params(self, **kwargs):
+        """
+        Update parameters (e.g., swap sub-agents or model) and rebuild the graph.
+        """
+        for k, v in kwargs.items():
+            self._params[k] = v
+        self._compiled_graph = self._make_compiled_graph()
+
+    def invoke_messages(self, messages: Sequence[BaseMessage], artifacts: Optional[dict] = None, **kwargs):
+        """
+        Invoke the team with a message list (recommended for supervisor/teams).
+        """
+        self.response = self._compiled_graph.invoke(
+            {"messages": messages, "artifacts": artifacts or {}},
+            **kwargs,
+        )
+        return None
+
+    async def ainvoke_messages(self, messages: Sequence[BaseMessage], artifacts: Optional[dict] = None, **kwargs):
+        """
+        Async version of invoke_messages.
+        """
+        self.response = await self._compiled_graph.ainvoke(
+            {"messages": messages, "artifacts": artifacts or {}},
+            **kwargs,
+        )
+        return None
+
+    def invoke_agent(self, user_instructions: str, artifacts: Optional[dict] = None, **kwargs):
+        """
+        Convenience wrapper for a single human prompt.
+        """
+        msg = HumanMessage(content=user_instructions)
+        return self.invoke_messages(messages=[msg], artifacts=artifacts, **kwargs)
+
+    async def ainvoke_agent(self, user_instructions: str, artifacts: Optional[dict] = None, **kwargs):
+        msg = HumanMessage(content=user_instructions)
+        return await self.ainvoke_messages(messages=[msg], artifacts=artifacts, **kwargs)
+
+    def invoke(self, input: dict, **kwargs):
+        """
+        Generic invoke passthrough (for backward compatibility).
+        """
+        self.response = self._compiled_graph.invoke(input, **kwargs)
+        return self.response
+
+    async def ainvoke(self, input: dict, **kwargs):
+        self.response = await self._compiled_graph.ainvoke(input, **kwargs)
+        return self.response
+
+    def get_ai_message(self, markdown: bool = False):
+        """
+        Return the last assistant/ai message.
+        """
+        if not self.response or "messages" not in self.response:
+            return None
+        last_ai = None
+        for msg in reversed(self.response.get("messages", [])):
+            if isinstance(msg, AIMessage) or getattr(msg, "role", None) in ("assistant", "ai"):
+                last_ai = msg
+                break
+        if last_ai is None:
+            return None
+        content = getattr(last_ai, "content", "")
+        return Markdown(content) if markdown else content
+
+    def get_artifacts(self):
+        """
+        Return aggregated artifacts dict from the supervisor state.
+        """
+        if self.response:
+            return self.response.get("artifacts")
+        return None
