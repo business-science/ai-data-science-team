@@ -24,12 +24,12 @@ Build a LangGraph supervisor-led data science team (message-first, tool-aware) t
 - Output format: supervisor returns `messages` with appended AI decision trace; sub-agents return their `messages` and artifacts; supervisor aggregates a concise summary.
 
 ## Implementation Steps
-1) Draft supervisor prompt & router function (JSON route schema; names must match sub-agent nodes).
-2) Wire sub-agents as nodes (use their `invoke_messages` / `ainvoke_messages`).
-3) Define state schema with additive `messages` and optional slots (`data_raw`, `data_sql`, `plotly_graph`, `model_info`, `mlflow_artifacts`).
-4) Add guardrails: if a sub-agent returns empty data, reroute or respond with guidance; cap recursion.
-5) Logging: minimal progress prints (`* SUPERVISOR`, chosen worker; sub-agent tool logging already exists).
-6) Demo: create `temp/30_supervisor_ds_team_demo.py` showing a table request, a chart request, and a quick model run.
+1) Draft supervisor prompt & router function (JSON route schema; names must match sub-agent nodes). ✅ in `supervisor_ds_team.py`
+2) Wire sub-agents as nodes (use their `invoke_messages` / `ainvoke_messages`). ✅
+3) Define state schema with additive `messages` and optional slots (`data_raw`, `data_sql`, `plotly_graph`, `model_info`, `mlflow_artifacts`). ✅
+4) Add guardrails: if a sub-agent returns empty data, reroute or respond with guidance; cap recursion. 🔄 (basic guards via supervisor routing; future: explicit empties)
+5) Logging: minimal progress prints (`* SUPERVISOR`, chosen worker; sub-agent tool logging already exists). ✅
+6) Demo: create `temp/30_supervisor_ds_team_demo.py` showing a table request, a chart request, and a quick model run. ✅ (demo created; modeling step optional)
 
 ## Backward Compatibility
 - Keep sub-agents’ legacy entrypoints intact; supervisor uses message-first.
@@ -40,4 +40,3 @@ Build a LangGraph supervisor-led data science team (message-first, tool-aware) t
 - Do we include sandboxed code execution for modeling agents by default? (currently opt-in).
 - Should we add a lightweight summarizer node to produce a final “answer” after worker responses?
 - Memory: use optional `MemorySaver` checkpointer for short-term conversation continuity.
-
