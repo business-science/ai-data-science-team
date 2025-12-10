@@ -84,15 +84,17 @@ def make_supervisor_ds_team(
     system_prompt = """
 You are a supervisor managing a data science team with these workers: {subagent_names}.
 
+Critical rule: only route to workers when the user explicitly asks for their capabilities. Do not assume the next steps.
+
 Routing guidance:
-- If no data_raw, call Data_Loader_Tools_Agent to load/locate data.
-- If data_raw exists, prefer Data_Wrangling_Agent / Data_Cleaning_Agent for prep/imputation.
-- Use SQL_Database_Agent for SQL questions or DB extraction.
-- Use EDA_Tools_Agent for describe/missingness/correlation/Sweetviz.
-- Use Data_Visualization_Agent for plots.
-- Use Feature_Engineering_Agent for feature creation.
-- Use H2O_ML_Agent for AutoML training/eval.
-- Use MLflow_Tools_Agent for experiment/registry operations.
+- If no data_raw and the user asks to load/import/read a file (e.g., "load data/churn_data.csv"), call Data_Loader_Tools_Agent ONCE, then FINISH unless they explicitly ask for cleaning, EDA, visualization, feature engineering, SQL, or modeling.
+- If data_raw exists AND the user explicitly asks to clean, wrangle, impute, or otherwise prepare the data, route to Data_Wrangling_Agent or Data_Cleaning_Agent. Do NOT automatically run them after loading.
+- Use SQL_Database_Agent only for SQL/database questions.
+- Use EDA_Tools_Agent only for describe/missingness/correlation/Sweetviz when requested.
+- Use Data_Visualization_Agent only when the user asks for a plot/chart/graph.
+- Use Feature_Engineering_Agent only when asked for feature creation/encoding.
+- Use H2O_ML_Agent only when asked to train/evaluate a model/AutoML.
+- Use MLflow_Tools_Agent only when asked about experiment tracking or model registry.
 
 Rules:
 - Track which worker acted last and do NOT select the same worker twice in a row unless explicitly required.
@@ -171,6 +173,23 @@ Rules:
         wants_eda = has("describe", "eda", "summary", "correlation", "sweetviz", "missingness")
         wants_feature = has("feature", "encode", "one-hot", "feat eng")
         wants_model = has("train", "model", "automl", "classify", "regression", "predict")
+
+        wants_load = has("load", "import", "read csv", "read file", "open file")
+        mentions_file = (".csv" in last_human) or (".parquet" in last_human) or (".xlsx" in last_human) or ("file" in last_human)
+
+        wants_more_processing = any(
+            [
+                wants_preview,
+                wants_viz,
+                wants_sql,
+                wants_clean,
+                wants_wrangling,
+                wants_eda,
+                wants_feature,
+                wants_model,
+            ]
+        )
+        load_only = wants_load and mentions_file and not wants_more_processing
         return {
             "preview": wants_preview,
             "viz": wants_viz,
@@ -180,6 +199,7 @@ Rules:
             "eda": wants_eda,
             "feature": wants_feature,
             "model": wants_model,
+            "load_only": load_only,
         }
 
     def _get_last_human(msgs: Sequence[BaseMessage]) -> str:
@@ -229,36 +249,67 @@ Rules:
         print("---SUPERVISOR---")
         clean_msgs = _clean_messages(state.get("messages", []))
         intents = _parse_intent(clean_msgs)
+        data_ready = state.get("data_raw") is not None
+        last_worker = state.get("last_worker")
+
+        # Simple load-only overrides before any LLM routing
+        if intents.get("load_only") and not data_ready:
+            print("  simple load-only request -> forcing Data_Loader_Tools_Agent")
+            return {"next": "Data_Loader_Tools_Agent", "last_worker": last_worker}
+        if intents.get("load_only") and data_ready:
+            print("  simple load-only request with data_ready -> FINISH")
+            return {"next": "FINISH", "last_worker": last_worker}
+
         hint_next = _suggest_next_worker(state, clean_msgs)
         result = supervisor_chain.invoke(
             {"messages": clean_msgs, "last_worker": state.get("last_worker")}
         )
         next_worker = result.get("next")
-        data_ready = state.get("data_raw") is not None
-        last_worker = state.get("last_worker")
         print(f"  data_ready={data_ready}, last_worker={last_worker}, router_next={next_worker}, hint_next={hint_next}")
 
-        # Avoid infinite loader loop; decide based on intent
-        if next_worker == "Data_Loader_Tools_Agent" and data_ready:
-            if hint_next and hint_next != next_worker:
-                next_worker = hint_next
-            else:
-                # If user only asked for preview and nothing else, finish
-                if intents["preview"] and not any(
-                    [
-                        intents["viz"],
-                        intents["eda"],
-                        intents["clean"],
-                        intents["wrangle"],
-                        intents["sql"],
-                        intents["feature"],
-                        intents["model"],
-                    ]
-                ):
+        # Prefer hint when available to avoid over-routing (e.g., finish after load-only requests)
+        if hint_next and hint_next != next_worker:
+            next_worker = hint_next
+
+        # Intent-aware override when data is present
+        if data_ready:
+            wants_more = any(
+                [
+                    intents["viz"],
+                    intents["eda"],
+                    intents["clean"],
+                    intents["wrangle"],
+                    intents["sql"],
+                    intents["feature"],
+                    intents["model"],
+                ]
+            )
+            if next_worker == "Data_Loader_Tools_Agent":
+                # Avoid bouncing back to loader once data is available
+                if intents["viz"]:
+                    next_worker = "Data_Visualization_Agent"
+                elif intents["eda"]:
+                    next_worker = "EDA_Tools_Agent"
+                elif intents["clean"] or intents["wrangle"]:
+                    next_worker = "Data_Wrangling_Agent"
+                elif intents["feature"]:
+                    next_worker = "Feature_Engineering_Agent"
+                elif intents["model"]:
+                    next_worker = "H2O_ML_Agent"
+                elif not wants_more and intents["preview"]:
+                    next_worker = "FINISH"
+                elif not wants_more:
                     next_worker = "FINISH"
                 else:
-                    # If more work is needed, nudge to wrangling to progress
                     next_worker = "Data_Wrangling_Agent"
+            else:
+                # If only a preview was requested and loader already ran, finish.
+                if (
+                    not wants_more
+                    and intents["preview"]
+                    and last_worker == "Data_Loader_Tools_Agent"
+                ):
+                    next_worker = "FINISH"
 
         return {"next": next_worker, "last_worker": next_worker}
 
@@ -339,12 +390,12 @@ Rules:
 
                 df = pd.DataFrame(data_raw)
                 summary_msg = AIMessage(
-                    content=f"Loaded dataset with shape {df.shape}. Preview ready."
+                    content=f"Loaded dataset with shape {df.shape}. What would you like to do next? I can clean, explore, visualize, engineer features, run SQL, or train a model."
                 )
             except Exception:
-                summary_msg = AIMessage(content="Loaded dataset successfully.")
+                summary_msg = AIMessage(content="Loaded dataset successfully. What would you like to do next?")
         elif data_raw is not None:
-            summary_msg = AIMessage(content="Loaded dataset successfully.")
+            summary_msg = AIMessage(content="Loaded dataset successfully. What would you like to do next?")
 
         if summary_msg:
             merged["messages"] = merged.get("messages", []) + [summary_msg]
@@ -356,6 +407,7 @@ Rules:
                 **state.get("artifacts", {}),
                 "data_loader": loader_artifacts,
             },
+            "last_worker": "Data_Loader_Tools_Agent",
         }
 
     def node_wrangling(state: SupervisorDSState):
@@ -374,6 +426,7 @@ Rules:
                     "data_wrangled"
                 ),
             },
+            "last_worker": "Data_Wrangling_Agent",
         }
 
     def node_cleaning(state: SupervisorDSState):
@@ -392,6 +445,7 @@ Rules:
                     "data_cleaned"
                 ),
             },
+            "last_worker": "Data_Cleaning_Agent",
         }
 
     def node_sql(state: SupervisorDSState):
@@ -415,6 +469,7 @@ Rules:
                     "data_sql": (sql_database_agent.response or {}).get("data_sql"),
                 },
             },
+            "last_worker": "SQL_Database_Agent",
         }
 
     def node_eda(state: SupervisorDSState):
@@ -436,6 +491,7 @@ Rules:
                 **state.get("artifacts", {}),
                 "eda": (eda_tools_agent.response or {}).get("eda_artifacts"),
             },
+            "last_worker": "EDA_Tools_Agent",
         }
 
     def node_viz(state: SupervisorDSState):
@@ -464,6 +520,7 @@ Rules:
                     ).get("data_visualization_function"),
                 },
             },
+            "last_worker": "Data_Visualization_Agent",
         }
 
     def node_fe(state: SupervisorDSState):
@@ -487,6 +544,7 @@ Rules:
                 **state.get("artifacts", {}),
                 "feature_engineering": (feature_engineering_agent.response or {}),
             },
+            "last_worker": "Feature_Engineering_Agent",
         }
 
     def node_h2o(state: SupervisorDSState):
@@ -508,6 +566,7 @@ Rules:
                 **state.get("artifacts", {}),
                 "h2o": (h2o_ml_agent.response or {}),
             },
+            "last_worker": "H2O_ML_Agent",
         }
 
     def node_mlflow(state: SupervisorDSState):
@@ -525,6 +584,7 @@ Rules:
                 **state.get("artifacts", {}),
                 "mlflow": (mlflow_tools_agent.response or {}).get("mlflow_artifacts"),
             },
+            "last_worker": "MLflow_Tools_Agent",
         }
 
     workflow = StateGraph(SupervisorDSState)

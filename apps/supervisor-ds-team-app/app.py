@@ -25,13 +25,17 @@ from ai_data_science_team.agents.data_cleaning_agent import DataCleaningAgent
 from ai_data_science_team.ds_agents.eda_tools_agent import EDAToolsAgent
 from ai_data_science_team.agents.data_visualization_agent import DataVisualizationAgent
 from ai_data_science_team.agents.sql_database_agent import SQLDatabaseAgent
-from ai_data_science_team.agents.feature_engineering_agent import FeatureEngineeringAgent
+from ai_data_science_team.agents.feature_engineering_agent import (
+    FeatureEngineeringAgent,
+)
 from ai_data_science_team.ml_agents.h2o_ml_agent import H2OMLAgent
 from ai_data_science_team.ml_agents.mlflow_tools_agent import MLflowToolsAgent
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
 
 
-st.set_page_config(page_title="Supervisor Data Science Team", page_icon=":bar_chart:", layout="wide")
+st.set_page_config(
+    page_title="Supervisor Data Science Team", page_icon=":bar_chart:", layout="wide"
+)
 TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
 
@@ -94,7 +98,9 @@ with st.sidebar:
 
     # Settings
     st.header("Settings")
-    model_choice = st.selectbox("OpenAI model", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"])
+    model_choice = st.selectbox(
+        "OpenAI model", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+    )
     recursion_limit = st.slider("Recursion limit", 4, 20, 10, 1)
     add_memory = st.checkbox("Enable short-term memory", value=True)
     st.markdown("---")
@@ -131,7 +137,9 @@ def get_checkpointer():
 @st.cache_resource(show_spinner=False)
 def build_team(model_name: str, use_memory: bool, sql_url: str):
     llm = ChatOpenAI(model=model_name)
-    data_loader_agent = DataLoaderToolsAgent(llm, invoke_react_agent_kwargs={"recursion_limit": 4})
+    data_loader_agent = DataLoaderToolsAgent(
+        llm, invoke_react_agent_kwargs={"recursion_limit": 4}
+    )
     data_wrangling_agent = DataWranglingAgent(llm, log=False)
     data_cleaning_agent = DataCleaningAgent(llm, log=False)
     eda_tools_agent = EDAToolsAgent(llm, log_tool_calls=True)
@@ -168,6 +176,7 @@ if "details" not in st.session_state:
 msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
 if not msgs.messages:
     msgs.add_ai_message("How can the data science team help today?")
+
 
 def get_input_data():
     """
@@ -210,12 +219,24 @@ def render_history(history: list[BaseMessage]):
                 except Exception:
                     st.write(content)
                     continue
-                with st.expander("Analysis Details", expanded=False):
+                with st.expander("Analysis Details", expanded=True):
                     tabs = st.tabs(
-                        ["AI Reply", "Data (raw/clean)", "Charts", "Models/MLflow", "Artifacts"]
+                        [
+                            "AI Reasoning",
+                            "Data (raw/clean)",
+                            "Charts",
+                            "Models/MLflow",
+                            "Artifacts",
+                        ]
                     )
+                    # AI Reasoning
                     with tabs[0]:
-                        st.write(detail.get("ai_reply", "_(No reply)_"))
+                        st.write(
+                            detail.get(
+                                "reasoning", detail.get("ai_reply", "_(No reply)_")
+                            )
+                        )
+                    # Data
                     with tabs[1]:
                         raw_df = detail.get("data_raw_df")
                         wrangled_df = detail.get("data_wrangled_df")
@@ -229,8 +250,13 @@ def render_history(history: list[BaseMessage]):
                         if cleaned_df is not None:
                             st.markdown("**Cleaned Preview**")
                             st.dataframe(cleaned_df)
-                        if raw_df is None and wrangled_df is None and cleaned_df is None:
+                        if (
+                            raw_df is None
+                            and wrangled_df is None
+                            and cleaned_df is None
+                        ):
                             st.info("No data frames returned.")
+                    # Charts
                     with tabs[2]:
                         graph_json = detail.get("plotly_graph")
                         if graph_json:
@@ -241,6 +267,7 @@ def render_history(history: list[BaseMessage]):
                                 st.error(f"Error rendering chart: {e}")
                         else:
                             st.info("No charts returned.")
+                    # Models / MLflow
                     with tabs[3]:
                         model_info = detail.get("model_info")
                         mlflow_art = detail.get("mlflow_artifacts")
@@ -252,13 +279,14 @@ def render_history(history: list[BaseMessage]):
                             st.json(mlflow_art)
                         if model_info is None and mlflow_art is None:
                             st.info("No model/MLflow artifacts.")
+                    # Artifacts
                     with tabs[4]:
                         st.json(detail.get("artifacts", {}))
             else:
                 st.write(content)
 
 
-render_history(msgs.messages)
+# render_history(msgs.messages)
 
 # Show data preview (if selected) and store for reuse on submit
 data_raw_dict, _ = get_input_data()
@@ -268,7 +296,9 @@ st.session_state.selected_data_raw = data_raw_dict
 prompt = st.chat_input("Ask the data science team...")
 if prompt:
     if not resolved_api_key or key_status == "bad":
-        st.error("OpenAI API key is required and must be valid. Enter it in the sidebar.")
+        st.error(
+            "OpenAI API key is required and must be valid. Enter it in the sidebar."
+        )
         st.stop()
 
     st.chat_message("human").write(prompt)
@@ -276,7 +306,9 @@ if prompt:
 
     data_raw_dict = st.session_state.get("selected_data_raw")
 
-    team = build_team(model_choice, add_memory, st.session_state.get("sql_url", "sqlite:///:memory:"))
+    team = build_team(
+        model_choice, add_memory, st.session_state.get("sql_url", "sqlite:///:memory:")
+    )
     try:
         result = team.invoke(
             {
@@ -297,15 +329,34 @@ if prompt:
         # append last AI message to chat history for display
         last_ai = None
         for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage) or getattr(msg, "role", None) in ("assistant", "ai"):
+            if isinstance(msg, AIMessage) or getattr(msg, "role", None) in (
+                "assistant",
+                "ai",
+            ):
                 last_ai = msg
                 break
         if last_ai:
             msgs.add_ai_message(getattr(last_ai, "content", ""))
             st.chat_message("assistant").write(getattr(last_ai, "content", ""))
 
+        # Collect reasoning from AI messages after latest human
+        reasoning = ""
+        latest_human_index = -1
+        for i, message in enumerate(result.get("messages", [])):
+            role = getattr(message, "role", getattr(message, "type", None))
+            if role in ("human", "user"):
+                latest_human_index = i
+        for message in result.get("messages", [])[latest_human_index + 1 :]:
+            role = getattr(message, "role", getattr(message, "type", None))
+            if role in ("assistant", "ai"):
+                name = getattr(message, "name", "assistant")
+                reasoning += (
+                    f"##### {name}:\n\n{getattr(message, 'content', '')}\n\n---\n\n"
+                )
+
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
+
         def _to_df(obj):
             try:
                 return pd.DataFrame(obj) if obj is not None else None
@@ -314,12 +365,16 @@ if prompt:
 
         detail = {
             "ai_reply": getattr(last_ai, "content", "") if last_ai else "",
+            "reasoning": reasoning or getattr(last_ai, "content", ""),
             "data_raw_df": _to_df(result.get("data_raw")),
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
-            "plotly_graph": artifacts.get("viz", {}).get("plotly_graph") if isinstance(artifacts.get("viz"), dict) else None,
+            "plotly_graph": artifacts.get("viz", {}).get("plotly_graph")
+            if isinstance(artifacts.get("viz"), dict)
+            else None,
             "model_info": result.get("model_info") or artifacts.get("h2o"),
-            "mlflow_artifacts": result.get("mlflow_artifacts") or artifacts.get("mlflow"),
+            "mlflow_artifacts": result.get("mlflow_artifacts")
+            or artifacts.get("mlflow"),
             "artifacts": artifacts,
         }
         idx = len(st.session_state.details)
@@ -349,3 +404,5 @@ if prompt:
                         break
                     except Exception:
                         continue
+
+render_history(msgs.messages)
