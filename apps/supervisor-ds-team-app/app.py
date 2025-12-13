@@ -16,6 +16,7 @@ import sqlalchemy as sql
 import plotly.colors as pc
 import plotly.io as pio
 import streamlit as st
+import streamlit.components.v1 as components
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_openai import ChatOpenAI
@@ -30,8 +31,10 @@ from ai_data_science_team.agents.sql_database_agent import SQLDatabaseAgent
 from ai_data_science_team.agents.feature_engineering_agent import (
     FeatureEngineeringAgent,
 )
+from ai_data_science_team.agents.workflow_planner_agent import WorkflowPlannerAgent
 from ai_data_science_team.ml_agents.h2o_ml_agent import H2OMLAgent
 from ai_data_science_team.ml_agents.mlflow_tools_agent import MLflowToolsAgent
+from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluationAgent
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
 
 
@@ -40,6 +43,7 @@ st.set_page_config(
 )
 TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
+
 
 def _apply_streamlit_plot_style(fig):
     """
@@ -176,10 +180,19 @@ with st.sidebar:
             "gpt-4.1",
             "gpt-4o-mini",
             "gpt-4o",
+            "gpt-5.2",
+            "gpt-5.1-mini",
+            "gpt-5.1",
         ],
     )
     recursion_limit = st.slider("Recursion limit", 4, 20, 10, 1)
     add_memory = st.checkbox("Enable short-term memory", value=True)
+    proactive_workflow_mode = st.checkbox(
+        "Proactive workflow mode",
+        value=False,
+        help="When enabled, the supervisor may propose and run a multi-step end-to-end workflow for broad requests (and will ask clarifying questions when needed).",
+    )
+    st.session_state["proactive_workflow_mode"] = proactive_workflow_mode
     st.markdown("---")
     st.markdown("**Data options**")
     use_sample = st.checkbox("Load sample Telco churn data", value=False)
@@ -231,6 +244,7 @@ def build_team(
     mlflow_experiment_name: str,
 ):
     llm = ChatOpenAI(model=model_name)
+    workflow_planner_agent = WorkflowPlannerAgent(llm)
     data_loader_agent = DataLoaderToolsAgent(
         llm, invoke_react_agent_kwargs={"recursion_limit": 4}
     )
@@ -252,12 +266,14 @@ def build_team(
         mlflow_tracking_uri=mlflow_tracking_uri,
         mlflow_experiment_name=mlflow_experiment_name,
     )
+    model_evaluation_agent = ModelEvaluationAgent()
     mlflow_tools_agent = MLflowToolsAgent(
         llm, log_tool_calls=True, mlflow_tracking_uri=mlflow_tracking_uri
     )
 
     team = make_supervisor_ds_team(
         model=llm,
+        workflow_planner_agent=workflow_planner_agent,
         data_loader_agent=data_loader_agent,
         data_wrangling_agent=data_wrangling_agent,
         data_cleaning_agent=data_cleaning_agent,
@@ -267,6 +283,7 @@ def build_team(
         feature_engineering_agent=feature_engineering_agent,
         h2o_ml_agent=h2o_ml_agent,
         mlflow_tools_agent=mlflow_tools_agent,
+        model_evaluation_agent=model_evaluation_agent,
         checkpointer=checkpointer if use_memory else None,
     )
     return team
@@ -325,6 +342,7 @@ def render_history(history: list[BaseMessage]):
                 "AI Reasoning",
                 "Data (raw/clean)",
                 "Charts",
+                "Reports",
                 "Models/MLflow",
             ]
         )
@@ -380,18 +398,70 @@ def render_history(history: list[BaseMessage]):
                     st.error(f"Error rendering chart: {e}")
             else:
                 st.info("No charts returned.")
-        # Models / MLflow
+        # Reports
         with tabs[3]:
+            reports = detail.get("eda_reports") if isinstance(detail, dict) else None
+            sweetviz_file = (
+                reports.get("sweetviz_report_file")
+                if isinstance(reports, dict)
+                else None
+            )
+            dtale_url = reports.get("dtale_url") if isinstance(reports, dict) else None
+
+            if sweetviz_file:
+                st.markdown("**Sweetviz report**")
+                st.write(sweetviz_file)
+                try:
+                    with open(sweetviz_file, "r", encoding="utf-8") as f:
+                        html = f.read()
+                    components.html(html, height=800, scrolling=True)
+                    st.download_button(
+                        "Download Sweetviz HTML",
+                        data=html.encode("utf-8"),
+                        file_name=os.path.basename(sweetviz_file),
+                        mime="text/html",
+                        key=f"download_sweetviz_{key_suffix}",
+                    )
+                except Exception as e:
+                    st.warning(f"Could not render Sweetviz report: {e}")
+
+            if dtale_url:
+                st.markdown("**D-Tale**")
+                st.markdown(f"[Open D-Tale]({dtale_url})")
+
+            if not sweetviz_file and not dtale_url:
+                st.info("No EDA reports returned.")
+
+        # Models / MLflow
+        with tabs[4]:
             model_info = detail.get("model_info")
+            eval_art = detail.get("eval_artifacts")
+            eval_graph = detail.get("eval_plotly_graph")
             mlflow_art = detail.get("mlflow_artifacts")
             if model_info is not None:
                 st.markdown("**Model Info**")
                 st.json(model_info)
+            if eval_art is not None:
+                st.markdown("**Evaluation**")
+                st.json(eval_art)
+            if eval_graph:
+                try:
+                    payload = (
+                        json.dumps(eval_graph)
+                        if isinstance(eval_graph, dict)
+                        else eval_graph
+                    )
+                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                    st.plotly_chart(
+                        fig, width="stretch", key=f"eval_chart_{key_suffix}"
+                    )
+                except Exception as e:
+                    st.error(f"Error rendering evaluation chart: {e}")
             if mlflow_art is not None:
                 st.markdown("**MLflow Artifacts**")
                 st.json(mlflow_art)
-            if model_info is None and mlflow_art is None:
-                st.info("No model/MLflow artifacts.")
+            if model_info is None and eval_art is None and mlflow_art is None:
+                st.info("No model/evaluation/MLflow artifacts.")
 
     for m in history:
         role = getattr(m, "role", getattr(m, "type", "assistant"))
@@ -445,11 +515,30 @@ if prompt:
     try:
         # If LangGraph memory is enabled, pass only the new user message.
         # The checkpointer will supply prior state/messages for continuity.
-        input_messages = [HumanMessage(content=prompt)] if add_memory else msgs.messages
+        input_messages = (
+            [HumanMessage(content=prompt, id=str(uuid.uuid4()))]
+            if add_memory
+            else msgs.messages
+        )
         result = team.invoke(
             {
                 "messages": input_messages,
-                "artifacts": {},
+                "artifacts": {
+                    "config": {
+                        "mlflow_tracking_uri": st.session_state.get(
+                            "mlflow_tracking_uri"
+                        ),
+                        "mlflow_experiment_name": st.session_state.get(
+                            "mlflow_experiment_name", "H2O AutoML"
+                        ),
+                        "enable_mlflow_logging": st.session_state.get(
+                            "enable_mlflow_logging", True
+                        ),
+                        "proactive_workflow_mode": st.session_state.get(
+                            "proactive_workflow_mode", True
+                        ),
+                    }
+                },
                 "data_raw": data_raw_dict,
             },
             config={
@@ -526,6 +615,41 @@ if prompt:
             except Exception:
                 return None
 
+        def _extract_eda_reports(artifacts: dict) -> dict:
+            if not isinstance(artifacts, dict):
+                return {}
+            eda_payload = artifacts.get("eda")
+            if not isinstance(eda_payload, dict):
+                return {}
+
+            sweetviz_report_file = None
+            dtale_url = None
+
+            candidates = []
+            if isinstance(eda_payload.get("generate_sweetviz_report"), dict):
+                candidates.append(eda_payload.get("generate_sweetviz_report"))
+            candidates.extend(list(eda_payload.values()))
+            for v in candidates:
+                if isinstance(v, dict) and v.get("report_file"):
+                    sweetviz_report_file = v.get("report_file")
+                    break
+
+            candidates = []
+            if isinstance(eda_payload.get("generate_dtale_report"), dict):
+                candidates.append(eda_payload.get("generate_dtale_report"))
+            candidates.extend(list(eda_payload.values()))
+            for v in candidates:
+                if isinstance(v, dict) and v.get("dtale_url"):
+                    dtale_url = v.get("dtale_url")
+                    break
+
+            out = {}
+            if sweetviz_report_file:
+                out["sweetviz_report_file"] = sweetviz_report_file
+            if dtale_url:
+                out["dtale_url"] = dtale_url
+            return out
+
         def _summarize_artifacts(artifacts: dict) -> dict:
             """
             Produce a lightweight summary to keep the UI responsive.
@@ -562,6 +686,11 @@ if prompt:
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
             # Only show artifacts produced during this invocation to avoid stale charts/models.
+            "eda_reports": (
+                _extract_eda_reports(artifacts)
+                if "eda_tools_agent" in ran_agents
+                else None
+            ),
             "plotly_graph": (
                 artifacts.get("viz", {}).get("plotly_graph")
                 if "data_visualization_agent" in ran_agents
@@ -573,9 +702,28 @@ if prompt:
                 if "h2o_ml_agent" in ran_agents
                 else None
             ),
+            "eval_artifacts": (
+                artifacts.get("eval", {}).get("eval_artifacts")
+                if "model_evaluation_agent" in ran_agents
+                and isinstance(artifacts.get("eval"), dict)
+                else None
+            ),
+            "eval_plotly_graph": (
+                artifacts.get("eval", {}).get("plotly_graph")
+                if "model_evaluation_agent" in ran_agents
+                and isinstance(artifacts.get("eval"), dict)
+                else None
+            ),
             "mlflow_artifacts": (
-                (result.get("mlflow_artifacts") or artifacts.get("mlflow"))
-                if "mlflow_tools_agent" in ran_agents
+                (
+                    result.get("mlflow_artifacts")
+                    or artifacts.get("mlflow")
+                    or artifacts.get("mlflow_log")
+                )
+                if (
+                    "mlflow_tools_agent" in ran_agents
+                    or "mlflow_logging_agent" in ran_agents
+                )
                 else None
             ),
             # Store only a summarized version to avoid rendering huge payloads
@@ -603,7 +751,9 @@ if st.session_state.get("details"):
             # Reuse the same rendering logic as chat history by calling render_history's helper pattern.
             # Minimal duplication: render via a small inline function to avoid leaking outer scope.
             detail = details[int(selected)]
-            tabs = st.tabs(["AI Reasoning", "Data (raw/clean)", "Charts", "Models/MLflow"])
+            tabs = st.tabs(
+                ["AI Reasoning", "Data (raw/clean)", "Charts", "Reports", "Models/MLflow"]
+            )
             with tabs[0]:
                 reasoning_items = detail.get("reasoning_items", [])
                 if reasoning_items:
@@ -640,20 +790,72 @@ if st.session_state.get("details"):
                         else graph_json
                     )
                     fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                    st.plotly_chart(fig, width="stretch", key=f"bottom_detail_chart_{selected}")
+                    st.plotly_chart(
+                        fig, width="stretch", key=f"bottom_detail_chart_{selected}"
+                    )
                 else:
                     st.info("No charts returned.")
             with tabs[3]:
+                reports = detail.get("eda_reports") if isinstance(detail, dict) else None
+                sweetviz_file = (
+                    reports.get("sweetviz_report_file")
+                    if isinstance(reports, dict)
+                    else None
+                )
+                dtale_url = (
+                    reports.get("dtale_url") if isinstance(reports, dict) else None
+                )
+
+                if sweetviz_file:
+                    st.markdown("**Sweetviz report**")
+                    st.write(sweetviz_file)
+                    try:
+                        with open(sweetviz_file, "r", encoding="utf-8") as f:
+                            html = f.read()
+                        components.html(html, height=800, scrolling=True)
+                        st.download_button(
+                            "Download Sweetviz HTML",
+                            data=html.encode("utf-8"),
+                            file_name=os.path.basename(sweetviz_file),
+                            mime="text/html",
+                            key=f"bottom_download_sweetviz_{selected}",
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not render Sweetviz report: {e}")
+
+                if dtale_url:
+                    st.markdown("**D-Tale**")
+                    st.markdown(f"[Open D-Tale]({dtale_url})")
+
+                if not sweetviz_file and not dtale_url:
+                    st.info("No EDA reports returned.")
+
+            with tabs[4]:
                 model_info = detail.get("model_info")
+                eval_art = detail.get("eval_artifacts")
+                eval_graph = detail.get("eval_plotly_graph")
                 mlflow_art = detail.get("mlflow_artifacts")
                 if model_info is not None:
                     st.markdown("**Model Info**")
                     st.json(model_info)
+                if eval_art is not None:
+                    st.markdown("**Evaluation**")
+                    st.json(eval_art)
+                if eval_graph:
+                    payload = (
+                        json.dumps(eval_graph)
+                        if isinstance(eval_graph, dict)
+                        else eval_graph
+                    )
+                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                    st.plotly_chart(
+                        fig, width="stretch", key=f"bottom_eval_chart_{selected}"
+                    )
                 if mlflow_art is not None:
                     st.markdown("**MLflow Artifacts**")
                     st.json(mlflow_art)
-                if model_info is None and mlflow_art is None:
-                    st.info("No model/MLflow artifacts.")
+                if model_info is None and eval_art is None and mlflow_art is None:
+                    st.info("No model/evaluation/MLflow artifacts.")
     except Exception as e:
         st.error(f"Could not render analysis details: {e}")
 else:

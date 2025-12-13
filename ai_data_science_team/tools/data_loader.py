@@ -36,7 +36,9 @@ def load_directory(
 ) -> Tuple[str, Dict]:
     """
     Tool: load_directory
-    Description: Loads all recognized tabular files in a directory.
+    Description: Loads (reads) all recognized tabular files in a directory into memory.
+                 If you only need filenames (a directory listing), use
+                 `list_directory_contents` or `search_files_by_pattern` instead.
                  If file_type is specified (e.g., 'csv'), only files
                  with that extension are loaded.
 

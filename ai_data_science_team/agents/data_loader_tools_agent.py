@@ -334,7 +334,20 @@ def make_data_loader_tools_agent(
 
     def run_react_agent(state: GraphState):
         print("    * RUN REACT TOOL-CALLING AGENT")
-        input_payload = {"messages": state.get("messages", [])}
+        system_hint = (
+            "You are a data loader + file system tools agent.\n"
+            "- If the user asks to LIST files (e.g., 'what files are in ./data', 'list only CSVs'), "
+            "use listing/search tools (search_files_by_pattern, list_directory_contents, list_directory_recursive). "
+            "Do NOT load file contents.\n"
+            "- Use load_file only when the user explicitly asks to load/read a specific file.\n"
+            "- Use load_directory only when the user explicitly asks to load ALL files in a directory.\n"
+            "Prefer search_files_by_pattern for extension filters (e.g., pattern='*.csv')."
+        )
+        base_messages = state.get("messages", []) or [
+            ("user", state.get("user_instructions"))
+        ]
+        messages = [("system", system_hint)] + base_messages
+        input_payload = {"messages": messages}
         return react_agent.invoke(input_payload, invoke_react_agent_kwargs)
 
     def post_process(state: GraphState):

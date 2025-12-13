@@ -85,6 +85,10 @@ class SupervisorDSState(TypedDict):
     active_data_key: Optional[str]
     handled_request_id: Optional[str]
     handled_steps: Dict[str, bool]
+    attempted_steps: Dict[str, bool]
+    workflow_plan_request_id: Optional[str]
+    workflow_plan: Optional[dict]
+    target_variable: Optional[str]
 
     # Shared data/artifacts
     data_raw: Optional[dict]
@@ -95,6 +99,7 @@ class SupervisorDSState(TypedDict):
     viz_graph: Optional[dict]
     feature_data: Optional[dict]
     model_info: Optional[dict]
+    eval_artifacts: Optional[dict]
     mlflow_artifacts: Optional[dict]
     artifacts: Dict[str, Any]
 
@@ -110,6 +115,8 @@ def make_supervisor_ds_team(
     feature_engineering_agent,
     h2o_ml_agent,
     mlflow_tools_agent,
+    model_evaluation_agent,
+    workflow_planner_agent=None,
     checkpointer: Optional[Checkpointer] = None,
     temperature: float = 0,
 ):
@@ -118,6 +125,7 @@ def make_supervisor_ds_team(
 
     Args:
         model: LLM (or model name) for the supervisor router.
+        workflow_planner_agent: WorkflowPlannerAgent instance (optional planning for multi-step prompts).
         data_loader_agent: DataLoaderToolsAgent instance.
         data_wrangling_agent: DataWranglingAgent instance.
         data_cleaning_agent: DataCleaningAgent instance.
@@ -126,6 +134,7 @@ def make_supervisor_ds_team(
         sql_database_agent: SQLDatabaseAgent instance.
         feature_engineering_agent: FeatureEngineeringAgent instance.
         h2o_ml_agent: H2OMLAgent instance.
+        model_evaluation_agent: ModelEvaluationAgent instance.
         mlflow_tools_agent: MLflowToolsAgent instance.
         checkpointer: optional LangGraph checkpointer.
         temperature: supervisor routing temperature.
@@ -140,6 +149,8 @@ def make_supervisor_ds_team(
         "SQL_Database_Agent",
         "Feature_Engineering_Agent",
         "H2O_ML_Agent",
+        "Model_Evaluation_Agent",
+        "MLflow_Logging_Agent",
         "MLflow_Tools_Agent",
     ]
 
@@ -165,6 +176,8 @@ Each worker has specific tools/capabilities (names are a hint for routing):
 - SQL_Database_Agent: Generate a SQL query based on the recommended steps and user instructions. Executes that SQL query against the provided database connection, returning the data results.
 - Feature_Engineering_Agent: The agent applies various feature engineering techniques, such as encoding categorical variables, scaling numeric variables, creating interaction terms,and generating polynomial features. Must have data loaded/ready.
 - H2O_ML_Agent: A Machine Learning agent that uses H2O's AutoML for training create_h2o_automl_code, execute_h2o_code (AutoML training/eval).
+- Model_Evaluation_Agent: Evaluates a trained model on a holdout split and returns standardized metrics + plots (confusion matrix/ROC or residuals).
+- MLflow_Logging_Agent: Logs workflow artifacts deterministically to MLflow (tables/figures/metrics) and returns the run id.
 - MLflow_Tools_Agent: Can interact and run various tools related to accessing, interacting with, and retrieving information from MLflow. Has tools including: mlflow_search_experiments, mlflow_search_runs, mlflow_create_experiment, mlflow_predict_from_run_id, mlflow_launch_ui, mlflow_stop_ui, mlflow_list_artifacts, mlflow_download_artifacts, mlflow_list_registered_models, mlflow_search_registered_models, mlflow_get_model_version_details, mlflow_get_run_details, mlflow_transition_model_version_stage, mlflow_tracking_info, mlflow_ui_status,
 
 Critical rule: only route to workers when the user explicitly asks for their capabilities. Do not assume next steps.
@@ -177,7 +190,9 @@ Routing guidance (explicit intent -> worker):
 - SQL/database/query/tables: SQL_Database_Agent.
 - Feature creation/encoding: Feature_Engineering_Agent.
 - Train/evaluate model/AutoML: H2O_ML_Agent.
-- MLflow tracking/registry: MLflow_Tools_Agent.
+- Evaluate model performance: Model_Evaluation_Agent.
+- Log workflow to MLflow: MLflow_Logging_Agent.
+- MLflow tracking/registry/UI: MLflow_Tools_Agent.
 
 Rules:
 - Track which worker acted last and do NOT select the same worker twice in a row unless explicitly required.
@@ -276,6 +291,15 @@ Examples:
             "data science workflow",
             "ds workflow",
         )
+        wants_list_files = has(
+            "what files",
+            "list files",
+            "show files",
+            "files are in",
+            "directory contents",
+            "list directory",
+            "list only",
+        ) and has("file", "files", "csv", ".csv", "./", "directory", "folder", "data")
         wants_preview = has(
             "head",
             "first 5",
@@ -297,6 +321,18 @@ Examples:
         wants_model = has(
             "train", "model", "automl", "classify", "regression", "predict"
         )
+        wants_eval = has(
+            "evaluate",
+            "evaluation",
+            "metrics",
+            "performance",
+            "confusion matrix",
+            "roc",
+            "auc",
+            "precision",
+            "recall",
+            "f1",
+        )
 
         wants_load = has("load", "import", "read csv", "read file", "open file")
         mentions_file = (
@@ -316,9 +352,18 @@ Examples:
             "experiment",
             "run",
             "artifact",
+            "tracking",
+            "uri",
             "registry",
             "registered model",
             "model version",
+        )
+        wants_mlflow_log = wants_mlflow and has(
+            "log",
+            "logging",
+            "save to mlflow",
+            "track",
+            "record",
         )
 
         # If the user explicitly wants an end-to-end workflow, enable common steps.
@@ -327,6 +372,7 @@ Examples:
             wants_eda = True
             wants_viz = True
             wants_model = True
+            wants_eval = True
 
         wants_more_processing = any(
             [
@@ -342,6 +388,7 @@ Examples:
         )
         load_only = wants_load and mentions_file and not wants_more_processing
         return {
+            "list_files": wants_list_files,
             "preview": wants_preview,
             "viz": wants_viz,
             "sql": wants_sql,
@@ -350,7 +397,9 @@ Examples:
             "eda": wants_eda,
             "feature": wants_feature,
             "model": wants_model,
+            "evaluate": wants_eval,
             "mlflow": wants_mlflow,
+            "mlflow_log": wants_mlflow_log,
             "mlflow_tools": wants_mlflow_tools,
             "workflow": wants_workflow,
             "load": wants_load and mentions_file,
@@ -376,6 +425,8 @@ Examples:
         print("---SUPERVISOR---")
         clean_msgs = _clean_messages(state.get("messages", []))
         intents = _parse_intent(clean_msgs)
+        cfg = (state.get("artifacts") or {}).get("config") or {}
+        proactive_mode = bool(cfg.get("proactive_workflow_mode")) if isinstance(cfg, dict) else False
 
         # Track per-user-request steps (within the current user message) to support
         # deterministic sequencing for multi-step prompts.
@@ -389,12 +440,20 @@ Examples:
 
         handled_request_id = state.get("handled_request_id")
         handled_steps: dict[str, bool] = dict(state.get("handled_steps") or {})
+        attempted_steps: dict[str, bool] = dict(state.get("attempted_steps") or {})
         is_new_request = (
             current_request_id is not None and current_request_id != handled_request_id
         )
         if is_new_request:
             handled_request_id = current_request_id
             handled_steps = {}
+            attempted_steps = {}
+            # Reset workflow plan per user request
+            state_plan_req = None
+            state_plan = None
+        else:
+            state_plan_req = state.get("workflow_plan_request_id")
+            state_plan = state.get("workflow_plan")
 
         # Infer active dataset if not explicitly tracked yet
         active_data_key = state.get("active_data_key")
@@ -441,12 +500,28 @@ Examples:
                                 return True
             return False
 
+        def _loader_listed_directory(loader_artifacts: Any) -> bool:
+            if not loader_artifacts:
+                return False
+            if isinstance(loader_artifacts, list):
+                return True
+            if isinstance(loader_artifacts, dict):
+                for key in loader_artifacts.keys():
+                    tool_name = str(key)
+                    if tool_name.startswith("list_directory") or tool_name.startswith(
+                        "search_files_by_pattern"
+                    ):
+                        return True
+            return False
+
         # Mark completed steps for this request based on the last worker.
         if not is_new_request and last_worker:
-            if last_worker == "Data_Loader_Tools_Agent" and _loader_loaded_dataset(
-                (state.get("artifacts") or {}).get("data_loader")
-            ):
-                handled_steps["load"] = True
+            if last_worker == "Data_Loader_Tools_Agent":
+                loader_art = (state.get("artifacts") or {}).get("data_loader")
+                if _loader_loaded_dataset(loader_art):
+                    handled_steps["load"] = True
+                if _loader_listed_directory(loader_art):
+                    handled_steps["list_files"] = True
             elif last_worker == "SQL_Database_Agent" and state.get("data_sql") is not None:
                 handled_steps["sql"] = True
             elif last_worker == "Data_Wrangling_Agent" and state.get("data_wrangled") is not None:
@@ -461,10 +536,15 @@ Examples:
                 handled_steps["feature"] = True
             elif last_worker == "H2O_ML_Agent" and state.get("model_info") is not None:
                 handled_steps["model"] = True
+            elif last_worker == "Model_Evaluation_Agent" and state.get("eval_artifacts") is not None:
+                handled_steps["evaluate"] = True
+            elif last_worker == "MLflow_Logging_Agent" and state.get("mlflow_artifacts") is not None:
+                handled_steps["mlflow_log"] = True
             elif last_worker == "MLflow_Tools_Agent" and state.get("mlflow_artifacts") is not None:
-                handled_steps["mlflow"] = True
+                handled_steps["mlflow_tools"] = True
 
         step_to_worker = {
+            "list_files": "Data_Loader_Tools_Agent",
             "load": "Data_Loader_Tools_Agent",
             "sql": "SQL_Database_Agent",
             "wrangle": "Data_Wrangling_Agent",
@@ -473,11 +553,113 @@ Examples:
             "viz": "Data_Visualization_Agent",
             "feature": "Feature_Engineering_Agent",
             "model": "H2O_ML_Agent",
-            "mlflow": "MLflow_Tools_Agent",
+            "evaluate": "Model_Evaluation_Agent",
+            "mlflow_log": "MLflow_Logging_Agent",
+            "mlflow_tools": "MLflow_Tools_Agent",
         }
+
+        # Use the workflow planner for multi-step prompts when available.
+        wants_steps_count = sum(
+            1
+            for k in (
+                "list_files",
+                "load",
+                "sql",
+                "wrangle",
+                "clean",
+                "eda",
+                "preview",
+                "viz",
+                "feature",
+                "model",
+                "evaluate",
+                "mlflow_log",
+                "mlflow_tools",
+                "workflow",
+            )
+            if intents.get(k)
+        )
+        use_planner = bool(
+            proactive_mode
+            or intents.get("workflow")
+            or intents.get("model")
+            or intents.get("evaluate")
+            or intents.get("mlflow_log")
+            or intents.get("mlflow_tools")
+            or wants_steps_count >= 3
+        )
+
+        planned_steps: list[str] | None = None
+        plan_questions: list[str] = []
+        plan_notes: list[str] = []
+        planner_messages: list[BaseMessage] = []
+        planned_target: Optional[str] = state.get("target_variable")
+        if use_planner and workflow_planner_agent is not None and current_request_id is not None:
+            if state_plan_req == current_request_id and isinstance(state_plan, dict):
+                planned_steps = state_plan.get("steps") if isinstance(state_plan.get("steps"), list) else None
+                plan_questions = state_plan.get("questions") if isinstance(state_plan.get("questions"), list) else []
+                plan_notes = state_plan.get("notes") if isinstance(state_plan.get("notes"), list) else []
+            else:
+                # Provide a minimal context snapshot to help planning.
+                context = {
+                    "data_ready": bool(data_ready),
+                    "active_data_key": active_data_key,
+                    "has_data_raw": state.get("data_raw") is not None,
+                    "has_data_cleaned": state.get("data_cleaned") is not None,
+                    "has_data_wrangled": state.get("data_wrangled") is not None,
+                    "has_feature_data": state.get("feature_data") is not None,
+                    "has_sql": state.get("data_sql") is not None,
+                    "has_model_info": state.get("model_info") is not None,
+                    "proactive_workflow_mode": proactive_mode,
+                }
+                try:
+                    workflow_planner_agent.invoke_messages(
+                        messages=clean_msgs,
+                        context=context,
+                    )
+                    plan = workflow_planner_agent.response or {}
+                except Exception:
+                    plan = {}
+                planned_steps = plan.get("steps") if isinstance(plan.get("steps"), list) else None
+                plan_questions = plan.get("questions") if isinstance(plan.get("questions"), list) else []
+                plan_notes = plan.get("notes") if isinstance(plan.get("notes"), list) else []
+                planned_target = plan.get("target_variable") or planned_target
+                state_plan_req = current_request_id
+                state_plan = {
+                    "steps": planned_steps or [],
+                    "target_variable": planned_target,
+                    "questions": plan_questions,
+                    "notes": plan_notes,
+                }
+                if planned_steps:
+                    pretty_steps = " → ".join(str(s) for s in planned_steps)
+                    note_text = "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                    msg = f"Planned workflow: {pretty_steps}"
+                    if note_text:
+                        msg = msg + "\n\nNotes:\n" + note_text
+                    planner_messages = [AIMessage(content=msg, name="workflow_planner_agent")]
+
+            # If the planner needs user input, ask and stop.
+            if plan_questions and not (planned_steps and len(planned_steps) > 0):
+                question_text = "\n".join(f"- {q}" for q in plan_questions)
+                note_text = "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                msg = "To run the workflow, I need:\n" + question_text
+                if note_text:
+                    msg = msg + "\n\nNotes:\n" + note_text
+                return {
+                    "messages": [AIMessage(content=msg, name="workflow_planner_agent")],
+                    "next": "FINISH",
+                    "active_data_key": active_data_key,
+                    "handled_request_id": handled_request_id,
+                    "handled_steps": handled_steps,
+                    "attempted_steps": attempted_steps,
+                    "workflow_plan_request_id": state_plan_req,
+                    "workflow_plan": state_plan,
+                }
 
         recognized_intent = any(
             [
+                intents.get("list_files"),
                 intents.get("load_only"),
                 intents.get("load"),
                 intents.get("sql"),
@@ -488,65 +670,82 @@ Examples:
                 intents.get("viz"),
                 intents.get("feature"),
                 intents.get("model"),
+                intents.get("evaluate"),
                 intents.get("mlflow"),
+                intents.get("mlflow_log"),
                 intents.get("mlflow_tools"),
                 intents.get("workflow"),
             ]
         )
+        recognized_intent = bool(planned_steps) or recognized_intent
 
         # Deterministic, step-aware routing for common data science workflows.
         if recognized_intent:
             steps: list[str] = []
 
-            # If the user asked to load a file, do that first.
-            if intents.get("load") or intents.get("load_only"):
-                steps.append("load")
+            # If we have a planner-derived step list, trust it.
+            if planned_steps:
+                steps = [str(s) for s in planned_steps if isinstance(s, str)]
+            else:
+                if intents.get("list_files"):
+                    steps.append("list_files")
 
-            # SQL can also be a data acquisition step.
-            if intents.get("sql"):
-                steps.append("sql")
+                # If the user asked to load a file, do that first.
+                if intents.get("load") or intents.get("load_only"):
+                    steps.append("load")
 
-            # If the user requested data-dependent work but no data is present, attempt a load first.
-            needs_data = any(
-                [
-                    intents.get("wrangle"),
-                    intents.get("clean"),
-                    intents.get("eda"),
-                    intents.get("preview"),
-                    intents.get("viz"),
-                    intents.get("feature"),
-                    intents.get("model"),
-                ]
-            )
-            if not data_ready and needs_data and not (intents.get("load") or intents.get("load_only") or intents.get("sql")):
-                steps.insert(0, "load")
+                # SQL can also be a data acquisition step.
+                if intents.get("sql"):
+                    steps.append("sql")
 
-            # Transformations
-            if intents.get("wrangle"):
-                steps.append("wrangle")
-            if intents.get("clean"):
-                steps.append("clean")
+                # If the user requested data-dependent work but no data is present, attempt a load first.
+                needs_data = any(
+                    [
+                        intents.get("wrangle"),
+                        intents.get("clean"),
+                        intents.get("eda"),
+                        intents.get("preview"),
+                        intents.get("viz"),
+                        intents.get("feature"),
+                        intents.get("model"),
+                        intents.get("evaluate"),
+                    ]
+                )
+                if not data_ready and needs_data and not (
+                    intents.get("load") or intents.get("load_only") or intents.get("sql")
+                ):
+                    steps.insert(0, "load")
 
-            # EDA / preview: if the user is explicitly loading, prefer the loader preview and avoid an extra EDA pass.
-            wants_preview_via_eda = intents.get("preview") and not (
-                intents.get("load") or intents.get("load_only")
-            )
-            if intents.get("eda") or wants_preview_via_eda:
-                steps.append("eda")
+                # Transformations
+                if intents.get("wrangle"):
+                    steps.append("wrangle")
+                if intents.get("clean"):
+                    steps.append("clean")
 
-            # Visualization
-            if intents.get("viz"):
-                steps.append("viz")
+                # EDA / preview: if the user is explicitly loading, prefer the loader preview and avoid an extra EDA pass.
+                wants_preview_via_eda = intents.get("preview") and not (
+                    intents.get("load") or intents.get("load_only")
+                )
+                if intents.get("eda") or wants_preview_via_eda:
+                    steps.append("eda")
 
-            # Feature engineering and modeling
-            if intents.get("feature"):
-                steps.append("feature")
-            if intents.get("model"):
-                steps.append("model")
+                # Visualization
+                if intents.get("viz"):
+                    steps.append("viz")
 
-            # MLflow tools (inspection/UI). Model logging should be enabled on the H2O agent itself.
-            if intents.get("mlflow_tools"):
-                steps.append("mlflow")
+                # Feature engineering and modeling
+                if intents.get("feature"):
+                    steps.append("feature")
+                if intents.get("model"):
+                    steps.append("model")
+                if intents.get("evaluate"):
+                    steps.append("evaluate")
+
+                # MLflow logging and tools (inspection/UI)
+                if intents.get("mlflow_log"):
+                    steps.append("mlflow_log")
+                if intents.get("mlflow_tools"):
+                    steps.append("mlflow_tools")
 
             if not steps:
                 print("  recognized intent but no actionable steps -> fallback router")
@@ -558,40 +757,63 @@ Examples:
                     if not worker:
                         continue
 
-                    # Avoid repeating the same worker when a step didn't complete; finish and let user adjust input.
-                    if worker == last_worker:
-                        print(f"  step '{step}' already attempted by {worker} -> FINISH")
+                    # Prevent infinite loops: don't attempt the same step twice within one user request
+                    # unless it was actually completed.
+                    if attempted_steps.get(step) and not handled_steps.get(step):
+                        print(f"  step '{step}' already attempted -> FINISH")
                         return {
+                            **({"messages": planner_messages} if planner_messages else {}),
                             "next": "FINISH",
                             "active_data_key": active_data_key,
                             "handled_request_id": handled_request_id,
                             "handled_steps": handled_steps,
+                            "attempted_steps": attempted_steps,
+                            "workflow_plan_request_id": state_plan_req,
+                            "workflow_plan": state_plan,
+                            "target_variable": planned_target,
                         }
 
                     # Guard data-dependent steps.
-                    if step in ("wrangle", "clean", "eda", "viz", "feature", "model") and not data_ready:
+                    if step in ("wrangle", "clean", "eda", "viz", "feature", "model", "evaluate") and not data_ready:
                         print(f"  step '{step}' requires data but none is ready -> Data_Loader_Tools_Agent")
+                        attempted_steps["load"] = True
                         return {
+                            **({"messages": planner_messages} if planner_messages else {}),
                             "next": "Data_Loader_Tools_Agent",
                             "active_data_key": active_data_key,
                             "handled_request_id": handled_request_id,
                             "handled_steps": handled_steps,
+                            "attempted_steps": attempted_steps,
+                            "workflow_plan_request_id": state_plan_req,
+                            "workflow_plan": state_plan,
+                            "target_variable": planned_target,
                         }
 
                     print(f"  next_step='{step}' -> {worker}")
+                    attempted_steps[step] = True
                     return {
+                        **({"messages": planner_messages} if planner_messages else {}),
                         "next": worker,
                         "active_data_key": active_data_key,
                         "handled_request_id": handled_request_id,
                         "handled_steps": handled_steps,
+                        "attempted_steps": attempted_steps,
+                        "workflow_plan_request_id": state_plan_req,
+                        "workflow_plan": state_plan,
+                        "target_variable": planned_target,
                     }
 
                 print("  all requested steps handled -> FINISH")
                 return {
+                    **({"messages": planner_messages} if planner_messages else {}),
                     "next": "FINISH",
                     "active_data_key": active_data_key,
                     "handled_request_id": handled_request_id,
                     "handled_steps": handled_steps,
+                    "attempted_steps": attempted_steps,
+                    "workflow_plan_request_id": state_plan_req,
+                    "workflow_plan": state_plan,
+                    "target_variable": planned_target,
                 }
 
         result = supervisor_chain.invoke(
@@ -635,6 +857,10 @@ Examples:
             "active_data_key": active_data_key,
             "handled_request_id": handled_request_id,
             "handled_steps": handled_steps,
+            "attempted_steps": attempted_steps,
+            "workflow_plan_request_id": state_plan_req,
+            "workflow_plan": state_plan,
+            "target_variable": planned_target,
         }
 
     def _trim_messages(
@@ -911,6 +1137,7 @@ Examples:
         loaded_dataset = None
         loaded_dataset_label = None
         multiple_loaded_files = None
+        fallback_loaded_dataset = False
 
         # Normalize artifacts into a dict so we can inspect tool intent
         artifacts_map: dict = {}
@@ -963,11 +1190,112 @@ Examples:
                     loaded_dataset_label = None
                     break
 
+        # If the tool returned only a directory listing but the user requested a specific file to load,
+        # attempt to load it deterministically (avoids "listing loop" regressions across turns).
+        if loaded_dataset is None and dir_listing is not None:
+            try:
+                import re
+                import os
+                from pathlib import Path
+                import pandas as pd
+
+                from ai_data_science_team.tools.data_loader import (
+                    auto_load_file,
+                    DEFAULT_MAX_ROWS,
+                )
+
+                last_human_text = _get_last_human(before_msgs) or ""
+                last_human_lower = last_human_text.lower()
+
+                if any(w in last_human_lower for w in ("load", "read", "import", "open")):
+                    m = re.search(
+                        r"(?:`|\"|')?([\\w\\-./~]+\\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\\.gz)?)",
+                        last_human_text,
+                        flags=re.IGNORECASE,
+                    )
+                    requested = (m.group(1) if m else "").strip()
+                    if requested:
+                        p = Path(requested).expanduser()
+                        if not p.is_absolute():
+                            p = (Path(os.getcwd()) / p).resolve()
+                        else:
+                            p = p.resolve()
+
+                        def _load_path(fp: str) -> Optional[dict]:
+                            df_or_error = auto_load_file(fp, max_rows=DEFAULT_MAX_ROWS)
+                            if isinstance(df_or_error, pd.DataFrame):
+                                return df_or_error.to_dict()
+                            return None
+
+                        loaded = _load_path(str(p)) if p.is_file() else None
+
+                        # If the path isn't directly valid, try to match by basename from listing outputs.
+                        if loaded is None:
+                            basename = Path(requested).name
+                            candidate_paths: list[str] = []
+                            if isinstance(dir_listing, list):
+                                for item in dir_listing:
+                                    if isinstance(item, dict):
+                                        fp = (
+                                            item.get("file_path")
+                                            or item.get("absolute_path")
+                                            or item.get("path")
+                                            or item.get("filepath")
+                                        )
+                                        if isinstance(fp, str):
+                                            candidate_paths.append(fp)
+                                    elif isinstance(item, str):
+                                        candidate_paths.append(item)
+                            elif isinstance(dir_listing, dict):
+                                for item in dir_listing.values():
+                                    if isinstance(item, dict):
+                                        fp = (
+                                            item.get("file_path")
+                                            or item.get("absolute_path")
+                                            or item.get("path")
+                                            or item.get("filepath")
+                                        )
+                                        if isinstance(fp, str):
+                                            candidate_paths.append(fp)
+                                    elif isinstance(item, str):
+                                        candidate_paths.append(item)
+                            for fp in candidate_paths:
+                                try:
+                                    resolved = Path(fp).expanduser().resolve()
+                                except Exception:
+                                    continue
+                                if resolved.is_file() and resolved.name == basename:
+                                    loaded = _load_path(str(resolved))
+                                    if loaded is not None:
+                                        loaded_dataset_label = str(resolved)
+                                        break
+
+                        if loaded is not None:
+                            loaded_dataset = loaded
+                            loaded_dataset_label = loaded_dataset_label or str(p)
+                            dir_listing = None
+                            fallback_loaded_dataset = True
+            except Exception:
+                pass
+
         if loaded_dataset is not None:
             data_raw = loaded_dataset
             active_data_key = "data_raw"
             # Prefer dataset summary over any incidental listings
             dir_listing = None
+            if fallback_loaded_dataset:
+                # The loader agent likely produced a listing-oriented AI message; suppress it.
+                merged["messages"] = []
+                # Store a lightweight marker so the supervisor can mark the load step as completed.
+                marker = {
+                    "status": "ok",
+                    "data": {"file_path": loaded_dataset_label},
+                    "error": None,
+                }
+                if isinstance(loader_artifacts, dict):
+                    loader_artifacts = {**loader_artifacts, "load_file_fallback": marker}
+                else:
+                    loader_artifacts = {"load_file_fallback": marker}
 
         print(f"  loader data_raw shape={_shape(data_raw)} active_data_key={active_data_key}")
 
@@ -995,53 +1323,116 @@ Examples:
                 rows = []
                 if isinstance(dir_listing, list):
                     for item in dir_listing:
-                        if isinstance(item, dict) and "filename" in item:
-                            names.append(item["filename"])
-                            rows.append(
-                                {
-                                    "filename": item.get("filename"),
-                                    "type": item.get("type"),
-                                    "path": item.get("path") or item.get("filepath"),
-                                }
-                            )
-                        else:
-                            names.append(str(item))
-                            rows.append({"filename": str(item)})
+                        if isinstance(item, dict):
+                            if "filename" in item:
+                                names.append(item.get("filename"))
+                                rows.append(
+                                    {
+                                        "filename": item.get("filename"),
+                                        "type": item.get("type"),
+                                        "path": item.get("path") or item.get("filepath"),
+                                    }
+                                )
+                                continue
+                            if "file_path" in item:
+                                fp = item.get("file_path")
+                                import os
+
+                                fn = os.path.basename(fp) if isinstance(fp, str) else str(fp)
+                                names.append(fn)
+                                rows.append({"filename": fn, "type": "file", "path": fp})
+                                continue
+                            if "absolute_path" in item or "name" in item:
+                                ap = item.get("absolute_path")
+                                import os
+
+                                fn = item.get("name") or (os.path.basename(ap) if isinstance(ap, str) else str(ap))
+                                names.append(fn)
+                                rows.append(
+                                    {"filename": fn, "type": item.get("type"), "path": ap}
+                                )
+                                continue
+
+                        names.append(str(item))
+                        rows.append({"filename": str(item)})
                 elif isinstance(dir_listing, dict):
                     # maybe mapping index->filename
                     for v in dir_listing.values():
                         if isinstance(v, dict):
-                            names.append(str(v.get("filename", v)))
-                            rows.append(
-                                {
-                                    "filename": v.get("filename"),
-                                    "type": v.get("type"),
-                                    "path": v.get("path") or v.get("filepath"),
-                                }
-                            )
+                            if "filename" in v:
+                                names.append(str(v.get("filename")))
+                                rows.append(
+                                    {
+                                        "filename": v.get("filename"),
+                                        "type": v.get("type"),
+                                        "path": v.get("path") or v.get("filepath"),
+                                    }
+                                )
+                            elif "file_path" in v:
+                                fp = v.get("file_path")
+                                import os
+
+                                fn = os.path.basename(fp) if isinstance(fp, str) else str(fp)
+                                names.append(fn)
+                                rows.append({"filename": fn, "type": "file", "path": fp})
+                            elif "absolute_path" in v or "name" in v:
+                                ap = v.get("absolute_path")
+                                import os
+
+                                fn = v.get("name") or (os.path.basename(ap) if isinstance(ap, str) else str(ap))
+                                names.append(fn)
+                                rows.append(
+                                    {"filename": fn, "type": v.get("type"), "path": ap}
+                                )
+                            else:
+                                names.append(str(v))
+                                rows.append({"filename": str(v)})
                         else:
                             names.append(str(v))
                             rows.append({"filename": str(v)})
-                msg_text = "Found files: " + ", ".join(names) if names else "Found directory contents."
-                table_text = ""
-                if rows:
-                    import pandas as pd
 
-                    df_listing = pd.DataFrame(rows)
-                    table_cols = [c for c in ["filename", "type", "path"] if c in df_listing.columns]
-                    table_text = df_listing[table_cols].to_markdown(index=False)
-                # If the user asked for a table or better formatting, try a tiny LLM summary
-                last_human = _get_last_human(before_msgs)
-                llm_text = _format_listing_with_llm(rows, last_human) if rows else None
-                if llm_text:
-                    summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
-                elif table_text:
-                    summary_msg = AIMessage(
-                        content=f"{msg_text}\n\n{table_text}",
-                        name="data_loader_agent",
+                last_human = _get_last_human(before_msgs).lower()
+                wants_csv_only = "csv" in last_human and ("list" in last_human or "files" in last_human)
+                if wants_csv_only and rows:
+                    rows = [
+                        r
+                        for r in rows
+                        if str(r.get("filename", "")).lower().endswith(".csv")
+                    ]
+                    names = [r.get("filename") for r in rows if r.get("filename")]
+                    if not rows:
+                        summary_msg = AIMessage(
+                            content="No CSV files found in that directory.",
+                            name="data_loader_agent",
+                        )
+                        dir_listing = None
+
+                if summary_msg is None:
+                    msg_text = (
+                        "Found files: " + ", ".join(names)
+                        if names
+                        else "Found directory contents."
                     )
-                else:
-                    summary_msg = AIMessage(content=msg_text, name="data_loader_agent")
+                    table_text = ""
+                    if rows:
+                        import pandas as pd
+
+                        df_listing = pd.DataFrame(rows)
+                        table_cols = [
+                            c for c in ["filename", "type", "path"] if c in df_listing.columns
+                        ]
+                        table_text = df_listing[table_cols].to_markdown(index=False)
+                    # If the user asked for a table or better formatting, try a tiny LLM summary
+                    llm_text = _format_listing_with_llm(rows, last_human) if rows else None
+                    if llm_text:
+                        summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
+                    elif table_text:
+                        summary_msg = AIMessage(
+                            content=f"{msg_text}\n\n{table_text}",
+                            name="data_loader_agent",
+                        )
+                    else:
+                        summary_msg = AIMessage(content=msg_text, name="data_loader_agent")
             except Exception:
                 summary_msg = AIMessage(content="Listed directory contents.", name="data_loader_agent")
         elif loaded_dataset is not None and isinstance(data_raw, dict):
@@ -1049,19 +1440,48 @@ Examples:
                 import pandas as pd
 
                 df = pd.DataFrame(data_raw)
-                table_md = df.iloc[:5, :6].to_markdown(index=False)
-                llm_text = _format_result_with_llm(
-                    "data_loader_agent",
-                    data_raw,
-                    _get_last_human(before_msgs),
+                last_human_lower = (_get_last_human(before_msgs) or "").lower()
+                wants_preview_rows = any(
+                    k in last_human_lower
+                    for k in (
+                        "head",
+                        "preview",
+                        "first 5",
+                        "first five",
+                        "first 5 rows",
+                        "first five rows",
+                        "show the first",
+                        "show first",
+                        "show rows",
+                    )
                 )
-                if llm_text:
-                    summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
-                else:
+
+                max_cols = 10
+                preview_df = df.head(5)
+                col_note = ""
+                if preview_df.shape[1] > max_cols:
+                    preview_df = preview_df.iloc[:, :max_cols]
+                    col_note = f" (showing first {max_cols} of {df.shape[1]} columns)"
+                table_md = preview_df.to_markdown(index=False)
+
+                if wants_preview_rows:
                     summary_msg = AIMessage(
-                        content=f"Loaded dataset with shape {df.shape}.\n\n{table_md}",
+                        content=f"Loaded dataset with shape {df.shape}.{col_note}\n\n{table_md}",
                         name="data_loader_agent",
                     )
+                else:
+                    llm_text = _format_result_with_llm(
+                        "data_loader_agent",
+                        data_raw,
+                        _get_last_human(before_msgs),
+                    )
+                    if llm_text:
+                        summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
+                    else:
+                        summary_msg = AIMessage(
+                            content=f"Loaded dataset with shape {df.shape}.{col_note}\n\n{table_md}",
+                            name="data_loader_agent",
+                        )
             except Exception:
                 summary_msg = AIMessage(
                     content="Loaded dataset successfully. What would you like to do next?",
@@ -1468,6 +1888,7 @@ Examples:
             messages=before_msgs,
             user_instructions=last_human,
             data_raw=active_df,
+            target_variable=state.get("target_variable"),
         )
         response = h2o_ml_agent.response or {}
         merged = _merge_messages(before_msgs, response)
@@ -1531,6 +1952,225 @@ Examples:
             "last_worker": "MLflow_Tools_Agent",
         }
 
+    def node_eval(state: SupervisorDSState):
+        print("---MODEL EVALUATION---")
+        before_msgs = list(state.get("messages", []) or [])
+        active_df = _ensure_df(
+            _get_active_data(
+                state,
+                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
+            )
+        )
+        if _is_empty_df(active_df):
+            return {
+                "messages": [
+                    AIMessage(
+                        content="No dataset is available for evaluation. Load data and train a model first.",
+                        name="model_evaluation_agent",
+                    )
+                ],
+                "last_worker": "Model_Evaluation_Agent",
+            }
+        h2o_art = (state.get("artifacts") or {}).get("h2o")
+        model_artifacts = h2o_art if isinstance(h2o_art, dict) else {}
+        model_evaluation_agent.invoke_messages(
+            messages=before_msgs,
+            data_raw=active_df,
+            model_artifacts=model_artifacts,
+            target_variable=state.get("target_variable"),
+        )
+        response = model_evaluation_agent.response or {}
+        merged = _merge_messages(before_msgs, response)
+        merged["messages"] = _tag_messages(merged.get("messages"), "model_evaluation_agent")
+        eval_artifacts = response.get("eval_artifacts")
+        plotly_graph = response.get("plotly_graph")
+        return {
+            **merged,
+            "eval_artifacts": eval_artifacts,
+            "artifacts": {
+                **state.get("artifacts", {}),
+                "eval": {
+                    "eval_artifacts": eval_artifacts,
+                    "plotly_graph": plotly_graph,
+                },
+            },
+            "last_worker": "Model_Evaluation_Agent",
+        }
+
+    def node_mlflow_log(state: SupervisorDSState):
+        print("---MLFLOW LOGGING---")
+        before_msgs = list(state.get("messages", []) or [])
+
+        # Pull config from the supervisor artifacts (optional).
+        cfg = {}
+        try:
+            cfg = (state.get("artifacts") or {}).get("config") or {}
+        except Exception:
+            cfg = {}
+
+        tracking_uri = cfg.get("mlflow_tracking_uri") if isinstance(cfg, dict) else None
+        experiment_name = (
+            cfg.get("mlflow_experiment_name") if isinstance(cfg, dict) else None
+        )
+
+        # Attempt to reuse an existing run id (from H2O training) if present.
+        run_id = None
+        h2o_art = (state.get("artifacts") or {}).get("h2o")
+        if isinstance(h2o_art, dict):
+            run_id = h2o_art.get("mlflow_run_id")
+            if not run_id and isinstance(h2o_art.get("h2o_train_result"), dict):
+                run_id = h2o_art["h2o_train_result"].get("mlflow_run_id")
+            if not run_id and isinstance(h2o_art.get("model_results"), dict):
+                run_id = h2o_art["model_results"].get("mlflow_run_id")
+
+        active_df = _ensure_df(
+            _get_active_data(
+                state,
+                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
+            )
+        )
+        viz_graph = state.get("viz_graph")
+        eval_payload = (state.get("artifacts") or {}).get("eval")
+        eval_artifacts = state.get("eval_artifacts")
+        eval_plot = None
+        if isinstance(eval_payload, dict):
+            eval_plot = eval_payload.get("plotly_graph")
+
+        logged: dict = {"tables": [], "figures": [], "dicts": [], "metrics": []}
+        message_lines: list[str] = []
+
+        try:
+            import mlflow
+            import json
+
+            if tracking_uri:
+                mlflow.set_tracking_uri(tracking_uri)
+            if experiment_name:
+                mlflow.set_experiment(experiment_name)
+
+            # Start or resume the run
+            with mlflow.start_run(run_id=run_id) as run:
+                run_id = run.info.run_id
+
+                # Basic tags/params
+                try:
+                    mlflow.set_tags(
+                        {
+                            "app": "supervisor_ds_team",
+                            "active_data_key": state.get("active_data_key") or "",
+                        }
+                    )
+                except Exception:
+                    pass
+
+                # Log a small dataset preview + schema
+                if active_df is not None and not _is_empty_df(active_df):
+                    try:
+                        mlflow.log_table(active_df.head(200), artifact_file="tables/data_preview.json")
+                        logged["tables"].append("tables/data_preview.json")
+                    except Exception:
+                        pass
+                    try:
+                        schema = {
+                            "columns": [
+                                {"name": str(c), "dtype": str(active_df[c].dtype)}
+                                for c in list(active_df.columns)
+                            ],
+                            "shape": list(active_df.shape),
+                        }
+                        mlflow.log_dict(schema, artifact_file="tables/schema.json")
+                        logged["dicts"].append("tables/schema.json")
+                    except Exception:
+                        pass
+
+                # Log visualization plot (if any)
+                if viz_graph:
+                    try:
+                        mlflow.log_dict(viz_graph, artifact_file="plots/viz.json")
+                        logged["dicts"].append("plots/viz.json")
+                    except Exception:
+                        pass
+                    try:
+                        import plotly.io as pio
+
+                        fig = pio.from_json(json.dumps(viz_graph))
+                        mlflow.log_figure(fig, artifact_file="plots/viz.html")
+                        logged["figures"].append("plots/viz.html")
+                    except Exception:
+                        pass
+
+                # Log evaluation artifacts + metrics + plot
+                if eval_artifacts:
+                    try:
+                        mlflow.log_dict(eval_artifacts, artifact_file="evaluation/eval_artifacts.json")
+                        logged["dicts"].append("evaluation/eval_artifacts.json")
+                    except Exception:
+                        pass
+                    try:
+                        metrics = eval_artifacts.get("metrics") if isinstance(eval_artifacts, dict) else None
+                        if isinstance(metrics, dict):
+                            safe = {}
+                            for k, v in metrics.items():
+                                try:
+                                    safe[str(k)] = float(v)
+                                except Exception:
+                                    continue
+                            if safe:
+                                mlflow.log_metrics(safe)
+                                logged["metrics"].extend(list(safe.keys()))
+                    except Exception:
+                        pass
+                if eval_plot:
+                    try:
+                        mlflow.log_dict(eval_plot, artifact_file="evaluation/eval_plot.json")
+                        logged["dicts"].append("evaluation/eval_plot.json")
+                    except Exception:
+                        pass
+                    try:
+                        import plotly.io as pio
+
+                        fig = pio.from_json(json.dumps(eval_plot))
+                        mlflow.log_figure(fig, artifact_file="evaluation/eval_plot.html")
+                        logged["figures"].append("evaluation/eval_plot.html")
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            message_lines.append(f"MLflow logging failed: {e}")
+
+        if run_id:
+            message_lines.append(f"Logged workflow artifacts to MLflow run `{run_id}`.")
+        if any(logged.values()):
+            message_lines.append(
+                "Logged: "
+                + ", ".join(
+                    [
+                        *([f"{len(logged['tables'])} table(s)"] if logged["tables"] else []),
+                        *([f"{len(logged['figures'])} figure(s)"] if logged["figures"] else []),
+                        *([f"{len(logged['dicts'])} json artifact(s)"] if logged["dicts"] else []),
+                        *([f"{len(logged['metrics'])} metric(s)"] if logged["metrics"] else []),
+                    ]
+                )
+                + "."
+            )
+        if not message_lines:
+            message_lines.append(
+                "No artifacts were available to log yet. Train a model and/or create a chart first."
+            )
+
+        msg = "\n".join(message_lines)
+        merged = {"messages": [AIMessage(content=msg, name="mlflow_logging_agent")]}
+        merged["messages"] = _tag_messages(merged.get("messages"), "mlflow_logging_agent")
+        return {
+            **merged,
+            "mlflow_artifacts": {"run_id": run_id, "logged": logged},
+            "artifacts": {
+                **state.get("artifacts", {}),
+                "mlflow_log": {"run_id": run_id, "logged": logged},
+            },
+            "last_worker": "MLflow_Logging_Agent",
+        }
+
     workflow = StateGraph(SupervisorDSState)
 
     workflow.add_node("supervisor", supervisor_node)
@@ -1542,6 +2182,8 @@ Examples:
     workflow.add_node("SQL_Database_Agent", node_sql)
     workflow.add_node("Feature_Engineering_Agent", node_fe)
     workflow.add_node("H2O_ML_Agent", node_h2o)
+    workflow.add_node("Model_Evaluation_Agent", node_eval)
+    workflow.add_node("MLflow_Logging_Agent", node_mlflow_log)
     workflow.add_node("MLflow_Tools_Agent", node_mlflow)
 
     workflow.set_entry_point("supervisor")
@@ -1580,11 +2222,14 @@ class SupervisorDSTeam:
         feature_engineering_agent,
         h2o_ml_agent,
         mlflow_tools_agent,
+        model_evaluation_agent,
+        workflow_planner_agent=None,
         checkpointer: Optional[Checkpointer] = None,
         temperature: float = 0.0,
     ):
         self._params = {
             "model": model,
+            "workflow_planner_agent": workflow_planner_agent,
             "data_loader_agent": data_loader_agent,
             "data_wrangling_agent": data_wrangling_agent,
             "data_cleaning_agent": data_cleaning_agent,
@@ -1594,6 +2239,7 @@ class SupervisorDSTeam:
             "feature_engineering_agent": feature_engineering_agent,
             "h2o_ml_agent": h2o_ml_agent,
             "mlflow_tools_agent": mlflow_tools_agent,
+            "model_evaluation_agent": model_evaluation_agent,
             "checkpointer": checkpointer,
             "temperature": temperature,
         }
@@ -1604,6 +2250,7 @@ class SupervisorDSTeam:
         self.response = None
         return make_supervisor_ds_team(
             model=self._params["model"],
+            workflow_planner_agent=self._params["workflow_planner_agent"],
             data_loader_agent=self._params["data_loader_agent"],
             data_wrangling_agent=self._params["data_wrangling_agent"],
             data_cleaning_agent=self._params["data_cleaning_agent"],
@@ -1613,6 +2260,7 @@ class SupervisorDSTeam:
             feature_engineering_agent=self._params["feature_engineering_agent"],
             h2o_ml_agent=self._params["h2o_ml_agent"],
             mlflow_tools_agent=self._params["mlflow_tools_agent"],
+            model_evaluation_agent=self._params["model_evaluation_agent"],
             checkpointer=self._params["checkpointer"],
             temperature=self._params["temperature"],
         )

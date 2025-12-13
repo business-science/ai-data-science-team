@@ -287,6 +287,7 @@ def generate_sweetviz_report(
     report_name: str = "sweetviz_report.html",
     report_directory: str = None,  # <-- Default to None
     open_browser: bool = False,
+    include_html: bool = False,
 ) -> Tuple[str, Dict]:
     """
     Tool: generate_sweetviz_report
@@ -306,6 +307,8 @@ def generate_sweetviz_report(
         If None, a temporary directory is created and used.
     open_browser : bool, optional
         Whether to open the report in a web browser. Default is False.
+    include_html : bool, optional
+        If True, includes the full HTML content in the returned artifact. Default is False.
 
     Returns:
     --------
@@ -360,12 +363,13 @@ def generate_sweetviz_report(
         open_browser=open_browser,
     )
 
-    # Optionally, read the HTML content (if desired to pass along in the artifact).
-    try:
-        with open(full_report_path, "r", encoding="utf-8") as f:
-            html_content = f.read()
-    except Exception:
-        html_content = None
+    html_content = None
+    if include_html:
+        try:
+            with open(full_report_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+        except Exception:
+            html_content = None
 
     content = (
         f"Sweetviz EDA report generated and saved as '{os.path.abspath(full_report_path)}'. "

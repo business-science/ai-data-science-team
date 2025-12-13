@@ -1,8 +1,280 @@
-from typing_extensions import Optional, Union, List, Annotated
+from typing_extensions import Optional, Union, List, Annotated, Dict, Any
 from langgraph.prebuilt import InjectedState
 from langchain.tools import tool
 import psutil
 
+
+def _resolve_active_run(
+    *,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+    run_name: Optional[str] = None,
+    tags: Optional[Dict[str, Any]] = None,
+):
+    """
+    Return a context manager that yields an active MLflow run.
+
+    - If a matching active run exists, reuse it.
+    - If a different active run exists, end it and start/resume the requested run.
+    """
+    import mlflow
+    from contextlib import nullcontext
+
+    if tracking_uri:
+        mlflow.set_tracking_uri(tracking_uri)
+    if registry_uri:
+        mlflow.set_registry_uri(registry_uri)
+    if experiment_name:
+        # Creates the experiment if it doesn't exist.
+        mlflow.set_experiment(experiment_name)
+
+    active = mlflow.active_run()
+    if active and (run_id is None or active.info.run_id == run_id):
+        return nullcontext(active)
+
+    if active:
+        try:
+            mlflow.end_run()
+        except Exception:
+            pass
+
+    return mlflow.start_run(run_id=run_id, run_name=run_name, tags=tags)
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_set_tags(
+    tags: Dict[str, Any],
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Set one or more tags on an MLflow run. If run_id is not provided, uses the active run
+    or starts a new run under experiment_name.
+    """
+    print("    * Tool: mlflow_set_tags")
+    import mlflow
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        mlflow.set_tags(tags or {})
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Tags set.", {"run_id": rid, "tags": tags})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_params(
+    params: Dict[str, Any],
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a batch of parameters to an MLflow run. If run_id is not provided, uses the active run
+    or starts a new run under experiment_name.
+    """
+    print("    * Tool: mlflow_log_params")
+    import mlflow
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        mlflow.log_params(params or {})
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Parameters logged.", {"run_id": rid, "params": params})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_metrics(
+    metrics: Dict[str, float],
+    step: Optional[int] = None,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a batch of metrics to an MLflow run. If run_id is not provided, uses the active run
+    or starts a new run under experiment_name.
+    """
+    print("    * Tool: mlflow_log_metrics")
+    import mlflow
+
+    # Ensure metrics are numeric where possible
+    safe_metrics: Dict[str, float] = {}
+    for k, v in (metrics or {}).items():
+        try:
+            safe_metrics[str(k)] = float(v)
+        except Exception:
+            continue
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        mlflow.log_metrics(safe_metrics, step=step)
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Metrics logged.", {"run_id": rid, "metrics": safe_metrics, "step": step})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_table(
+    data: Any,
+    artifact_file: str,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a table-like object as an MLflow artifact (using mlflow.log_table).
+
+    Parameters
+    ----------
+    data : Any
+        Anything coercible to a pandas DataFrame (dict/list/records).
+    artifact_file : str
+        Destination artifact path, e.g. "tables/preview.json".
+    """
+    print("    * Tool: mlflow_log_table")
+    import mlflow
+    import pandas as pd
+
+    df = None
+    try:
+        if isinstance(data, pd.DataFrame):
+            df = data
+        else:
+            df = pd.DataFrame(data)
+    except Exception:
+        df = pd.DataFrame({"data": [data]})
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        mlflow.log_table(df, artifact_file=artifact_file)
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Table logged.", {"run_id": rid, "artifact_file": artifact_file, "shape": tuple(df.shape)})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_dict(
+    data: Dict[str, Any],
+    artifact_file: str,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a JSON-serializable dict to MLflow (using mlflow.log_dict).
+    """
+    print("    * Tool: mlflow_log_dict")
+    import mlflow
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        mlflow.log_dict(data or {}, artifact_file=artifact_file)
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Dict logged.", {"run_id": rid, "artifact_file": artifact_file})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_figure(
+    plotly_graph_dict: Dict[str, Any],
+    artifact_file: str,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a Plotly figure to MLflow (using mlflow.log_figure).
+
+    Parameters
+    ----------
+    plotly_graph_dict : dict
+        A Plotly figure in dict form (JSON-serializable).
+    artifact_file : str
+        Destination artifact file path, e.g. "plots/viz.html" or "plots/viz.json".
+    """
+    print("    * Tool: mlflow_log_figure")
+    import mlflow
+    import json
+    import plotly.io as pio
+
+    fig = None
+    try:
+        fig = pio.from_json(json.dumps(plotly_graph_dict or {}))
+    except Exception:
+        fig = None
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        if fig is not None:
+            mlflow.log_figure(fig, artifact_file=artifact_file)
+        else:
+            # Fallback: log the dict as JSON
+            mlflow.log_dict(plotly_graph_dict or {}, artifact_file=artifact_file)
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return ("Figure logged.", {"run_id": rid, "artifact_file": artifact_file})
+
+
+@tool(response_format="content_and_artifact")
+def mlflow_log_artifact(
+    local_path: str,
+    artifact_path: Optional[str] = None,
+    run_id: Optional[str] = None,
+    tracking_uri: Optional[str] = None,
+    registry_uri: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+) -> tuple:
+    """
+    Log a local file or directory to MLflow (using mlflow.log_artifact(s)).
+    """
+    print("    * Tool: mlflow_log_artifact")
+    import mlflow
+    import os
+
+    with _resolve_active_run(
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        registry_uri=registry_uri,
+        experiment_name=experiment_name,
+    ) as run:
+        if os.path.isdir(local_path):
+            mlflow.log_artifacts(local_path, artifact_path=artifact_path)
+        else:
+            mlflow.log_artifact(local_path, artifact_path=artifact_path)
+        rid = getattr(run.info, "run_id", None) if run else run_id
+    return (
+        "Artifact logged.",
+        {"run_id": rid, "local_path": local_path, "artifact_path": artifact_path},
+    )
 
 @tool(response_format="content_and_artifact")
 def mlflow_search_experiments(

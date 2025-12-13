@@ -1,2 +1,3 @@
 from ai_data_science_team.ml_agents.h2o_ml_agent import make_h2o_ml_agent, H2OMLAgent
 from ai_data_science_team.ml_agents.mlflow_tools_agent import make_mlflow_tools_agent, MLflowToolsAgent
+from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluationAgent
