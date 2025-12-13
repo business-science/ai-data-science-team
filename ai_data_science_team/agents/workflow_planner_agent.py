@@ -90,6 +90,8 @@ class WorkflowPlannerAgent(BaseAgent):
             "Rules:\n"
             "- Output schema: {\"steps\": [..], \"target_variable\": str|null, \"questions\": [..], \"notes\": [..]}.\n"
             "- steps must be a de-duplicated ordered list of step IDs from the allowed set.\n"
+            "- The word \"model\" can be ambiguous (e.g., a product \"bike model\" vs an ML model). "
+            "Only include the ML step `model` when the user explicitly asks to train/build/predict with an ML model.\n"
             "- If required info is missing (e.g., file path for load, target column for model), "
             "put a short question in questions and omit dependent steps.\n"
             "- If you include 'model' or 'evaluate', you MUST set target_variable or ask for it and omit those steps.\n"

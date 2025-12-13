@@ -318,8 +318,46 @@ Examples:
             "describe", "eda", "summary", "correlation", "sweetviz", "missingness"
         )
         wants_feature = has("feature", "encode", "one-hot", "feat eng")
-        wants_model = has(
-            "train", "model", "automl", "classify", "regression", "predict"
+
+        # "model" is ambiguous (e.g., "bike model" vs ML model). Only treat as ML intent when
+        # there are explicit ML/training signals, or action verbs paired with "model".
+        ml_signal = has(
+            "train",
+            "automl",
+            "predict",
+            "classification",
+            "classify",
+            "regression",
+            "mlflow",
+            "cross-validation",
+            "cross validation",
+            "cv",
+            "hyperparameter",
+            "tune",
+            "xgboost",
+            "random forest",
+            "lightgbm",
+            "catboost",
+            "logistic",
+            "neural network",
+            "deep learning",
+        )
+        model_word = "model" in last_human
+        product_model_context = has(
+            "bike model",
+            "car model",
+            "product model",
+            "model year",
+            "phone model",
+            "vehicle model",
+        ) or (wants_viz and has("by model", "per model", "for each model"))
+        wants_model = bool(
+            ml_signal
+            or (
+                model_word
+                and has("build", "create", "fit", "train", "tune", "predict", "develop")
+                and not product_model_context
+            )
         )
         wants_eval = has(
             "evaluate",
