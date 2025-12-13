@@ -40,3 +40,8 @@ Build a LangGraph supervisor-led data science team (message-first, tool-aware) t
 - Do we include sandboxed code execution for modeling agents by default? (currently opt-in).
 - Should we add a lightweight summarizer node to produce a final “answer” after worker responses?
 - Memory: use optional `MemorySaver` checkpointer for short-term conversation continuity.
+
+## Notes / Fixes (post-plan)
+- Conversation state: `messages` now uses LangGraph's ID-aware message reducer (prevents duplicated history when nodes return full message lists).
+- Message-first sub-agent calls: `invoke_messages(...)` for coding-style agents now forwards `user_instructions` (or infers it from the last user message), which fixes generic/incorrect outputs (especially charts/SQL).
+- Data correctness: the supervisor tracks an `active_data_key` so downstream agents use the most recently “active” dataset (raw vs SQL vs wrangled/cleaned/features), avoiding stale plots.

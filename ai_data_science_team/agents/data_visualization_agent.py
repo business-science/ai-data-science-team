@@ -39,6 +39,7 @@ from ai_data_science_team.tools.dataframe import get_dataframe_summary
 from ai_data_science_team.utils.logging import log_ai_function, log_ai_error
 from ai_data_science_team.utils.plotly import plotly_from_dict
 from ai_data_science_team.utils.sandbox import run_code_sandboxed_subprocess
+from ai_data_science_team.utils.messages import get_last_user_message_content
 
 # Setup
 AGENT_NAME = "data_visualization_agent"
@@ -295,10 +296,13 @@ class DataVisualizationAgent(BaseAgent):
         """
         Invokes the agent with an explicit message list (preferred for supervisors/teams).
         """
+        user_instructions = kwargs.pop("user_instructions", None)
+        if user_instructions is None:
+            user_instructions = get_last_user_message_content(messages)
         response = self._compiled_graph.invoke(
             {
                 "messages": messages,
-                "user_instructions": None,
+                "user_instructions": user_instructions,
                 "data_raw": data_raw.to_dict(),
                 "max_retries": max_retries,
                 "retry_count": retry_count,
@@ -319,10 +323,13 @@ class DataVisualizationAgent(BaseAgent):
         """
         Async version of invoke_messages for supervisors/teams.
         """
+        user_instructions = kwargs.pop("user_instructions", None)
+        if user_instructions is None:
+            user_instructions = get_last_user_message_content(messages)
         response = await self._compiled_graph.ainvoke(
             {
                 "messages": messages,
-                "user_instructions": None,
+                "user_instructions": user_instructions,
                 "data_raw": data_raw.to_dict(),
                 "max_retries": max_retries,
                 "retry_count": retry_count,

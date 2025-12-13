@@ -5,9 +5,8 @@ from langchain_core.output_parsers import JsonOutputParser
 
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.message import add_messages
 from langgraph.types import Checkpointer
-
-import operator
 
 from typing_extensions import TypedDict, Annotated, Sequence
 
@@ -472,7 +471,7 @@ def make_sql_data_analyst(
     routing_preprocessor = routing_preprocessor_prompt | llm | JsonOutputParser()
 
     class PrimaryState(TypedDict):
-        messages: Annotated[Sequence[BaseMessage], operator.add]
+        messages: Annotated[Sequence[BaseMessage], add_messages]
         user_instructions: str
         user_instructions_sql_database: str
         user_instructions_data_visualization: str

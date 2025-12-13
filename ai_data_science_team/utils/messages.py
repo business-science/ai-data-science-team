@@ -1,4 +1,8 @@
+from __future__ import annotations
 
+from typing import Sequence
+
+from langchain_core.messages import BaseMessage
 
 
 def get_tool_call_names(messages):
@@ -25,3 +29,14 @@ def get_tool_call_names(messages):
             pass
     return tool_calls
 
+
+def get_last_user_message_content(messages: Sequence[BaseMessage]) -> str:
+    """
+    Returns the content of the most recent human/user message in a list.
+    Falls back to an empty string when missing.
+    """
+    for msg in reversed(messages or []):
+        role = getattr(msg, "type", None) or getattr(msg, "role", None)
+        if role in ("human", "user"):
+            return (getattr(msg, "content", "") or "").strip()
+    return ""

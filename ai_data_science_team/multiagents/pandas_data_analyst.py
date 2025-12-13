@@ -4,9 +4,9 @@ from langchain_core.output_parsers import JsonOutputParser
 from langgraph.types import Checkpointer
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.message import add_messages
 
 from typing_extensions import TypedDict, Annotated, Sequence, Union
-import operator
 
 import pandas as pd
 import json
@@ -321,7 +321,7 @@ def make_pandas_data_analyst(
     routing_preprocessor = routing_preprocessor_prompt | llm | JsonOutputParser()
 
     class PrimaryState(TypedDict):
-        messages: Annotated[Sequence[BaseMessage], operator.add]
+        messages: Annotated[Sequence[BaseMessage], add_messages]
         user_instructions: str
         user_instructions_data_wrangling: str
         user_instructions_data_visualization: str

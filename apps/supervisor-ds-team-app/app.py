@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 import os
+import json
 from openai import OpenAI
 import pandas as pd
 import sqlalchemy as sql
@@ -38,6 +39,13 @@ st.set_page_config(
 )
 TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
+
+
+@st.cache_resource(show_spinner=False)
+def get_checkpointer():
+    """Cache the LangGraph MemorySaver checkpointer."""
+    return MemorySaver()
+
 
 with st.expander(
     "I’m a full data science copilot. Load data, wrangle/clean, run EDA, visualize, query SQL, engineer features, and train/evaluate models (H2O/MLflow). Try these on the sample Telco churn data:"
@@ -99,7 +107,13 @@ with st.sidebar:
     # Settings
     st.header("Settings")
     model_choice = st.selectbox(
-        "OpenAI model", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+        "OpenAI model",
+        [
+            "gpt-4.1-mini",
+            "gpt-4.1",
+            "gpt-4o-mini",
+            "gpt-4o",
+        ],
     )
     recursion_limit = st.slider("Recursion limit", 4, 20, 10, 1)
     add_memory = st.checkbox("Enable short-term memory", value=True)
@@ -118,6 +132,8 @@ with st.sidebar:
         msgs.clear()
         msgs.add_ai_message("How can the data science team help today?")
         st.session_state.thread_id = str(uuid.uuid4())
+        # Reset checkpointer when clearing chat
+        st.session_state.checkpointer = get_checkpointer() if add_memory else None
 
 # Hard gate: require valid API key before rendering the rest of the app
 resolved_api_key = st.session_state.get("OPENAI_API_KEY")
@@ -129,13 +145,7 @@ if key_status == "bad":
     st.stop()
 
 
-@st.cache_resource(show_spinner=False)
-def get_checkpointer():
-    return MemorySaver()
-
-
-@st.cache_resource(show_spinner=False)
-def build_team(model_name: str, use_memory: bool, sql_url: str):
+def build_team(model_name: str, use_memory: bool, sql_url: str, checkpointer):
     llm = ChatOpenAI(model=model_name)
     data_loader_agent = DataLoaderToolsAgent(
         llm, invoke_react_agent_kwargs={"recursion_limit": 4}
@@ -144,8 +154,11 @@ def build_team(model_name: str, use_memory: bool, sql_url: str):
     data_cleaning_agent = DataCleaningAgent(llm, log=False)
     eda_tools_agent = EDAToolsAgent(llm, log_tool_calls=True)
     data_visualization_agent = DataVisualizationAgent(llm, log=False)
-    # SQL connection is optional; default to in-memory sqlite to satisfy constructor
-    conn = sql.create_engine(sql_url or "sqlite:///:memory:").connect()
+    # SQL connection is optional; default to in-memory sqlite to satisfy constructor.
+    # Use check_same_thread=False so the connection can be reused safely in Streamlit threads.
+    conn = sql.create_engine(
+        sql_url or "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    ).connect()
     sql_database_agent = SQLDatabaseAgent(llm, connection=conn, log=False)
     feature_engineering_agent = FeatureEngineeringAgent(llm, log=False)
     h2o_ml_agent = H2OMLAgent(llm, log=False)
@@ -162,7 +175,7 @@ def build_team(model_name: str, use_memory: bool, sql_url: str):
         feature_engineering_agent=feature_engineering_agent,
         h2o_ml_agent=h2o_ml_agent,
         mlflow_tools_agent=mlflow_tools_agent,
-        checkpointer=get_checkpointer() if use_memory else None,
+        checkpointer=checkpointer if use_memory else None,
     )
     return team
 
@@ -217,7 +230,7 @@ def render_history(history: list[BaseMessage]):
                     idx = int(content.split(":")[1])
                     detail = st.session_state.details[idx]
                 except Exception:
-                    st.write(content)
+                    # If detail is missing (e.g., state not restored), skip showing the raw marker
                     continue
                 with st.expander("Analysis Details", expanded=True):
                     tabs = st.tabs(
@@ -271,8 +284,17 @@ def render_history(history: list[BaseMessage]):
                         graph_json = detail.get("plotly_graph")
                         if graph_json:
                             try:
-                                fig = pio.from_json(graph_json)
-                                st.plotly_chart(fig, use_container_width=True)
+                                payload = (
+                                    json.dumps(graph_json)
+                                    if isinstance(graph_json, dict)
+                                    else graph_json
+                                )
+                                fig = pio.from_json(payload)
+                                st.plotly_chart(
+                                    fig,
+                                    use_container_width=True,
+                                    key=f"detail_chart_{idx}",
+                                )
                             except Exception as e:
                                 st.error(f"Error rendering chart: {e}")
                         else:
@@ -300,6 +322,9 @@ def render_history(history: list[BaseMessage]):
 
 # Show data preview (if selected) and store for reuse on submit
 data_raw_dict, _ = get_input_data()
+# If no new data selected, reuse previously loaded data_raw from session
+if data_raw_dict is None:
+    data_raw_dict = st.session_state.get("selected_data_raw")
 st.session_state.selected_data_raw = data_raw_dict
 
 # ---------------- User input ----------------
@@ -317,12 +342,18 @@ if prompt:
     data_raw_dict = st.session_state.get("selected_data_raw")
 
     team = build_team(
-        model_choice, add_memory, st.session_state.get("sql_url", "sqlite:///:memory:")
+        model_choice,
+        add_memory,
+        st.session_state.get("sql_url", "sqlite:///:memory:"),
+        st.session_state.checkpointer if add_memory else None,
     )
     try:
+        # If LangGraph memory is enabled, pass only the new user message.
+        # The checkpointer will supply prior state/messages for continuity.
+        input_messages = [HumanMessage(content=prompt)] if add_memory else msgs.messages
         result = team.invoke(
             {
-                "messages": msgs.messages,
+                "messages": input_messages,
                 "artifacts": {},
                 "data_raw": data_raw_dict,
             },
@@ -336,6 +367,13 @@ if prompt:
         result = None
 
     if result:
+        # Persist data_raw from result for follow-on requests
+        if result.get("data_raw") is not None:
+            try:
+                st.session_state.selected_data_raw = result.get("data_raw").to_dict()
+            except Exception:
+                st.session_state.selected_data_raw = result.get("data_raw")
+
         # append last AI message to chat history for display
         last_ai = None
         for msg in reversed(result.get("messages", [])):
@@ -357,20 +395,31 @@ if prompt:
             role = getattr(message, "role", getattr(message, "type", None))
             if role in ("human", "user"):
                 latest_human_index = i
+        # Collapse multiple messages from the same agent into the latest one
+        ordered_names = []
+        latest_by_name = {}
         for message in result.get("messages", [])[latest_human_index + 1 :]:
             role = getattr(message, "role", getattr(message, "type", None))
             if role in ("assistant", "ai"):
                 name = getattr(message, "name", None) or "assistant"
-                # Heuristic: infer agent name from content if not provided
                 if name == "assistant":
                     txt_lower = (getattr(message, "content", "") or "").lower()
                     if "loader" in txt_lower:
                         name = "data_loader_agent"
-                display_name = name.replace("_", " ").title()
                 content = getattr(message, "content", "")
-                if content:
-                    reasoning_items.append((display_name, content))
-                    reasoning += f"##### {display_name}:\n\n{content}\n\n---\n\n"
+                if not content:
+                    continue
+                latest_by_name[name] = content
+                if name not in ordered_names:
+                    ordered_names.append(name)
+
+        for name in ordered_names:
+            content = latest_by_name.get(name, "")
+            if not content:
+                continue
+            display_name = name.replace("_", " ").title()
+            reasoning_items.append((display_name, content))
+            reasoning += f"##### {display_name}:\n\n{content}\n\n---\n\n"
 
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
@@ -446,11 +495,27 @@ if prompt:
                         continue
                 if isinstance(val, dict) and "plotly_graph" in val:
                     try:
-                        fig = pio.from_json(val["plotly_graph"])
+                        payload = (
+                            json.dumps(val["plotly_graph"])
+                            if isinstance(val["plotly_graph"], dict)
+                            else val["plotly_graph"]
+                        )
+                        fig = pio.from_json(payload)
                         st.markdown(f"**{key}**")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"artifact_chart_{key}",
+                        )
                         break
                     except Exception:
                         continue
 
 render_history(msgs.messages)
+# -- Initialize Session State similar to other apps --
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
+if "checkpointer" not in st.session_state:
+    st.session_state.checkpointer = get_checkpointer()
+if "details" not in st.session_state:
+    st.session_state.details = []
