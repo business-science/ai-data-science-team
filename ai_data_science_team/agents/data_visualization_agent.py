@@ -623,8 +623,10 @@ Use an appropriate chart type based on column types (categorical vs numeric). De
             
             - Formulate chart generator instructions by informing the chart generator of what type of plotly plot to use (e.g. bar, line, scatter, etc) to best represent the data. 
             - Think about how best to convey the information in the data to the user.
+            - If the user specifies a chart type (e.g., violin, box, scatter, histogram, line), you MUST use that chart type. Do NOT substitute a different chart type.
             - If the user does not specify a type of plot, select the appropriate chart type based on the data summary provided and the user's question and how best to show the results.
             - Come up with an informative title from the user's question and data provided. Also provide X and Y axis titles.
+            - If the user requests a combined \"violin+box\" plot, instruct the generator to use a violin plot with an embedded box plot (e.g., `plotly.express.violin(..., box=True)`).
             
             CHART TYPE SELECTION TIPS:
             
@@ -827,6 +829,62 @@ Use an appropriate chart type based on column types (categorical vs numeric). De
                 else:
                     traces = len(fig.data) if hasattr(fig, "data") else 0
                     viz_summary = f"Plotly figure with {traces} trace(s) generated."
+                    # Validate chart type against explicit user request when possible.
+                    req = (state.get("user_instructions") or "").lower()
+                    if req:
+                        expected = set()
+                        if "violin" in req:
+                            expected.add("violin")
+                        if "box" in req:
+                            expected.add("box")
+                        if "hist" in req:
+                            expected.add("histogram")
+                        if "scatter" in req:
+                            expected.add("scatter")
+                        if "heatmap" in req:
+                            expected.add("heatmap")
+                        if "bar" in req:
+                            expected.add("bar")
+                        if "line" in req:
+                            expected.add("line")
+
+                        actual_types = {
+                            getattr(t, "type", None)
+                            for t in getattr(fig, "data", []) or []
+                            if getattr(t, "type", None)
+                        }
+
+                        def has_line() -> bool:
+                            for t in getattr(fig, "data", []) or []:
+                                if getattr(t, "type", None) == "scatter":
+                                    mode = (getattr(t, "mode", "") or "").lower()
+                                    if "lines" in mode:
+                                        return True
+                            return False
+
+                        mismatch = None
+                        if "violin" in expected and "violin" not in actual_types:
+                            mismatch = "violin"
+                        elif "box" in expected and "violin" not in expected and "box" not in actual_types:
+                            mismatch = "box"
+                        elif "histogram" in expected and "histogram" not in actual_types:
+                            mismatch = "histogram"
+                        elif "bar" in expected and "bar" not in actual_types:
+                            mismatch = "bar"
+                        elif "heatmap" in expected and "heatmap" not in actual_types:
+                            mismatch = "heatmap"
+                        elif "scatter" in expected and "scatter" not in actual_types:
+                            mismatch = "scatter"
+                        elif "line" in expected and not has_line():
+                            mismatch = "line"
+
+                        if mismatch:
+                            got = ", ".join(sorted(actual_types)) if actual_types else "unknown"
+                            validation_error = (
+                                "Chart type mismatch. "
+                                f"User requested '{mismatch}' style, but got '{got}'. "
+                                f"User instructions: {state.get('user_instructions')!r}"
+                            )
             except Exception as exc:
                 validation_error = f"Plotly reconstruction failed: {exc}"
 
@@ -865,6 +923,12 @@ Use an appropriate chart type based on column types (categorical vs numeric). De
         
         This is the broken code (please fix): 
         {code_snippet}
+
+        User instructions:
+        {user_instructions}
+
+        Recommended steps (if any):
+        {recommended_steps}
 
         Last Known Error:
         {error}

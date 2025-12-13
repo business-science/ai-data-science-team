@@ -13,6 +13,7 @@ import json
 from openai import OpenAI
 import pandas as pd
 import sqlalchemy as sql
+import plotly.colors as pc
 import plotly.io as pio
 import streamlit as st
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -39,6 +40,68 @@ st.set_page_config(
 )
 TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
+
+def _apply_streamlit_plot_style(fig):
+    """
+    Streamlit dark theme + Plotly can yield black-on-black traces when the
+    figure template/colors aren't set. Normalize styling for readability.
+    """
+    if fig is None:
+        return None
+
+    try:
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="white"),
+            legend=dict(font=dict(color="white")),
+        )
+    except Exception:
+        return fig
+
+    colorway = list(getattr(pc.qualitative, "Plotly", [])) or [
+        "#636EFA",
+        "#EF553B",
+        "#00CC96",
+        "#AB63FA",
+        "#FFA15A",
+        "#19D3F3",
+        "#FF6692",
+        "#B6E880",
+        "#FF97FF",
+        "#FECB52",
+    ]
+
+    def _is_black(val) -> bool:
+        if val is None:
+            return True
+        if isinstance(val, str):
+            v = val.strip().lower()
+            return v in ("black", "#000", "#000000", "rgb(0,0,0)", "rgba(0,0,0,1)")
+        return False
+
+    try:
+        for i, tr in enumerate(fig.data or []):
+            c = colorway[i % len(colorway)]
+            # Line-like traces
+            if hasattr(tr, "line"):
+                line_color = getattr(getattr(tr, "line", None), "color", None)
+                if _is_black(line_color):
+                    tr.update(line=dict(color=c))
+            # Marker-like traces
+            if hasattr(tr, "marker"):
+                marker_color = getattr(getattr(tr, "marker", None), "color", None)
+                if _is_black(marker_color):
+                    tr.update(marker=dict(color=c))
+            # Fill (e.g., area)
+            fillcolor = getattr(tr, "fillcolor", None)
+            if _is_black(fillcolor):
+                tr.update(fillcolor=c)
+    except Exception:
+        pass
+
+    return fig
 
 
 @st.cache_resource(show_spinner=False)
@@ -126,6 +189,19 @@ with st.sidebar:
     sql_url = st.text_input("SQLAlchemy URL (optional)", value="sqlite:///:memory:")
     st.session_state["sql_url"] = sql_url
 
+    st.markdown("**MLflow options**")
+    enable_mlflow_logging = st.checkbox("Enable MLflow logging in training", value=True)
+    default_mlflow_uri = f"file:{os.path.abspath('mlruns')}"
+    mlflow_tracking_uri = st.text_input(
+        "MLflow tracking URI", value=default_mlflow_uri
+    ).strip()
+    mlflow_experiment_name = st.text_input(
+        "MLflow experiment name", value="H2O AutoML"
+    ).strip()
+    st.session_state["enable_mlflow_logging"] = enable_mlflow_logging
+    st.session_state["mlflow_tracking_uri"] = mlflow_tracking_uri or None
+    st.session_state["mlflow_experiment_name"] = mlflow_experiment_name or "H2O AutoML"
+
     if st.button("Clear chat"):
         st.session_state.chat_history = []
         msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
@@ -145,7 +221,15 @@ if key_status == "bad":
     st.stop()
 
 
-def build_team(model_name: str, use_memory: bool, sql_url: str, checkpointer):
+def build_team(
+    model_name: str,
+    use_memory: bool,
+    sql_url: str,
+    checkpointer,
+    enable_mlflow_logging: bool,
+    mlflow_tracking_uri: str | None,
+    mlflow_experiment_name: str,
+):
     llm = ChatOpenAI(model=model_name)
     data_loader_agent = DataLoaderToolsAgent(
         llm, invoke_react_agent_kwargs={"recursion_limit": 4}
@@ -161,8 +245,16 @@ def build_team(model_name: str, use_memory: bool, sql_url: str, checkpointer):
     ).connect()
     sql_database_agent = SQLDatabaseAgent(llm, connection=conn, log=False)
     feature_engineering_agent = FeatureEngineeringAgent(llm, log=False)
-    h2o_ml_agent = H2OMLAgent(llm, log=False)
-    mlflow_tools_agent = MLflowToolsAgent(llm, log_tool_calls=True)
+    h2o_ml_agent = H2OMLAgent(
+        llm,
+        log=False,
+        enable_mlflow=enable_mlflow_logging,
+        mlflow_tracking_uri=mlflow_tracking_uri,
+        mlflow_experiment_name=mlflow_experiment_name,
+    )
+    mlflow_tools_agent = MLflowToolsAgent(
+        llm, log_tool_calls=True, mlflow_tracking_uri=mlflow_tracking_uri
+    )
 
     team = make_supervisor_ds_team(
         model=llm,
@@ -185,6 +277,12 @@ if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 if "details" not in st.session_state:
     st.session_state.details = []
+if "checkpointer" not in st.session_state:
+    st.session_state.checkpointer = get_checkpointer() if add_memory else None
+if add_memory and st.session_state.checkpointer is None:
+    st.session_state.checkpointer = get_checkpointer()
+if not add_memory:
+    st.session_state.checkpointer = None
 
 msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
 if not msgs.messages:
@@ -221,6 +319,80 @@ def get_input_data():
 
 
 def render_history(history: list[BaseMessage]):
+    def _render_analysis_detail(detail: dict, key_suffix: str):
+        tabs = st.tabs(
+            [
+                "AI Reasoning",
+                "Data (raw/clean)",
+                "Charts",
+                "Models/MLflow",
+            ]
+        )
+        # AI Reasoning
+        with tabs[0]:
+            reasoning_items = detail.get("reasoning_items", [])
+            if reasoning_items:
+                for name, text in reasoning_items:
+                    if not text:
+                        continue
+                    st.markdown(f"**{name}:**")
+                    st.write(text)
+                    st.markdown("---")
+            else:
+                txt = detail.get("reasoning", detail.get("ai_reply", ""))
+                if txt:
+                    st.write(txt)
+                else:
+                    st.info("No reasoning available.")
+        # Data
+        with tabs[1]:
+            raw_df = detail.get("data_raw_df")
+            wrangled_df = detail.get("data_wrangled_df")
+            cleaned_df = detail.get("data_cleaned_df")
+            if raw_df is not None:
+                st.markdown("**Raw Preview**")
+                st.dataframe(raw_df)
+            if wrangled_df is not None:
+                st.markdown("**Wrangled Preview**")
+                st.dataframe(wrangled_df)
+            if cleaned_df is not None:
+                st.markdown("**Cleaned Preview**")
+                st.dataframe(cleaned_df)
+            if raw_df is None and wrangled_df is None and cleaned_df is None:
+                st.info("No data frames returned.")
+        # Charts
+        with tabs[2]:
+            graph_json = detail.get("plotly_graph")
+            if graph_json:
+                try:
+                    payload = (
+                        json.dumps(graph_json)
+                        if isinstance(graph_json, dict)
+                        else graph_json
+                    )
+                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                    st.plotly_chart(
+                        fig,
+                        width="stretch",
+                        key=f"detail_chart_{key_suffix}",
+                    )
+                except Exception as e:
+                    st.error(f"Error rendering chart: {e}")
+            else:
+                st.info("No charts returned.")
+        # Models / MLflow
+        with tabs[3]:
+            model_info = detail.get("model_info")
+            mlflow_art = detail.get("mlflow_artifacts")
+            if model_info is not None:
+                st.markdown("**Model Info**")
+                st.json(model_info)
+            if mlflow_art is not None:
+                st.markdown("**MLflow Artifacts**")
+                st.json(mlflow_art)
+            if model_info is None and mlflow_art is None:
+                st.info("No model/MLflow artifacts.")
+
     for m in history:
         role = getattr(m, "role", getattr(m, "type", "assistant"))
         content = getattr(m, "content", "")
@@ -232,93 +404,13 @@ def render_history(history: list[BaseMessage]):
                 except Exception:
                     # If detail is missing (e.g., state not restored), skip showing the raw marker
                     continue
-                with st.expander("Analysis Details", expanded=True):
-                    tabs = st.tabs(
-                        [
-                            "AI Reasoning",
-                            "Data (raw/clean)",
-                            "Charts",
-                            "Models/MLflow",
-                            # "Artifacts",
-                        ]
-                    )
-                    # AI Reasoning
-                    with tabs[0]:
-                        reasoning_items = detail.get("reasoning_items", [])
-                        if reasoning_items:
-                            for name, text in reasoning_items:
-                                if not text:
-                                    continue
-                                st.markdown(f"**{name}:**")
-                                st.write(text)
-                                st.markdown("---")
-                        else:
-                            # fallback to single string if provided
-                            txt = detail.get("reasoning", detail.get("ai_reply", ""))
-                            if txt:
-                                st.write(txt)
-                            else:
-                                st.info("No reasoning available.")
-                    # Data
-                    with tabs[1]:
-                        raw_df = detail.get("data_raw_df")
-                        wrangled_df = detail.get("data_wrangled_df")
-                        cleaned_df = detail.get("data_cleaned_df")
-                        if raw_df is not None:
-                            st.markdown("**Raw Preview**")
-                            st.dataframe(raw_df)
-                        if wrangled_df is not None:
-                            st.markdown("**Wrangled Preview**")
-                            st.dataframe(wrangled_df)
-                        if cleaned_df is not None:
-                            st.markdown("**Cleaned Preview**")
-                            st.dataframe(cleaned_df)
-                        if (
-                            raw_df is None
-                            and wrangled_df is None
-                            and cleaned_df is None
-                        ):
-                            st.info("No data frames returned.")
-                    # Charts
-                    with tabs[2]:
-                        graph_json = detail.get("plotly_graph")
-                        if graph_json:
-                            try:
-                                payload = (
-                                    json.dumps(graph_json)
-                                    if isinstance(graph_json, dict)
-                                    else graph_json
-                                )
-                                fig = pio.from_json(payload)
-                                st.plotly_chart(
-                                    fig,
-                                    use_container_width=True,
-                                    key=f"detail_chart_{idx}",
-                                )
-                            except Exception as e:
-                                st.error(f"Error rendering chart: {e}")
-                        else:
-                            st.info("No charts returned.")
-                    # Models / MLflow
-                    with tabs[3]:
-                        model_info = detail.get("model_info")
-                        mlflow_art = detail.get("mlflow_artifacts")
-                        if model_info is not None:
-                            st.markdown("**Model Info**")
-                            st.json(model_info)
-                        if mlflow_art is not None:
-                            st.markdown("**MLflow Artifacts**")
-                            st.json(mlflow_art)
-                        if model_info is None and mlflow_art is None:
-                            st.info("No model/MLflow artifacts.")
-                    # Artifacts
-                    # with tabs[4]:
-                    #     st.json(detail.get("artifacts", {}))
+                with st.expander("Analysis Details", expanded=False):
+                    _render_analysis_detail(detail, key_suffix=str(idx))
             else:
                 st.write(content)
 
 
-# render_history(msgs.messages)
+render_history(msgs.messages)
 
 # Show data preview (if selected) and store for reuse on submit
 data_raw_dict, _ = get_input_data()
@@ -346,6 +438,9 @@ if prompt:
         add_memory,
         st.session_state.get("sql_url", "sqlite:///:memory:"),
         st.session_state.checkpointer if add_memory else None,
+        st.session_state.get("enable_mlflow_logging", True),
+        st.session_state.get("mlflow_tracking_uri"),
+        st.session_state.get("mlflow_experiment_name", "H2O AutoML"),
     )
     try:
         # If LangGraph memory is enabled, pass only the new user message.
@@ -423,6 +518,7 @@ if prompt:
 
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
+        ran_agents = set(latest_by_name.keys())
 
         def _to_df(obj):
             try:
@@ -465,12 +561,23 @@ if prompt:
             "data_raw_df": _to_df(result.get("data_raw")),
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
-            "plotly_graph": artifacts.get("viz", {}).get("plotly_graph")
-            if isinstance(artifacts.get("viz"), dict)
-            else None,
-            "model_info": result.get("model_info") or artifacts.get("h2o"),
-            "mlflow_artifacts": result.get("mlflow_artifacts")
-            or artifacts.get("mlflow"),
+            # Only show artifacts produced during this invocation to avoid stale charts/models.
+            "plotly_graph": (
+                artifacts.get("viz", {}).get("plotly_graph")
+                if "data_visualization_agent" in ran_agents
+                and isinstance(artifacts.get("viz"), dict)
+                else None
+            ),
+            "model_info": (
+                (result.get("model_info") or artifacts.get("h2o"))
+                if "h2o_ml_agent" in ran_agents
+                else None
+            ),
+            "mlflow_artifacts": (
+                (result.get("mlflow_artifacts") or artifacts.get("mlflow"))
+                if "mlflow_tools_agent" in ran_agents
+                else None
+            ),
             # Store only a summarized version to avoid rendering huge payloads
             "artifacts": _summarize_artifacts(artifacts),
         }
@@ -478,44 +585,76 @@ if prompt:
         st.session_state.details.append(detail)
         msgs.add_ai_message(f"DETAILS_INDEX:{idx}")
 
-        # Artifacts preview
-        art = result.get("artifacts", {}) or {}
-        if art:
-            st.subheader("Artifacts")
-            st.write("Keys:", list(art.keys()))
-            # Show first table-like artifact if present
-            for key, val in art.items():
-                if isinstance(val, dict) and "data" in val:
-                    try:
-                        df = pd.DataFrame(val["data"])
-                        st.markdown(f"**{key}**")
-                        st.dataframe(df.head())
-                        break
-                    except Exception:
-                        continue
-                if isinstance(val, dict) and "plotly_graph" in val:
-                    try:
-                        payload = (
-                            json.dumps(val["plotly_graph"])
-                            if isinstance(val["plotly_graph"], dict)
-                            else val["plotly_graph"]
-                        )
-                        fig = pio.from_json(payload)
-                        st.markdown(f"**{key}**")
-                        st.plotly_chart(
-                            fig,
-                            use_container_width=True,
-                            key=f"artifact_chart_{key}",
-                        )
-                        break
-                    except Exception:
-                        continue
-
-render_history(msgs.messages)
-# -- Initialize Session State similar to other apps --
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = str(uuid.uuid4())
-if "checkpointer" not in st.session_state:
-    st.session_state.checkpointer = get_checkpointer()
-if "details" not in st.session_state:
-    st.session_state.details = []
+# ---------------- Always-on analysis panel (bottom) ----------------
+st.markdown("---")
+st.subheader("Analysis Details")
+if st.session_state.get("details"):
+    details = st.session_state.details
+    default_idx = len(details) - 1
+    selected = st.selectbox(
+        "Inspect a prior turn",
+        options=list(range(len(details))),
+        index=default_idx,
+        format_func=lambda i: f"Turn {i + 1}",
+        key="analysis_details_turn_select",
+    )
+    try:
+        with st.expander("Open analysis details", expanded=True):
+            # Reuse the same rendering logic as chat history by calling render_history's helper pattern.
+            # Minimal duplication: render via a small inline function to avoid leaking outer scope.
+            detail = details[int(selected)]
+            tabs = st.tabs(["AI Reasoning", "Data (raw/clean)", "Charts", "Models/MLflow"])
+            with tabs[0]:
+                reasoning_items = detail.get("reasoning_items", [])
+                if reasoning_items:
+                    for name, text in reasoning_items:
+                        if not text:
+                            continue
+                        st.markdown(f"**{name}:**")
+                        st.write(text)
+                        st.markdown("---")
+                else:
+                    txt = detail.get("reasoning", detail.get("ai_reply", ""))
+                    st.write(txt if txt else "No reasoning available.")
+            with tabs[1]:
+                raw_df = detail.get("data_raw_df")
+                wrangled_df = detail.get("data_wrangled_df")
+                cleaned_df = detail.get("data_cleaned_df")
+                if raw_df is not None:
+                    st.markdown("**Raw Preview**")
+                    st.dataframe(raw_df)
+                if wrangled_df is not None:
+                    st.markdown("**Wrangled Preview**")
+                    st.dataframe(wrangled_df)
+                if cleaned_df is not None:
+                    st.markdown("**Cleaned Preview**")
+                    st.dataframe(cleaned_df)
+                if raw_df is None and wrangled_df is None and cleaned_df is None:
+                    st.info("No data frames returned.")
+            with tabs[2]:
+                graph_json = detail.get("plotly_graph")
+                if graph_json:
+                    payload = (
+                        json.dumps(graph_json)
+                        if isinstance(graph_json, dict)
+                        else graph_json
+                    )
+                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                    st.plotly_chart(fig, width="stretch", key=f"bottom_detail_chart_{selected}")
+                else:
+                    st.info("No charts returned.")
+            with tabs[3]:
+                model_info = detail.get("model_info")
+                mlflow_art = detail.get("mlflow_artifacts")
+                if model_info is not None:
+                    st.markdown("**Model Info**")
+                    st.json(model_info)
+                if mlflow_art is not None:
+                    st.markdown("**MLflow Artifacts**")
+                    st.json(mlflow_art)
+                if model_info is None and mlflow_art is None:
+                    st.info("No model/MLflow artifacts.")
+    except Exception as e:
+        st.error(f"Could not render analysis details: {e}")
+else:
+    st.info("No analysis details yet. Run a request to generate them.")

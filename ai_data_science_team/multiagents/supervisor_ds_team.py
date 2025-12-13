@@ -83,6 +83,8 @@ class SupervisorDSState(TypedDict):
     next: str
     last_worker: Optional[str]
     active_data_key: Optional[str]
+    handled_request_id: Optional[str]
+    handled_steps: Dict[str, bool]
 
     # Shared data/artifacts
     data_raw: Optional[dict]
@@ -265,6 +267,15 @@ Examples:
         def has(*words):
             return any(w in last_human for w in words)
 
+        wants_workflow = has(
+            "workflow",
+            "end-to-end",
+            "end to end",
+            "full pipeline",
+            "full data science",
+            "data science workflow",
+            "ds workflow",
+        )
         wants_preview = has(
             "head",
             "first 5",
@@ -294,6 +305,28 @@ Examples:
             or (".xlsx" in last_human)
             or ("file" in last_human)
         )
+        wants_mlflow = "mlflow" in last_human
+        wants_mlflow_tools = wants_mlflow and has(
+            "ui",
+            "launch",
+            "stop",
+            "status",
+            "list",
+            "search",
+            "experiment",
+            "run",
+            "artifact",
+            "registry",
+            "registered model",
+            "model version",
+        )
+
+        # If the user explicitly wants an end-to-end workflow, enable common steps.
+        if wants_workflow:
+            wants_clean = True
+            wants_eda = True
+            wants_viz = True
+            wants_model = True
 
         wants_more_processing = any(
             [
@@ -317,6 +350,10 @@ Examples:
             "eda": wants_eda,
             "feature": wants_feature,
             "model": wants_model,
+            "mlflow": wants_mlflow,
+            "mlflow_tools": wants_mlflow_tools,
+            "workflow": wants_workflow,
+            "load": wants_load and mentions_file,
             "load_only": load_only,
         }
 
@@ -339,6 +376,26 @@ Examples:
         print("---SUPERVISOR---")
         clean_msgs = _clean_messages(state.get("messages", []))
         intents = _parse_intent(clean_msgs)
+
+        # Track per-user-request steps (within the current user message) to support
+        # deterministic sequencing for multi-step prompts.
+        last_human_msg = None
+        for m in reversed(clean_msgs or []):
+            role = getattr(m, "role", getattr(m, "type", None))
+            if role in ("human", "user"):
+                last_human_msg = m
+                break
+        current_request_id = getattr(last_human_msg, "id", None) if last_human_msg else None
+
+        handled_request_id = state.get("handled_request_id")
+        handled_steps: dict[str, bool] = dict(state.get("handled_steps") or {})
+        is_new_request = (
+            current_request_id is not None and current_request_id != handled_request_id
+        )
+        if is_new_request:
+            handled_request_id = current_request_id
+            handled_steps = {}
+
         # Infer active dataset if not explicitly tracked yet
         active_data_key = state.get("active_data_key")
         if active_data_key is None:
@@ -357,45 +414,185 @@ Examples:
             active_data_key is not None and state.get(active_data_key) is not None
         )
         last_worker = state.get("last_worker")
-        wants_more = any(
+
+        def _loader_loaded_dataset(loader_artifacts: Any) -> bool:
+            """
+            Determine whether the loader actually loaded a dataset (vs listing a directory).
+            This matters because node_loader intentionally preserves previous data_raw when no load occurred.
+            """
+            if not loader_artifacts:
+                return False
+            if isinstance(loader_artifacts, dict):
+                # Single load_file artifact shape: {"status":"ok","data":{...},...}
+                if loader_artifacts.get("status") == "ok" and loader_artifacts.get("data") is not None:
+                    return True
+                for key, val in loader_artifacts.items():
+                    tool_name = str(key)
+                    if tool_name.startswith("load_file") and isinstance(val, dict):
+                        if val.get("status") == "ok" and val.get("data") is not None:
+                            return True
+                    if tool_name.startswith("load_directory") and isinstance(val, dict):
+                        for _fname, info in val.items():
+                            if (
+                                isinstance(info, dict)
+                                and info.get("status") == "ok"
+                                and info.get("data") is not None
+                            ):
+                                return True
+            return False
+
+        # Mark completed steps for this request based on the last worker.
+        if not is_new_request and last_worker:
+            if last_worker == "Data_Loader_Tools_Agent" and _loader_loaded_dataset(
+                (state.get("artifacts") or {}).get("data_loader")
+            ):
+                handled_steps["load"] = True
+            elif last_worker == "SQL_Database_Agent" and state.get("data_sql") is not None:
+                handled_steps["sql"] = True
+            elif last_worker == "Data_Wrangling_Agent" and state.get("data_wrangled") is not None:
+                handled_steps["wrangle"] = True
+            elif last_worker == "Data_Cleaning_Agent" and state.get("data_cleaned") is not None:
+                handled_steps["clean"] = True
+            elif last_worker == "EDA_Tools_Agent" and state.get("eda_artifacts") is not None:
+                handled_steps["eda"] = True
+            elif last_worker == "Data_Visualization_Agent" and state.get("viz_graph") is not None:
+                handled_steps["viz"] = True
+            elif last_worker == "Feature_Engineering_Agent" and state.get("feature_data") is not None:
+                handled_steps["feature"] = True
+            elif last_worker == "H2O_ML_Agent" and state.get("model_info") is not None:
+                handled_steps["model"] = True
+            elif last_worker == "MLflow_Tools_Agent" and state.get("mlflow_artifacts") is not None:
+                handled_steps["mlflow"] = True
+
+        step_to_worker = {
+            "load": "Data_Loader_Tools_Agent",
+            "sql": "SQL_Database_Agent",
+            "wrangle": "Data_Wrangling_Agent",
+            "clean": "Data_Cleaning_Agent",
+            "eda": "EDA_Tools_Agent",
+            "viz": "Data_Visualization_Agent",
+            "feature": "Feature_Engineering_Agent",
+            "model": "H2O_ML_Agent",
+            "mlflow": "MLflow_Tools_Agent",
+        }
+
+        recognized_intent = any(
             [
-                intents["viz"],
-                intents["eda"],
-                intents["clean"],
-                intents["wrangle"],
-                intents["sql"],
-                intents["feature"],
-                intents["model"],
+                intents.get("load_only"),
+                intents.get("load"),
+                intents.get("sql"),
+                intents.get("wrangle"),
+                intents.get("clean"),
+                intents.get("eda"),
+                intents.get("preview"),
+                intents.get("viz"),
+                intents.get("feature"),
+                intents.get("model"),
+                intents.get("mlflow"),
+                intents.get("mlflow_tools"),
+                intents.get("workflow"),
             ]
         )
 
-        # Simple load-only overrides before any LLM routing.
-        # If the user asks to load a (possibly different) file, always route to the loader.
-        # Then, once the loader has responded (same invocation), FINISH.
-        if intents.get("load_only"):
-            last_role = (
-                (getattr(clean_msgs[-1], "type", None) or getattr(clean_msgs[-1], "role", None))
-                if clean_msgs
-                else None
+        # Deterministic, step-aware routing for common data science workflows.
+        if recognized_intent:
+            steps: list[str] = []
+
+            # If the user asked to load a file, do that first.
+            if intents.get("load") or intents.get("load_only"):
+                steps.append("load")
+
+            # SQL can also be a data acquisition step.
+            if intents.get("sql"):
+                steps.append("sql")
+
+            # If the user requested data-dependent work but no data is present, attempt a load first.
+            needs_data = any(
+                [
+                    intents.get("wrangle"),
+                    intents.get("clean"),
+                    intents.get("eda"),
+                    intents.get("preview"),
+                    intents.get("viz"),
+                    intents.get("feature"),
+                    intents.get("model"),
+                ]
             )
-            if last_worker == "Data_Loader_Tools_Agent" and last_role not in ("human", "user"):
-                print("  load-only request already handled by loader -> FINISH")
-                return {"next": "FINISH", "active_data_key": active_data_key}
-            print("  load-only request -> forcing Data_Loader_Tools_Agent")
-            return {"next": "Data_Loader_Tools_Agent", "active_data_key": active_data_key}
-        # If we just ran EDA for a preview-only ask, finish instead of looping
-        if (
-            data_ready
-            and intents["preview"]
-            and not wants_more
-            and last_worker == "EDA_Tools_Agent"
-        ):
-            print("  preview-only request already handled by EDA -> FINISH")
-            return {"next": "FINISH", "active_data_key": active_data_key}
-        if data_ready and intents["preview"] and not wants_more:
-            # For preview requests, route to EDA to produce a head/summary instead of finishing
-            print("  preview-only request with data_ready -> route to EDA_Tools_Agent")
-            return {"next": "EDA_Tools_Agent", "active_data_key": active_data_key}
+            if not data_ready and needs_data and not (intents.get("load") or intents.get("load_only") or intents.get("sql")):
+                steps.insert(0, "load")
+
+            # Transformations
+            if intents.get("wrangle"):
+                steps.append("wrangle")
+            if intents.get("clean"):
+                steps.append("clean")
+
+            # EDA / preview: if the user is explicitly loading, prefer the loader preview and avoid an extra EDA pass.
+            wants_preview_via_eda = intents.get("preview") and not (
+                intents.get("load") or intents.get("load_only")
+            )
+            if intents.get("eda") or wants_preview_via_eda:
+                steps.append("eda")
+
+            # Visualization
+            if intents.get("viz"):
+                steps.append("viz")
+
+            # Feature engineering and modeling
+            if intents.get("feature"):
+                steps.append("feature")
+            if intents.get("model"):
+                steps.append("model")
+
+            # MLflow tools (inspection/UI). Model logging should be enabled on the H2O agent itself.
+            if intents.get("mlflow_tools"):
+                steps.append("mlflow")
+
+            if not steps:
+                print("  recognized intent but no actionable steps -> fallback router")
+            else:
+                for step in steps:
+                    if handled_steps.get(step):
+                        continue
+                    worker = step_to_worker.get(step)
+                    if not worker:
+                        continue
+
+                    # Avoid repeating the same worker when a step didn't complete; finish and let user adjust input.
+                    if worker == last_worker:
+                        print(f"  step '{step}' already attempted by {worker} -> FINISH")
+                        return {
+                            "next": "FINISH",
+                            "active_data_key": active_data_key,
+                            "handled_request_id": handled_request_id,
+                            "handled_steps": handled_steps,
+                        }
+
+                    # Guard data-dependent steps.
+                    if step in ("wrangle", "clean", "eda", "viz", "feature", "model") and not data_ready:
+                        print(f"  step '{step}' requires data but none is ready -> Data_Loader_Tools_Agent")
+                        return {
+                            "next": "Data_Loader_Tools_Agent",
+                            "active_data_key": active_data_key,
+                            "handled_request_id": handled_request_id,
+                            "handled_steps": handled_steps,
+                        }
+
+                    print(f"  next_step='{step}' -> {worker}")
+                    return {
+                        "next": worker,
+                        "active_data_key": active_data_key,
+                        "handled_request_id": handled_request_id,
+                        "handled_steps": handled_steps,
+                    }
+
+                print("  all requested steps handled -> FINISH")
+                return {
+                    "next": "FINISH",
+                    "active_data_key": active_data_key,
+                    "handled_request_id": handled_request_id,
+                    "handled_steps": handled_steps,
+                }
 
         result = supervisor_chain.invoke(
             {"messages": clean_msgs, "last_worker": state.get("last_worker")}
@@ -416,16 +613,29 @@ Examples:
                     next_worker = "Feature_Engineering_Agent"
                 elif intents["model"]:
                     next_worker = "H2O_ML_Agent"
-                elif not wants_more:
+                elif not any(
+                    [
+                        intents.get("viz"),
+                        intents.get("eda"),
+                        intents.get("clean"),
+                        intents.get("wrangle"),
+                        intents.get("sql"),
+                        intents.get("feature"),
+                        intents.get("model"),
+                        intents.get("mlflow"),
+                    ]
+                ):
                     next_worker = "FINISH"
                 else:
                     next_worker = "Data_Wrangling_Agent"
-            else:
-                if not wants_more and intents["preview"]:
-                    next_worker = "FINISH"
 
         # Keep active_data_key stable unless a worker changes it.
-        return {"next": next_worker, "active_data_key": active_data_key}
+        return {
+            "next": next_worker,
+            "active_data_key": active_data_key,
+            "handled_request_id": handled_request_id,
+            "handled_steps": handled_steps,
+        }
 
     def _trim_messages(
         msgs: Sequence[BaseMessage], max_messages: int = TEAM_MAX_MESSAGES, max_chars: int = TEAM_MAX_MESSAGE_CHARS
@@ -448,41 +658,42 @@ Examples:
             trimmed.append(m)
         return trimmed
 
-    def _extract_new_messages(
-        before: Sequence[BaseMessage], after: Sequence[BaseMessage]
-    ) -> list[BaseMessage]:
-        before_list = list(before or [])
-        after_list = list(after or [])
-        if not after_list:
-            return []
-        if not before_list:
-            return after_list
-
-        if len(after_list) >= len(before_list):
-            # Prefer ID-based matching (LangGraph assigns ids when missing)
-            if all(
-                getattr(after_list[i], "id", None) == getattr(before_list[i], "id", None)
-                for i in range(len(before_list))
-            ):
-                return after_list[len(before_list) :]
-
-            # Fallback to a content/type prefix match
-            if all(
-                getattr(after_list[i], "type", None) == getattr(before_list[i], "type", None)
-                and getattr(after_list[i], "content", None)
-                == getattr(before_list[i], "content", None)
-                for i in range(len(before_list))
-            ):
-                return after_list[len(before_list) :]
-
-        # If the agent returned only new messages (delta), just accept them.
-        return after_list
-
     def _merge_messages(
         before_messages: Sequence[BaseMessage], response: dict
     ) -> dict:
-        response_msgs = response.get("messages") or []
-        new_msgs = _extract_new_messages(before_messages, response_msgs)
+        response_msgs = list(response.get("messages") or [])
+        if not response_msgs:
+            return {"messages": []}
+
+        before_ids = {
+            getattr(m, "id", None)
+            for m in (before_messages or [])
+            if getattr(m, "id", None) is not None
+        }
+
+        # Only keep assistant/ai messages created by the sub-agent.
+        new_msgs: list[BaseMessage] = []
+        seen_new_ids: set[str] = set()
+        for m in response_msgs:
+            mid = getattr(m, "id", None)
+            if mid is not None and mid in before_ids:
+                continue
+            role = getattr(m, "type", None) or getattr(m, "role", None)
+            if role in ("assistant", "ai") or isinstance(m, AIMessage):
+                if mid is not None and mid in seen_new_ids:
+                    continue
+                new_msgs.append(m)
+                if mid is not None:
+                    seen_new_ids.add(mid)
+
+        # Fallback: if we couldn't compute a clean delta, at least keep the last AI message.
+        if not new_msgs:
+            for m in reversed(response_msgs):
+                role = getattr(m, "type", None) or getattr(m, "role", None)
+                if role in ("assistant", "ai") or isinstance(m, AIMessage):
+                    new_msgs = [m]
+                    break
+
         new_msgs = _clean_messages(new_msgs)
         new_msgs = _trim_messages(new_msgs)
         return {"messages": new_msgs}
@@ -1134,17 +1345,32 @@ Examples:
         merged["messages"] = _tag_messages(
             merged.get("messages"), "data_visualization_agent"
         )
-        summary_text = _format_result_with_llm(
-            "data_visualization_agent",
-            None,
-            _get_last_human(before_msgs),
-            extra_text="Visualization generated.",
-        )
-        if summary_text:
-            merged["messages"].append(
-                AIMessage(content=summary_text, name="data_visualization_agent")
-            )
         plotly_graph = response.get("plotly_graph")
+        try:
+            from ai_data_science_team.utils.plotly import plotly_from_dict
+
+            fig = plotly_from_dict(plotly_graph) if plotly_graph else None
+            trace_types = (
+                sorted({getattr(t, "type", None) for t in getattr(fig, "data", []) if getattr(t, "type", None)})
+                if fig is not None
+                else []
+            )
+            title = None
+            if fig is not None:
+                try:
+                    title = getattr(getattr(fig.layout, "title", None), "text", None)
+                except Exception:
+                    title = None
+            viz_summary = response.get("data_visualization_summary") or "Visualization generated."
+            if trace_types:
+                viz_summary = f"{viz_summary} Trace types: {', '.join(trace_types)}."
+            if title:
+                viz_summary = f"{viz_summary} Title: {title}."
+            merged["messages"].append(
+                AIMessage(content=viz_summary, name="data_visualization_agent")
+            )
+        except Exception:
+            pass
         return {
             **merged,
             "viz_graph": plotly_graph,
@@ -1255,6 +1481,14 @@ Examples:
         if summary_text:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="h2o_ml_agent")
+            )
+        mlflow_run_id = response.get("mlflow_run_id")
+        if mlflow_run_id:
+            merged["messages"].append(
+                AIMessage(
+                    content=f"MLflow logging enabled. Run ID: `{mlflow_run_id}`",
+                    name="h2o_ml_agent",
+                )
             )
         leaderboard = response.get("leaderboard")
         return {

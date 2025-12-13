@@ -754,6 +754,8 @@ def node_func_fix_agent_code(
         code_snippet=code_snippet,
         error=error_message,
         function_name=function_name,
+        user_instructions=state.get("user_instructions"),
+        recommended_steps=state.get("recommended_steps"),
     )
 
     # Execute the prompt with the LLM
