@@ -1361,6 +1361,8 @@ Examples:
             return data
 
     DATASET_REGISTRY_MAX = 10
+    DATASET_FINGERPRINT_MAX_ROWS = 200
+    DATASET_SCHEMA_MAX_COLS = 200
 
     def _shape(obj):
         try:
@@ -1376,16 +1378,68 @@ Examples:
             return None
         return None
 
-    def _dataset_meta(data: Any) -> tuple[Any, list[str] | None]:
+    def _dataset_meta(
+        data: Any,
+    ) -> tuple[Any, list[str] | None, list[dict[str, str]] | None, str | None, str | None]:
         df = _ensure_df(data)
         shape = _shape(df)
         cols = None
+        schema = None
+        schema_hash = None
+        fingerprint = None
         try:
             cols = [str(c) for c in list(getattr(df, "columns", []))]
-            cols = cols[:200] if cols else None
+            cols = cols[:DATASET_SCHEMA_MAX_COLS] if cols else None
         except Exception:
             cols = None
-        return shape, cols
+
+        try:
+            import hashlib
+            import pandas as pd
+
+            if isinstance(df, pd.DataFrame):
+                # Schema (sorted for stability)
+                col_order = sorted([str(c) for c in list(df.columns)])
+                schema = [
+                    {"name": c, "dtype": str(df[c].dtype) if c in df.columns else ""}
+                    for c in col_order[:DATASET_SCHEMA_MAX_COLS]
+                ]
+                schema_str = "|".join(f"{r['name']}:{r['dtype']}" for r in schema)
+                schema_hash = hashlib.sha256(schema_str.encode("utf-8")).hexdigest() if schema_str else None
+
+                # Fingerprint: stable hash over a capped row sample
+                df_sample = df.reindex(columns=col_order).head(DATASET_FINGERPRINT_MAX_ROWS).reset_index(drop=True)
+                try:
+                    from pandas.util import hash_pandas_object
+
+                    row_hashes = hash_pandas_object(df_sample, index=False).values
+                    fingerprint = hashlib.sha256(row_hashes.tobytes()).hexdigest()
+                except Exception:
+                    # Fallback: hash a small JSON snapshot (less stable across versions)
+                    snap = df_sample.to_json(orient="split", date_format="iso")
+                    fingerprint = hashlib.sha256(snap.encode("utf-8")).hexdigest()
+        except Exception:
+            schema = None
+            schema_hash = None
+            fingerprint = None
+        return shape, cols, schema, schema_hash, fingerprint
+
+    def _truncate_text(val: Any, max_chars: int) -> Any:
+        if not isinstance(val, str):
+            return val
+        if len(val) <= max_chars:
+            return val
+        return val[:max_chars] + "\n...[truncated]..."
+
+    def _sha256_text(val: Any) -> str | None:
+        try:
+            import hashlib
+
+            if not isinstance(val, str) or not val:
+                return None
+            return hashlib.sha256(val.encode("utf-8")).hexdigest()
+        except Exception:
+            return None
 
     def _prune_datasets(datasets: dict[str, Any]) -> dict[str, Any]:
         if len(datasets) <= DATASET_REGISTRY_MAX:
@@ -1421,8 +1475,24 @@ Examples:
                 if data is None:
                     return
                 did = f"{stage}_{uuid.uuid4().hex[:8]}"
-                shape, cols = _dataset_meta(data)
+                shape, cols, schema, schema_hash, fingerprint = _dataset_meta(data)
                 ts = time.time()
+                provenance = {"source_type": "state_slot", "source": data_key}
+                # If the app provided explicit provenance for an injected data_raw (upload/sample),
+                # prefer it so the pipeline can be reproduced.
+                if stage == "raw" and data_key == "data_raw":
+                    try:
+                        artifacts = state.get("artifacts") or {}
+                        input_ds = (
+                            artifacts.get("input_dataset")
+                            if isinstance(artifacts, dict)
+                            else None
+                        )
+                        if isinstance(input_ds, dict) and input_ds.get("source"):
+                            provenance = {**provenance, **input_ds}
+                    except Exception:
+                        pass
+
                 datasets[did] = {
                     "id": did,
                     "label": data_key,
@@ -1430,10 +1500,13 @@ Examples:
                     "data": data,
                     "shape": shape,
                     "columns": cols,
+                    "schema": schema,
+                    "schema_hash": schema_hash,
+                    "fingerprint": fingerprint,
                     "created_ts": ts,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "created_by": "bootstrap",
-                    "provenance": {"source_type": "state_slot", "source": data_key},
+                    "provenance": provenance,
                     "parent_id": None,
                 }
 
@@ -1493,7 +1566,7 @@ Examples:
 
         datasets, current_active = _ensure_dataset_registry(state)
         did = f"{stage}_{uuid.uuid4().hex[:8]}"
-        shape, cols = _dataset_meta(data)
+        shape, cols, schema, schema_hash, fingerprint = _dataset_meta(data)
         ts = time.time()
         datasets = {
             **datasets,
@@ -1504,6 +1577,9 @@ Examples:
                 "data": data,
                 "shape": shape,
                 "columns": cols,
+                "schema": schema,
+                "schema_hash": schema_hash,
+                "fingerprint": fingerprint,
                 "created_ts": ts,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "created_by": created_by,
@@ -1726,12 +1802,36 @@ Examples:
             try:
                 import os
 
-                label = loaded_dataset_label or "data_raw"
+                # Best-effort: capture the file path from the user request for reproducibility.
+                source = loaded_dataset_label
+                try:
+                    import re
+                    from pathlib import Path
+
+                    if not (isinstance(source, str) and ("." in source and os.path.sep in source)):
+                        m = re.search(
+                            r"(?:`|\"|')?([\\w\\-./~]+\\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\\.gz)?)",
+                            last_human or "",
+                            flags=re.IGNORECASE,
+                        )
+                        requested = (m.group(1) if m else "").strip()
+                        if requested:
+                            p = Path(requested).expanduser()
+                            if not p.is_absolute():
+                                p = (Path(os.getcwd()) / p).resolve()
+                            else:
+                                p = p.resolve()
+                            if p.exists():
+                                source = str(p)
+                except Exception:
+                    pass
+
+                label = source or loaded_dataset_label or "data_raw"
                 if isinstance(label, str):
                     label = os.path.basename(label) or label
                 provenance = {
                     "source_type": "file",
-                    "source": loaded_dataset_label,
+                    "source": source or loaded_dataset_label,
                     "user_request": last_human,
                     "fallback_loader": bool(fallback_loaded_dataset),
                 }
@@ -2051,13 +2151,29 @@ Examples:
         data_wrangled = response.get("data_wrangled")
         if data_wrangled is not None:
             try:
+                wrangler_code = response.get("data_wrangler_function")
+                wrangler_code_hash = _sha256_text(wrangler_code)
                 datasets, active_dataset_id, _did = _register_dataset(
                     state_with_datasets,
                     data=data_wrangled,
                     stage="wrangled",
                     label="data_wrangled",
                     created_by="Data_Wrangling_Agent",
-                    provenance={"source_type": "agent", "user_request": last_human},
+                    provenance={
+                        "source_type": "agent",
+                        "user_request": last_human,
+                        "transform": {
+                            "kind": "python_function",
+                            "function_name": response.get("data_wrangler_function_name"),
+                            "function_path": response.get("data_wrangler_function_path"),
+                            "function_code": _truncate_text(wrangler_code, 12000),
+                            "code_sha256": wrangler_code_hash,
+                            "recommended_steps": response.get("recommended_steps"),
+                            "summary": response.get("data_wrangling_summary"),
+                            "error": response.get("data_wrangler_error"),
+                            "error_log_path": response.get("data_wrangler_error_log_path"),
+                        },
+                    },
                     parent_id=active_dataset_id,
                     make_active=True,
                 )
@@ -2134,13 +2250,29 @@ Examples:
         data_cleaned = response.get("data_cleaned")
         if data_cleaned is not None:
             try:
+                cleaner_code = response.get("data_cleaner_function")
+                cleaner_code_hash = _sha256_text(cleaner_code)
                 datasets, active_dataset_id, _did = _register_dataset(
                     state_with_datasets,
                     data=data_cleaned,
                     stage="cleaned",
                     label="data_cleaned",
                     created_by="Data_Cleaning_Agent",
-                    provenance={"source_type": "agent", "user_request": last_human},
+                    provenance={
+                        "source_type": "agent",
+                        "user_request": last_human,
+                        "transform": {
+                            "kind": "python_function",
+                            "function_name": response.get("data_cleaner_function_name"),
+                            "function_path": response.get("data_cleaner_function_path"),
+                            "function_code": _truncate_text(cleaner_code, 12000),
+                            "code_sha256": cleaner_code_hash,
+                            "recommended_steps": response.get("recommended_steps"),
+                            "summary": response.get("data_cleaning_summary"),
+                            "error": response.get("data_cleaner_error"),
+                            "error_log_path": response.get("data_cleaner_error_log_path"),
+                        },
+                    },
                     parent_id=active_dataset_id,
                     make_active=True,
                 )
@@ -2196,9 +2328,12 @@ Examples:
         data_sql = response.get("data_sql")
         if data_sql is not None:
             try:
-                sql_code = response.get("sql_query_code")
-                if isinstance(sql_code, str) and len(sql_code) > 2000:
-                    sql_code = sql_code[:2000] + "\n...[truncated]..."
+                sql_code_full = response.get("sql_query_code")
+                sql_code_hash = _sha256_text(sql_code_full)
+                sql_code = _truncate_text(sql_code_full, 12000)
+                sql_fn_full = response.get("sql_database_function")
+                sql_fn_hash = _sha256_text(sql_fn_full)
+                sql_fn = _truncate_text(sql_fn_full, 6000)
                 datasets, active_dataset_id, _did = _register_dataset(
                     {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
                     data=data_sql,
@@ -2208,8 +2343,15 @@ Examples:
                     provenance={
                         "source_type": "sql",
                         "user_request": last_human,
-                        "sql_query_code": sql_code,
-                        "sql_database_function": response.get("sql_database_function"),
+                        "transform": {
+                            "kind": "sql_query",
+                            "sql_query_code": sql_code,
+                            "sql_sha256": sql_code_hash,
+                            "sql_database_function": sql_fn,
+                            "sql_database_function_sha256": sql_fn_hash,
+                            "sql_database_function_path": response.get("sql_database_function_path"),
+                            "sql_database_function_name": response.get("sql_database_function_name"),
+                        },
                     },
                     parent_id=None,
                     make_active=True,
@@ -2227,6 +2369,8 @@ Examples:
                 "sql": {
                     "sql_query_code": response.get("sql_query_code"),
                     "sql_database_function": response.get("sql_database_function"),
+                    "sql_database_function_path": response.get("sql_database_function_path"),
+                    "sql_database_function_name": response.get("sql_database_function_name"),
                     "data_sql": data_sql,
                 },
             },
@@ -2410,13 +2554,28 @@ Examples:
         feature_data = response.get("data_engineered")
         if feature_data is not None:
             try:
+                fe_code = response.get("feature_engineer_function")
+                fe_code_hash = _sha256_text(fe_code)
                 datasets, active_dataset_id, _did = _register_dataset(
                     state_with_datasets,
                     data=feature_data,
                     stage="feature",
                     label="feature_data",
                     created_by="Feature_Engineering_Agent",
-                    provenance={"source_type": "agent", "user_request": last_human},
+                    provenance={
+                        "source_type": "agent",
+                        "user_request": last_human,
+                        "transform": {
+                            "kind": "python_function",
+                            "function_name": response.get("feature_engineer_function_name"),
+                            "function_path": response.get("feature_engineer_function_path"),
+                            "function_code": _truncate_text(fe_code, 12000),
+                            "code_sha256": fe_code_hash,
+                            "recommended_steps": response.get("recommended_steps"),
+                            "error": response.get("feature_engineer_error"),
+                            "error_log_path": response.get("feature_engineer_error_log_path"),
+                        },
+                    },
                     parent_id=active_dataset_id,
                     make_active=False,
                 )
@@ -2630,6 +2789,7 @@ Examples:
                         {
                             "app": "supervisor_ds_team",
                             "active_data_key": state.get("active_data_key") or "",
+                            "active_dataset_id": state.get("active_dataset_id") or "",
                         }
                     )
                 except Exception:
@@ -2654,6 +2814,38 @@ Examples:
                         logged["dicts"].append("tables/schema.json")
                     except Exception:
                         pass
+
+                # Log pipeline (dataset lineage + reproduction script)
+                try:
+                    from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
+
+                    ds = state.get("datasets")
+                    ds = ds if isinstance(ds, dict) else {}
+                    pipe = build_pipeline_snapshot(
+                        ds, active_dataset_id=state.get("active_dataset_id")
+                    )
+                    if isinstance(pipe, dict) and pipe.get("lineage"):
+                        pipe_spec = dict(pipe)
+                        script = pipe_spec.pop("script", None)
+                        mlflow.log_dict(pipe_spec, artifact_file="pipeline/pipeline_spec.json")
+                        logged["dicts"].append("pipeline/pipeline_spec.json")
+                        if isinstance(script, str) and script.strip():
+                            if hasattr(mlflow, "log_text"):
+                                mlflow.log_text(script, artifact_file="pipeline/pipeline_repro.py")
+                                logged["dicts"].append("pipeline/pipeline_repro.py")
+                            else:
+                                mlflow.log_dict(
+                                    {"script": script},
+                                    artifact_file="pipeline/pipeline_repro.json",
+                                )
+                                logged["dicts"].append("pipeline/pipeline_repro.json")
+                        try:
+                            if pipe.get("pipeline_hash"):
+                                mlflow.set_tag("pipeline_hash", str(pipe.get("pipeline_hash")))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
                 # Log visualization plot (if any)
                 if viz_graph:

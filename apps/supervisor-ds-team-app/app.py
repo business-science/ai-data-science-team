@@ -36,6 +36,7 @@ from ai_data_science_team.ml_agents.h2o_ml_agent import H2OMLAgent
 from ai_data_science_team.ml_agents.mlflow_tools_agent import MLflowToolsAgent
 from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluationAgent
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
+from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
 
 
 st.set_page_config(
@@ -122,6 +123,94 @@ def _apply_streamlit_plot_style(fig):
         pass
 
     return fig
+
+
+def persist_pipeline_artifacts(
+    pipeline: dict,
+    *,
+    base_dir: str | None,
+    overwrite: bool = False,
+    include_sql: bool = True,
+    sql_query: str | None = None,
+    sql_executor: str | None = None,
+) -> dict:
+    """
+    Persist the pipeline spec + repro script to disk (best effort).
+
+    Returns metadata:
+      - persisted_dir, spec_path, script_path
+      - sql_query_path, sql_executor_path (optional)
+      - error (if any)
+    """
+    try:
+        if not isinstance(pipeline, dict) or not pipeline.get("lineage"):
+            return {}
+
+        base_dir = (base_dir or "").strip()
+        if not base_dir:
+            return {}
+
+        base_dir = os.path.abspath(os.path.expanduser(base_dir))
+        if os.path.exists(base_dir) and not os.path.isdir(base_dir):
+            return {"error": f"Pipeline persist path exists and is not a directory: {base_dir}"}
+
+        pipeline_hash = pipeline.get("pipeline_hash")
+        model_id = pipeline.get("model_dataset_id") or pipeline.get("active_dataset_id")
+        suffix = (
+            str(pipeline_hash)
+            if isinstance(pipeline_hash, str) and pipeline_hash
+            else str(model_id or "pipeline")
+        )
+        persisted_dir = os.path.join(base_dir, f"pipeline_{suffix}")
+        os.makedirs(persisted_dir, exist_ok=True)
+
+        # Prepare file payloads
+        spec = dict(pipeline)
+        script = spec.pop("script", "") or ""
+        try:
+            from datetime import datetime, timezone
+
+            spec["saved_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            pass
+
+        spec_path = os.path.join(persisted_dir, "pipeline_spec.json")
+        script_path = os.path.join(persisted_dir, "pipeline_repro.py")
+
+        if overwrite or not os.path.exists(spec_path):
+            with open(spec_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(spec, indent=2))
+
+        if isinstance(script, str) and script.strip():
+            if overwrite or not os.path.exists(script_path):
+                with open(script_path, "w", encoding="utf-8") as f:
+                    f.write(script)
+
+        out = {
+            "persisted_dir": persisted_dir,
+            "spec_path": spec_path,
+            "script_path": script_path if os.path.exists(script_path) else None,
+        }
+
+        if include_sql and (sql_query or sql_executor):
+            sql_dir = os.path.join(persisted_dir, "sql")
+            os.makedirs(sql_dir, exist_ok=True)
+            if sql_query:
+                sql_query_path = os.path.join(sql_dir, "query.sql")
+                if overwrite or not os.path.exists(sql_query_path):
+                    with open(sql_query_path, "w", encoding="utf-8") as f:
+                        f.write(str(sql_query))
+                out["sql_query_path"] = sql_query_path
+            if sql_executor:
+                sql_executor_path = os.path.join(sql_dir, "sql_executor.py")
+                if overwrite or not os.path.exists(sql_executor_path):
+                    with open(sql_executor_path, "w", encoding="utf-8") as f:
+                        f.write(str(sql_executor))
+                out["sql_executor_path"] = sql_executor_path
+
+        return out
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @st.cache_resource(show_spinner=False)
@@ -288,6 +377,35 @@ with st.sidebar:
             disabled=True,
             key="active_dataset_id_override",
         )
+
+    st.markdown("**Pipeline options**")
+    default_pipeline_dir = os.path.abspath(os.path.join("reports", "pipelines"))
+    st.text_input(
+        "Persist pipeline directory (optional)",
+        value=default_pipeline_dir,
+        key="pipeline_persist_dir",
+        help="When enabled, writes `pipeline_spec.json` and `pipeline_repro.py` to this folder for reproducibility.",
+    )
+    st.checkbox(
+        "Auto-save pipeline files",
+        value=True,
+        key="pipeline_persist_enabled",
+        help="Saves the latest pipeline on each new pipeline hash.",
+    )
+    st.checkbox(
+        "Overwrite existing pipeline files",
+        value=False,
+        key="pipeline_persist_overwrite",
+        help="If off, existing files are left untouched.",
+    )
+    st.checkbox(
+        "Also save SQL artifacts",
+        value=True,
+        key="pipeline_persist_include_sql",
+        help="If SQL is generated, also saves `sql/query.sql` and `sql/sql_executor.py` under the pipeline folder.",
+    )
+    if st.session_state.get("last_pipeline_persist_dir"):
+        st.caption(f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`")
     st.markdown("**SQL options**")
     sql_url = st.text_input("SQLAlchemy URL (optional)", value="sqlite:///:memory:")
     st.session_state["sql_url"] = sql_url
@@ -310,6 +428,8 @@ with st.sidebar:
         st.session_state.details = []
         st.session_state.team_state = {}
         st.session_state["active_dataset_id_override"] = ""
+        st.session_state.selected_data_provenance = None
+        st.session_state.last_pipeline_persist_dir = None
         msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
         msgs.clear()
         msgs.add_ai_message("How can the data science team help today?")
@@ -404,19 +524,47 @@ if not msgs.messages:
 def get_input_data():
     """
     Resolve data_raw based on user selections: uploaded CSV or sample dataset.
-    Returns tuple (data_raw_dict, preview_df_or_None).
+    Returns tuple (data_raw_dict, preview_df_or_None, provenance_dict_or_None).
     """
     df = None
+    provenance = None
     if uploaded_file is not None:
         try:
-            df = pd.read_csv(uploaded_file)
+            # Persist uploads to disk so the pipeline can be reproduced later.
+            raw_bytes = uploaded_file.getvalue()
+            import hashlib
+
+            digest = hashlib.sha256(raw_bytes).hexdigest()[:12]
+            safe_name = os.path.basename(getattr(uploaded_file, "name", "upload.csv"))
+            upload_dir = os.path.join("temp", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            saved_path = os.path.abspath(os.path.join(upload_dir, f"{digest}_{safe_name}"))
+            if not os.path.exists(saved_path):
+                with open(saved_path, "wb") as f:
+                    f.write(raw_bytes)
+
+            df = pd.read_csv(saved_path)
+            provenance = {
+                "source_type": "file",
+                "source": saved_path,
+                "source_label": "upload",
+                "original_name": safe_name,
+                "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            }
         except Exception as e:
             st.error(f"Error reading uploaded file: {e}")
     elif use_sample:
         sample_path = os.path.join("data", "churn_data.csv")
         if os.path.exists(sample_path):
             try:
-                df = pd.read_csv(sample_path)
+                abs_path = os.path.abspath(sample_path)
+                df = pd.read_csv(abs_path)
+                provenance = {
+                    "source_type": "file",
+                    "source": abs_path,
+                    "source_label": "sample",
+                    "original_name": os.path.basename(abs_path),
+                }
             except Exception as e:
                 st.error(f"Error loading sample data: {e}")
         else:
@@ -425,9 +573,9 @@ def get_input_data():
     if df is not None:
         st.markdown("**Data preview**")
         st.dataframe(df.head(preview_rows))
-        return df.to_dict(), df.head(preview_rows)
+        return df.to_dict(), df.head(preview_rows), provenance
 
-    return None, None
+    return None, None, None
 
 
 def render_history(history: list[BaseMessage]):
@@ -436,6 +584,8 @@ def render_history(history: list[BaseMessage]):
             [
                 "AI Reasoning",
                 "Data (raw/sql/wrangle/clean/features)",
+                "Pipeline",
+                "SQL",
                 "Charts",
                 "Reports",
                 "Models/MLflow",
@@ -487,8 +637,92 @@ def render_history(history: list[BaseMessage]):
                 and feature_df is None
             ):
                 st.info("No data frames returned.")
-        # Charts
+        # Pipeline
         with tabs[2]:
+            pipe = detail.get("pipeline") if isinstance(detail, dict) else None
+            if isinstance(pipe, dict) and pipe.get("lineage"):
+                st.markdown(
+                    f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                    f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
+                    f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                )
+                if pipe.get("persisted_dir"):
+                    st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
+                try:
+                    st.dataframe(pd.DataFrame(pipe.get("lineage") or []))
+                except Exception:
+                    st.json(pipe.get("lineage"))
+                script = pipe.get("script")
+                try:
+                    spec = dict(pipe)
+                    spec.pop("script", None)
+                    st.download_button(
+                        "Download pipeline spec (JSON)",
+                        data=json.dumps(spec, indent=2).encode("utf-8"),
+                        file_name="pipeline_spec.json",
+                        mime="application/json",
+                        key=f"download_pipeline_spec_{key_suffix}",
+                    )
+                except Exception:
+                    pass
+                if isinstance(script, str) and script.strip():
+                    st.download_button(
+                        "Download pipeline script",
+                        data=script.encode("utf-8"),
+                        file_name="pipeline_repro.py",
+                        mime="text/x-python",
+                        key=f"download_pipeline_{key_suffix}",
+                    )
+                    st.code(script, language="python")
+            else:
+                st.info("No pipeline available yet. Load data and run a transform (wrangle/clean/features).")
+        # SQL
+        with tabs[3]:
+            sql_query = detail.get("sql_query_code")
+            sql_fn = detail.get("sql_database_function")
+            sql_fn_name = detail.get("sql_database_function_name")
+            sql_fn_path = detail.get("sql_database_function_path")
+
+            if sql_query:
+                st.markdown("**SQL Query**")
+                st.code(sql_query, language="sql")
+                try:
+                    st.download_button(
+                        "Download query (.sql)",
+                        data=str(sql_query).encode("utf-8"),
+                        file_name="query.sql",
+                        mime="application/sql",
+                        key=f"download_sql_query_{key_suffix}",
+                    )
+                except Exception:
+                    pass
+            else:
+                st.info("No SQL query generated for this turn.")
+
+            if sql_fn:
+                st.markdown("**SQL Executor (Python)**")
+                if sql_fn_name or sql_fn_path:
+                    st.caption(
+                        "  ".join(
+                            [
+                                f"name={sql_fn_name}" if sql_fn_name else "",
+                                f"path={sql_fn_path}" if sql_fn_path else "",
+                            ]
+                        ).strip()
+                    )
+                st.code(sql_fn, language="python")
+                try:
+                    st.download_button(
+                        "Download executor (.py)",
+                        data=str(sql_fn).encode("utf-8"),
+                        file_name="sql_executor.py",
+                        mime="text/x-python",
+                        key=f"download_sql_executor_{key_suffix}",
+                    )
+                except Exception:
+                    pass
+        # Charts
+        with tabs[4]:
             graph_json = detail.get("plotly_graph")
             if graph_json:
                 try:
@@ -508,7 +742,7 @@ def render_history(history: list[BaseMessage]):
             else:
                 st.info("No charts returned.")
         # Reports
-        with tabs[3]:
+        with tabs[5]:
             reports = detail.get("eda_reports") if isinstance(detail, dict) else None
             sweetviz_file = (
                 reports.get("sweetviz_report_file")
@@ -542,7 +776,7 @@ def render_history(history: list[BaseMessage]):
                 st.info("No EDA reports returned.")
 
         # Models / MLflow
-        with tabs[4]:
+        with tabs[6]:
             model_info = detail.get("model_info")
             eval_art = detail.get("eval_artifacts")
             eval_graph = detail.get("eval_plotly_graph")
@@ -592,11 +826,13 @@ def render_history(history: list[BaseMessage]):
 render_history(msgs.messages)
 
 # Show data preview (if selected) and store for reuse on submit
-data_raw_dict, _ = get_input_data()
+data_raw_dict, _, input_provenance = get_input_data()
 # If no new data selected, reuse previously loaded data_raw from session
 if data_raw_dict is None:
     data_raw_dict = st.session_state.get("selected_data_raw")
+    input_provenance = st.session_state.get("selected_data_provenance")
 st.session_state.selected_data_raw = data_raw_dict
+st.session_state.selected_data_provenance = input_provenance
 
 # ---------------- User input ----------------
 prompt = st.chat_input("Ask the data science team...")
@@ -611,6 +847,7 @@ if prompt:
     msgs.add_user_message(prompt)
 
     data_raw_dict = st.session_state.get("selected_data_raw")
+    input_provenance = st.session_state.get("selected_data_provenance")
 
     team = build_team(
         model_choice,
@@ -653,6 +890,8 @@ if prompt:
             },
             "data_raw": data_raw_dict,
         }
+        if input_provenance:
+            invoke_payload["artifacts"]["input_dataset"] = input_provenance
         # Provide continuity when memory is disabled (no checkpointer).
         if not add_memory and persisted:
             invoke_payload.update(
@@ -790,6 +1029,8 @@ if prompt:
         # Collect detail snapshot for tabbed display
         artifacts = result.get("artifacts", {}) or {}
         ran_agents = set(latest_by_name.keys())
+        sql_payload = artifacts.get("sql") if isinstance(artifacts, dict) else None
+        sql_payload = sql_payload if isinstance(sql_payload, dict) else None
 
         def _to_df(obj):
             try:
@@ -912,7 +1153,63 @@ if prompt:
             ),
             # Store only a summarized version to avoid rendering huge payloads
             "artifacts": _summarize_artifacts(artifacts),
+            "pipeline": (
+                build_pipeline_snapshot(
+                    result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                    active_dataset_id=result.get("active_dataset_id"),
+                )
+                if isinstance(result, dict)
+                else None
+            ),
+            "sql_query_code": (
+                sql_payload.get("sql_query_code")
+                if sql_payload and "sql_database_agent" in ran_agents
+                else None
+            ),
+            "sql_database_function": (
+                sql_payload.get("sql_database_function")
+                if sql_payload and "sql_database_agent" in ran_agents
+                else None
+            ),
+            "sql_database_function_path": (
+                sql_payload.get("sql_database_function_path")
+                if sql_payload and "sql_database_agent" in ran_agents
+                else None
+            ),
+            "sql_database_function_name": (
+                sql_payload.get("sql_database_function_name")
+                if sql_payload and "sql_database_agent" in ran_agents
+                else None
+            ),
         }
+
+        # Persist pipeline files to a user-configurable directory (best effort).
+        try:
+            if (
+                st.session_state.get("pipeline_persist_enabled")
+                and isinstance(detail.get("pipeline"), dict)
+                and detail["pipeline"].get("lineage")
+            ):
+                saved = persist_pipeline_artifacts(
+                    detail["pipeline"],
+                    base_dir=st.session_state.get("pipeline_persist_dir"),
+                    overwrite=bool(st.session_state.get("pipeline_persist_overwrite")),
+                    include_sql=bool(st.session_state.get("pipeline_persist_include_sql", True)),
+                    sql_query=detail.get("sql_query_code"),
+                    sql_executor=detail.get("sql_database_function"),
+                )
+                if isinstance(saved, dict) and saved.get("persisted_dir"):
+                    detail["pipeline"]["persisted_dir"] = saved.get("persisted_dir")
+                    detail["pipeline"]["persisted_spec_path"] = saved.get("spec_path")
+                    detail["pipeline"]["persisted_script_path"] = saved.get("script_path")
+                    detail["pipeline"]["persisted_sql_query_path"] = saved.get("sql_query_path")
+                    detail["pipeline"]["persisted_sql_executor_path"] = saved.get("sql_executor_path")
+                    st.session_state.last_pipeline_persist_dir = saved.get("persisted_dir")
+                if isinstance(saved, dict) and saved.get("error"):
+                    st.sidebar.warning(f"Pipeline save failed: {saved.get('error')}")
+        except Exception:
+            pass
+
         idx = len(st.session_state.details)
         st.session_state.details.append(detail)
         msgs.add_ai_message(f"{UI_DETAIL_MARKER_PREFIX}{idx}")
@@ -939,6 +1236,8 @@ if st.session_state.get("details"):
                 [
                     "AI Reasoning",
                     "Data (raw/sql/wrangle/clean/features)",
+                    "Pipeline",
+                    "SQL",
                     "Charts",
                     "Reports",
                     "Models/MLflow",
@@ -986,6 +1285,88 @@ if st.session_state.get("details"):
                 ):
                     st.info("No data frames returned.")
             with tabs[2]:
+                pipe = detail.get("pipeline") if isinstance(detail, dict) else None
+                if isinstance(pipe, dict) and pipe.get("lineage"):
+                    st.markdown(
+                        f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                        f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
+                        f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                    )
+                    if pipe.get("persisted_dir"):
+                        st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
+                    try:
+                        st.dataframe(pd.DataFrame(pipe.get("lineage") or []))
+                    except Exception:
+                        st.json(pipe.get("lineage"))
+                    script = pipe.get("script")
+                    try:
+                        spec = dict(pipe)
+                        spec.pop("script", None)
+                        st.download_button(
+                            "Download pipeline spec (JSON)",
+                            data=json.dumps(spec, indent=2).encode("utf-8"),
+                            file_name="pipeline_spec.json",
+                            mime="application/json",
+                            key=f"bottom_download_pipeline_spec_{selected}",
+                        )
+                    except Exception:
+                        pass
+                    if isinstance(script, str) and script.strip():
+                        st.download_button(
+                            "Download pipeline script",
+                            data=script.encode("utf-8"),
+                            file_name="pipeline_repro.py",
+                            mime="text/x-python",
+                            key=f"bottom_download_pipeline_{selected}",
+                        )
+                        st.code(script, language="python")
+                else:
+                    st.info("No pipeline available yet. Load data and run a transform (wrangle/clean/features).")
+            with tabs[3]:
+                sql_query = detail.get("sql_query_code")
+                sql_fn = detail.get("sql_database_function")
+                sql_fn_name = detail.get("sql_database_function_name")
+                sql_fn_path = detail.get("sql_database_function_path")
+
+                if sql_query:
+                    st.markdown("**SQL Query**")
+                    st.code(sql_query, language="sql")
+                    try:
+                        st.download_button(
+                            "Download query (.sql)",
+                            data=str(sql_query).encode("utf-8"),
+                            file_name="query.sql",
+                            mime="application/sql",
+                            key=f"bottom_download_sql_query_{selected}",
+                        )
+                    except Exception:
+                        pass
+                else:
+                    st.info("No SQL query generated for this turn.")
+
+                if sql_fn:
+                    st.markdown("**SQL Executor (Python)**")
+                    if sql_fn_name or sql_fn_path:
+                        st.caption(
+                            "  ".join(
+                                [
+                                    f"name={sql_fn_name}" if sql_fn_name else "",
+                                    f"path={sql_fn_path}" if sql_fn_path else "",
+                                ]
+                            ).strip()
+                        )
+                    st.code(sql_fn, language="python")
+                    try:
+                        st.download_button(
+                            "Download executor (.py)",
+                            data=str(sql_fn).encode("utf-8"),
+                            file_name="sql_executor.py",
+                            mime="text/x-python",
+                            key=f"bottom_download_sql_executor_{selected}",
+                        )
+                    except Exception:
+                        pass
+            with tabs[4]:
                 graph_json = detail.get("plotly_graph")
                 if graph_json:
                     payload = (
@@ -999,7 +1380,7 @@ if st.session_state.get("details"):
                     )
                 else:
                     st.info("No charts returned.")
-            with tabs[3]:
+            with tabs[5]:
                 reports = (
                     detail.get("eda_reports") if isinstance(detail, dict) else None
                 )
@@ -1036,7 +1417,7 @@ if st.session_state.get("details"):
                 if not sweetviz_file and not dtale_url:
                     st.info("No EDA reports returned.")
 
-            with tabs[4]:
+            with tabs[6]:
                 model_info = detail.get("model_info")
                 eval_art = detail.get("eval_artifacts")
                 eval_graph = detail.get("eval_plotly_graph")
