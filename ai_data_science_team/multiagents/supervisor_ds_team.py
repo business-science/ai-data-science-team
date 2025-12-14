@@ -326,7 +326,38 @@ Examples:
         wants_eda = has(
             "describe", "eda", "summary", "correlation", "sweetviz", "missingness"
         )
-        wants_feature = has("feature", "encode", "one-hot", "feat eng")
+        # Feature engineering is often referred to as "features", but "feature-engineered data"
+        # can also be a *reference* to an existing dataset. Be conservative: require an action signal.
+        feature_action = has(
+            "encode",
+            "one-hot",
+            "one hot",
+            "label encoding",
+            "target encoding",
+            "scale",
+            "scaling",
+            "standardize",
+            "normalize",
+            "model-ready features",
+            "model ready features",
+            "feature engineering",
+            "feature-engineering",
+            "feature engineer",
+            "engineer features",
+            "create features",
+            "build features",
+            "make features",
+            "generate features",
+        )
+        references_feature_engineered_data = (
+            ("feature-engineered" in last_human or "feature engineered" in last_human)
+            and ("data" in last_human or "dataset" in last_human)
+            and ("from" in last_human or "using" in last_human or "on" in last_human)
+        ) or (
+            ("engineered features" in last_human or "engineered feature" in last_human)
+            and ("from" in last_human or "using" in last_human or "on" in last_human)
+        )
+        wants_feature = bool(feature_action)
 
         # "model" is ambiguous (e.g., a product "bike model" vs an ML model). Prefer a conservative
         # interpretation: only trigger ML modeling when the user explicitly requests training/AutoML/prediction,
@@ -476,6 +507,7 @@ Examples:
                 f"{', '.join(allowed_keys)}\n\n"
                 "Guidelines:\n"
                 "- Set `viz` when the user asks to plot/chart/visualize.\n"
+                "- Sweetviz/D-Tale requests are EDA reports: set `eda` true and keep `viz` false unless an additional plot is requested.\n"
                 "- Set `model` ONLY for ML modeling (train/AutoML/predict), not product/bike 'model'.\n"
                 "- Set `load_only` only when the user only wants data loaded (no preview/eda/viz/etc).\n"
                 "- If `mlflow_log` or `mlflow_tools` is true, set `mlflow` true.\n"
@@ -515,6 +547,27 @@ Examples:
             llm_intents["viz"] = True
             llm_intents["model"] = True
             llm_intents["evaluate"] = True
+
+        # Sweetviz/D-Tale are EDA report tools; do not route to the charting agent unless the
+        # user explicitly asked for a plot/chart/graph in addition to the report.
+        wants_eda_report = has(
+            "sweetviz",
+            "dtale",
+            "d-tale",
+            "exploratory report",
+            "profiling report",
+            "eda report",
+        )
+        if wants_eda_report:
+            llm_intents["eda"] = True
+        explicit_plot_request = has("plot", "chart", "graph") or has_word("visualize")
+        if wants_eda_report and not explicit_plot_request:
+            llm_intents["viz"] = False
+
+        # If the user is referencing feature-engineered data, that is typically a dataset selection hint,
+        # not a request to run feature engineering again.
+        if references_feature_engineered_data and not bool(feature_action):
+            llm_intents["feature"] = False
 
         return {**heuristic_intents, **llm_intents}
 
@@ -2183,12 +2236,21 @@ Examples:
     def node_eda(state: SupervisorDSState):
         print("---EDA TOOLS---")
         before_msgs = list(state.get("messages", []) or [])
+        last_human = _get_last_human(before_msgs).lower()
+        feature_df = _ensure_df(state.get("feature_data"))
+        wants_feature_engineered_report = (
+            ("feature-engineered" in last_human or "feature engineered" in last_human)
+            and ("data" in last_human or "dataset" in last_human or "features" in last_human)
+        ) or ("engineered features" in last_human)
         active_df = _ensure_df(
             _get_active_data(
                 state,
                 ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
             )
         )
+        # If the user explicitly references feature-engineered data, prefer it for EDA/reporting.
+        if wants_feature_engineered_report and not _is_empty_df(feature_df):
+            active_df = feature_df
         if _is_empty_df(active_df):
             return {
                 "messages": [
