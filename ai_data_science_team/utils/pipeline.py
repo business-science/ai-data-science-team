@@ -46,6 +46,22 @@ def pick_latest_dataset_id(datasets: Dict[str, Any], *, stage: str) -> Optional[
     return best_id
 
 
+def pick_latest_dataset_id_any_stage(datasets: Dict[str, Any]) -> Optional[str]:
+    """
+    Pick the newest dataset id across all stages by created_ts.
+    """
+    best_id: Optional[str] = None
+    best_ts: float = -1.0
+    for did, entry in (datasets or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        ts = _as_float(entry.get("created_ts"), 0.0)
+        if ts >= best_ts:
+            best_ts = ts
+            best_id = did
+    return best_id
+
+
 def build_dataset_lineage_ids(datasets: Dict[str, Any], target_dataset_id: str) -> List[str]:
     """
     Walk parent_id links from target -> root, returning ids in root->target order.
@@ -248,18 +264,32 @@ def build_pipeline_snapshot(
     datasets: Dict[str, Any],
     *,
     active_dataset_id: Optional[str],
+    target: str = "model",
 ) -> Dict[str, Any]:
     """
     Build a lightweight pipeline snapshot for display:
-    - Picks the modeling dataset as the newest 'feature' dataset if present; else uses active_dataset_id.
+    - Computes the latest modeling dataset as the newest 'feature' dataset if present; else uses active_dataset_id.
+    - `target` controls which dataset the lineage/script is built for:
+        - "model": the modeling dataset (default)
+        - "active": the active dataset
+        - "latest": the newest dataset across all stages by created_ts
     - Returns lineage metadata and an exportable script.
     """
     datasets = datasets if isinstance(datasets, dict) else {}
     model_dataset_id = pick_latest_dataset_id(datasets, stage="feature") or active_dataset_id
 
+    target = (target or "model").strip().lower()
+    if target == "active":
+        target_dataset_id = active_dataset_id
+    elif target == "latest":
+        target_dataset_id = pick_latest_dataset_id_any_stage(datasets) or model_dataset_id or active_dataset_id
+    else:
+        target = "model"
+        target_dataset_id = model_dataset_id
+
     lineage_ids = (
-        build_dataset_lineage_ids(datasets, model_dataset_id)
-        if isinstance(model_dataset_id, str) and model_dataset_id
+        build_dataset_lineage_ids(datasets, target_dataset_id)
+        if isinstance(target_dataset_id, str) and target_dataset_id
         else []
     )
     pipeline_hash = compute_pipeline_hash(datasets, lineage_ids) if lineage_ids else None
@@ -292,8 +322,8 @@ def build_pipeline_snapshot(
 
     lineage = [_entry_meta(did) for did in lineage_ids]
     script = (
-        build_reproducible_pipeline_script(datasets, target_dataset_id=model_dataset_id)
-        if isinstance(model_dataset_id, str) and model_dataset_id
+        build_reproducible_pipeline_script(datasets, target_dataset_id=target_dataset_id)
+        if isinstance(target_dataset_id, str) and target_dataset_id
         else ""
     )
 
@@ -301,6 +331,8 @@ def build_pipeline_snapshot(
         "pipeline_hash": pipeline_hash,
         "active_dataset_id": active_dataset_id,
         "model_dataset_id": model_dataset_id,
+        "target": target,
+        "target_dataset_id": target_dataset_id,
         "lineage": lineage,
         "script": script,
     }

@@ -344,7 +344,27 @@ Examples:
         wants_viz = has("plot", "chart", "visual", "graph")
         wants_sql = has("sql", "query", "database", "table")
         wants_clean = has("clean", "impute", "missing", "null", "na", "outlier")
-        wants_wrangling = has("wrangle", "transform", "rename", "format", "standardize")
+        # NOTE: "standardize" is ambiguous (scaling vs column-name normalization). Treat it as
+        # wrangling only when it clearly refers to column naming/structure.
+        standardize_column_names = has("standardize") and has(
+            "column name",
+            "column names",
+            "rename column",
+            "rename columns",
+            "snake case",
+            "snake_case",
+        )
+        wants_wrangling = has(
+            "wrangle",
+            "transform",
+            "reshape",
+            "merge",
+            "join",
+            "pivot",
+            "melt",
+            "rename",
+            "format",
+        ) or standardize_column_names
         wants_eda = has(
             "describe", "eda", "summary", "correlation", "sweetviz", "missingness"
         )
@@ -590,6 +610,25 @@ Examples:
         # not a request to run feature engineering again.
         if references_feature_engineered_data and not bool(feature_action):
             llm_intents["feature"] = False
+
+        # Conflict resolution: feature engineering requests often get misclassified as wrangling/cleaning.
+        # If the user is clearly asking to engineer model-ready features, keep the plan minimal and avoid
+        # running extra transforms unless explicitly requested.
+        explicit_wrangling = standardize_column_names or has(
+            "wrangle",
+            "transform",
+            "reshape",
+            "merge",
+            "join",
+            "pivot",
+            "melt",
+            "rename",
+        )
+        explicit_cleaning = has("clean", "impute", "missing", "null", "na", "outlier", "duplicate", "deduplicate")
+        if bool(feature_action) and not explicit_wrangling:
+            llm_intents["wrangle"] = False
+        if bool(feature_action) and not explicit_cleaning:
+            llm_intents["clean"] = False
 
         return {**heuristic_intents, **llm_intents}
 
@@ -2599,20 +2638,24 @@ Examples:
                         },
                     },
                     parent_id=active_dataset_id,
-                    make_active=False,
+                    make_active=True,
                 )
             except Exception:
                 pass
         downstream_resets = (
-            {"model_info": None, "mlflow_artifacts": None}
+            {
+                "eda_artifacts": None,
+                "viz_graph": None,
+                "model_info": None,
+                "mlflow_artifacts": None,
+            }
             if feature_data is not None
             else {}
         )
         return {
             **merged,
             "feature_data": feature_data,
-            # Keep the current active dataset for EDA/viz; modeling nodes explicitly prefer feature_data.
-            "active_data_key": state.get("active_data_key"),
+            "active_data_key": "feature_data" if feature_data is not None else state.get("active_data_key"),
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
             "artifacts": {

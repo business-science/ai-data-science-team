@@ -639,10 +639,32 @@ def render_history(history: list[BaseMessage]):
                 st.info("No data frames returned.")
         # Pipeline
         with tabs[2]:
+            pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
+            if not isinstance(pipelines, dict):
+                pipelines = {}
             pipe = detail.get("pipeline") if isinstance(detail, dict) else None
+            if pipelines:
+                options = [
+                    ("Model (latest feature)", "model"),
+                    ("Active dataset", "active"),
+                    ("Latest dataset", "latest"),
+                ]
+                target = st.radio(
+                    "Pipeline target",
+                    options=[k for k, _v in options],
+                    index=0,
+                    horizontal=True,
+                    key=f"pipeline_target_{key_suffix}",
+                )
+                target_key = dict(options).get(target, "model")
+                if target_key == "model":
+                    pipe = detail.get("pipeline") or pipelines.get("model") or pipe
+                else:
+                    pipe = pipelines.get(target_key) or pipe
             if isinstance(pipe, dict) and pipe.get("lineage"):
                 st.markdown(
                     f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                    f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                     f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
@@ -659,7 +681,7 @@ def render_history(history: list[BaseMessage]):
                     st.download_button(
                         "Download pipeline spec (JSON)",
                         data=json.dumps(spec, indent=2).encode("utf-8"),
-                        file_name="pipeline_spec.json",
+                        file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
                         mime="application/json",
                         key=f"download_pipeline_spec_{key_suffix}",
                     )
@@ -669,7 +691,7 @@ def render_history(history: list[BaseMessage]):
                     st.download_button(
                         "Download pipeline script",
                         data=script.encode("utf-8"),
-                        file_name="pipeline_repro.py",
+                        file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
                         mime="text/x-python",
                         key=f"download_pipeline_{key_suffix}",
                     )
@@ -1174,6 +1196,27 @@ if prompt:
                 if isinstance(result, dict)
                 else None
             ),
+            "pipelines": (
+                {
+                    "model": build_pipeline_snapshot(
+                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        active_dataset_id=result.get("active_dataset_id"),
+                        target="model",
+                    ),
+                    "active": build_pipeline_snapshot(
+                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        active_dataset_id=result.get("active_dataset_id"),
+                        target="active",
+                    ),
+                    "latest": build_pipeline_snapshot(
+                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        active_dataset_id=result.get("active_dataset_id"),
+                        target="latest",
+                    ),
+                }
+                if isinstance(result, dict) and isinstance(result.get("datasets"), dict)
+                else None
+            ),
             "sql_query_code": (
                 sql_payload.get("sql_query_code")
                 if sql_payload and "sql_database_agent" in ran_agents
@@ -1218,6 +1261,8 @@ if prompt:
                     detail["pipeline"]["persisted_sql_query_path"] = saved.get("sql_query_path")
                     detail["pipeline"]["persisted_sql_executor_path"] = saved.get("sql_executor_path")
                     st.session_state.last_pipeline_persist_dir = saved.get("persisted_dir")
+                    if isinstance(detail.get("pipelines"), dict):
+                        detail["pipelines"]["model"] = detail["pipeline"]
                 if isinstance(saved, dict) and saved.get("error"):
                     st.sidebar.warning(f"Pipeline save failed: {saved.get('error')}")
         except Exception:
@@ -1298,10 +1343,32 @@ if st.session_state.get("details"):
                 ):
                     st.info("No data frames returned.")
             with tabs[2]:
+                pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
+                if not isinstance(pipelines, dict):
+                    pipelines = {}
                 pipe = detail.get("pipeline") if isinstance(detail, dict) else None
+                if pipelines:
+                    options = [
+                        ("Model (latest feature)", "model"),
+                        ("Active dataset", "active"),
+                        ("Latest dataset", "latest"),
+                    ]
+                    target = st.radio(
+                        "Pipeline target",
+                        options=[k for k, _v in options],
+                        index=0,
+                        horizontal=True,
+                        key=f"bottom_pipeline_target_{selected}",
+                    )
+                    target_key = dict(options).get(target, "model")
+                    if target_key == "model":
+                        pipe = detail.get("pipeline") or pipelines.get("model") or pipe
+                    else:
+                        pipe = pipelines.get(target_key) or pipe
                 if isinstance(pipe, dict) and pipe.get("lineage"):
                     st.markdown(
                         f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                        f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                         f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
                         f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                     )
@@ -1318,7 +1385,7 @@ if st.session_state.get("details"):
                         st.download_button(
                             "Download pipeline spec (JSON)",
                             data=json.dumps(spec, indent=2).encode("utf-8"),
-                            file_name="pipeline_spec.json",
+                            file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
                             mime="application/json",
                             key=f"bottom_download_pipeline_spec_{selected}",
                         )
@@ -1328,7 +1395,7 @@ if st.session_state.get("details"):
                         st.download_button(
                             "Download pipeline script",
                             data=script.encode("utf-8"),
-                            file_name="pipeline_repro.py",
+                            file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
                             mime="text/x-python",
                             key=f"bottom_download_pipeline_{selected}",
                         )
