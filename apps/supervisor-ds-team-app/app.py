@@ -44,6 +44,22 @@ st.set_page_config(
 TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
 
+UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
+
+
+def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    Remove Streamlit-only marker messages (e.g., DETAILS_INDEX) from the LLM context.
+    These are useful for UI rendering, but can confuse the supervisor/router when memory is off.
+    """
+    cleaned: list[BaseMessage] = []
+    for m in messages or []:
+        content = getattr(m, "content", "")
+        if isinstance(content, str) and content.startswith(UI_DETAIL_MARKER_PREFIX):
+            continue
+        cleaned.append(m)
+    return cleaned
+
 
 def _apply_streamlit_plot_style(fig):
     """
@@ -206,6 +222,72 @@ with st.sidebar:
     use_sample = st.checkbox("Load sample Telco churn data", value=False)
     uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
     preview_rows = st.number_input("Preview rows", 1, 20, 5)
+
+    st.markdown("**Dataset selection**")
+    team_state = st.session_state.get("team_state", {})
+    team_state = team_state if isinstance(team_state, dict) else {}
+    datasets = team_state.get("datasets")
+    datasets = datasets if isinstance(datasets, dict) else {}
+    current_active_id = team_state.get("active_dataset_id")
+    current_active_id = current_active_id if isinstance(current_active_id, str) else None
+    current_active_key = team_state.get("active_data_key")
+
+    if current_active_id and current_active_id in datasets and isinstance(datasets[current_active_id], dict):
+        entry = datasets[current_active_id]
+        label = entry.get("label") or current_active_id
+        stage = entry.get("stage")
+        shape = entry.get("shape")
+        meta_bits = []
+        if stage:
+            meta_bits.append(f"stage={stage}")
+        if shape:
+            meta_bits.append(f"shape={shape}")
+        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+        st.caption(f"Current active dataset: `{label}` (`{current_active_id}`){meta}")
+    elif current_active_key:
+        st.caption(f"Current active dataset: `{current_active_key}`")
+
+    if datasets:
+        ordered = sorted(
+            datasets.items(),
+            key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+            if isinstance(kv[1], dict)
+            else 0.0,
+            reverse=True,
+        )
+        options = [""] + [did for did, _ in ordered]
+        current_override = st.session_state.get("active_dataset_id_override")
+        if current_override and current_override not in options:
+            st.session_state["active_dataset_id_override"] = ""
+
+        def _fmt_dataset(did: str) -> str:
+            if not did:
+                return "Auto (use supervisor active)"
+            e = datasets.get(did)
+            if not isinstance(e, dict):
+                return str(did)
+            label = e.get("label") or did
+            stage = e.get("stage") or "dataset"
+            shape = e.get("shape")
+            shape_txt = f" {shape}" if shape else ""
+            return f"{stage}: {label}{shape_txt} ({did})"
+
+        st.selectbox(
+            "Active dataset (override)",
+            options=options,
+            format_func=_fmt_dataset,
+            help="Overrides which dataset is considered active for downstream steps (EDA/viz/wrangle/clean).",
+            key="active_dataset_id_override",
+        )
+    else:
+        st.session_state["active_dataset_id_override"] = ""
+        st.selectbox(
+            "Active dataset (override)",
+            options=[""],
+            format_func=lambda _k: "Auto (load data to populate datasets)",
+            disabled=True,
+            key="active_dataset_id_override",
+        )
     st.markdown("**SQL options**")
     sql_url = st.text_input("SQLAlchemy URL (optional)", value="sqlite:///:memory:")
     st.session_state["sql_url"] = sql_url
@@ -225,6 +307,9 @@ with st.sidebar:
 
     if st.button("Clear chat"):
         st.session_state.chat_history = []
+        st.session_state.details = []
+        st.session_state.team_state = {}
+        st.session_state["active_dataset_id_override"] = ""
         msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
         msgs.clear()
         msgs.add_ai_message("How can the data science team help today?")
@@ -302,6 +387,8 @@ if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 if "details" not in st.session_state:
     st.session_state.details = []
+if "team_state" not in st.session_state:
+    st.session_state.team_state = {}
 if "checkpointer" not in st.session_state:
     st.session_state.checkpointer = get_checkpointer() if add_memory else None
 if add_memory and st.session_state.checkpointer is None:
@@ -348,7 +435,7 @@ def render_history(history: list[BaseMessage]):
         tabs = st.tabs(
             [
                 "AI Reasoning",
-                "Data (raw/clean/features)",
+                "Data (raw/sql/wrangle/clean/features)",
                 "Charts",
                 "Reports",
                 "Models/MLflow",
@@ -373,12 +460,16 @@ def render_history(history: list[BaseMessage]):
         # Data
         with tabs[1]:
             raw_df = detail.get("data_raw_df")
+            sql_df = detail.get("data_sql_df")
             wrangled_df = detail.get("data_wrangled_df")
             cleaned_df = detail.get("data_cleaned_df")
             feature_df = detail.get("feature_data_df")
             if raw_df is not None:
                 st.markdown("**Raw Preview**")
                 st.dataframe(raw_df)
+            if sql_df is not None:
+                st.markdown("**SQL Preview**")
+                st.dataframe(sql_df)
             if wrangled_df is not None:
                 st.markdown("**Wrangled Preview**")
                 st.dataframe(wrangled_df)
@@ -390,6 +481,7 @@ def render_history(history: list[BaseMessage]):
                 st.dataframe(feature_df)
             if (
                 raw_df is None
+                and sql_df is None
                 and wrangled_df is None
                 and cleaned_df is None
                 and feature_df is None
@@ -484,7 +576,7 @@ def render_history(history: list[BaseMessage]):
         role = getattr(m, "role", getattr(m, "type", "assistant"))
         content = getattr(m, "content", "")
         with st.chat_message("assistant" if role in ("assistant", "ai") else "human"):
-            if isinstance(content, str) and content.startswith("DETAILS_INDEX:"):
+            if isinstance(content, str) and content.startswith(UI_DETAIL_MARKER_PREFIX):
                 try:
                     idx = int(content.split(":")[1])
                     detail = st.session_state.details[idx]
@@ -535,32 +627,55 @@ if prompt:
         input_messages = (
             [HumanMessage(content=prompt, id=str(uuid.uuid4()))]
             if add_memory
-            else msgs.messages
+            else _strip_ui_marker_messages(msgs.messages)
         )
-        result = team.invoke(
-            {
-                "messages": input_messages,
-                "artifacts": {
-                    "config": {
-                        "mlflow_tracking_uri": st.session_state.get(
-                            "mlflow_tracking_uri"
-                        ),
-                        "mlflow_experiment_name": st.session_state.get(
-                            "mlflow_experiment_name", "H2O AutoML"
-                        ),
-                        "enable_mlflow_logging": st.session_state.get(
-                            "enable_mlflow_logging", True
-                        ),
-                        "proactive_workflow_mode": st.session_state.get(
-                            "proactive_workflow_mode", True
-                        ),
-                        "use_llm_intent_parser": st.session_state.get(
-                            "use_llm_intent_parser", True
-                        ),
-                    }
-                },
-                "data_raw": data_raw_dict,
+        active_dataset_override = st.session_state.get("active_dataset_id_override") or None
+        persisted = st.session_state.get("team_state", {})
+        persisted = persisted if isinstance(persisted, dict) else {}
+        invoke_payload = {
+            "messages": input_messages,
+            "artifacts": {
+                "config": {
+                    "mlflow_tracking_uri": st.session_state.get("mlflow_tracking_uri"),
+                    "mlflow_experiment_name": st.session_state.get(
+                        "mlflow_experiment_name", "H2O AutoML"
+                    ),
+                    "enable_mlflow_logging": st.session_state.get(
+                        "enable_mlflow_logging", True
+                    ),
+                    "proactive_workflow_mode": st.session_state.get(
+                        "proactive_workflow_mode", True
+                    ),
+                    "use_llm_intent_parser": st.session_state.get(
+                        "use_llm_intent_parser", True
+                    ),
+                }
             },
+            "data_raw": data_raw_dict,
+        }
+        # Provide continuity when memory is disabled (no checkpointer).
+        if not add_memory and persisted:
+            invoke_payload.update(
+                {
+                    k: persisted.get(k)
+                    for k in (
+                        "data_sql",
+                        "data_wrangled",
+                        "data_cleaned",
+                        "feature_data",
+                        "active_data_key",
+                        "active_dataset_id",
+                        "datasets",
+                        "target_variable",
+                    )
+                    if k in persisted
+                }
+            )
+        # Apply explicit user override last.
+        if active_dataset_override:
+            invoke_payload["active_dataset_id"] = active_dataset_override
+        result = team.invoke(
+            invoke_payload,
             config={
                 "recursion_limit": recursion_limit,
                 "configurable": {"thread_id": st.session_state.thread_id},
@@ -577,6 +692,53 @@ if prompt:
                 st.session_state.selected_data_raw = result.get("data_raw").to_dict()
             except Exception:
                 st.session_state.selected_data_raw = result.get("data_raw")
+
+        # Persist additional state slots for continuity when memory is off
+        # (and to support dataset selection UX in the sidebar).
+        def _maybe_df_to_dict(obj):
+            try:
+                if isinstance(obj, pd.DataFrame):
+                    return obj.to_dict()
+            except Exception:
+                pass
+            return obj
+
+        def _normalize_datasets(ds):
+            if not isinstance(ds, dict):
+                return ds
+            out = {}
+            for did, entry in ds.items():
+                if not isinstance(entry, dict):
+                    out[did] = entry
+                    continue
+                data = entry.get("data")
+                out[did] = {**entry, "data": _maybe_df_to_dict(data)}
+            return out
+
+        try:
+            state_updates = {}
+            for k in (
+                "data_sql",
+                "data_wrangled",
+                "data_cleaned",
+                "feature_data",
+                "active_data_key",
+                "active_dataset_id",
+                "datasets",
+                "target_variable",
+            ):
+                if k in result:
+                    if k == "datasets":
+                        state_updates[k] = _normalize_datasets(result.get(k))
+                    else:
+                        state_updates[k] = _maybe_df_to_dict(result.get(k))
+            if state_updates:
+                st.session_state.team_state = {
+                    **(st.session_state.team_state or {}),
+                    **state_updates,
+                }
+        except Exception:
+            pass
 
         # append last AI message to chat history for display
         last_ai = None
@@ -703,6 +865,7 @@ if prompt:
             "reasoning": reasoning or getattr(last_ai, "content", ""),
             "reasoning_items": reasoning_items,
             "data_raw_df": _to_df(result.get("data_raw")),
+            "data_sql_df": _to_df(result.get("data_sql")),
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
             "feature_data_df": _to_df(result.get("feature_data")),
@@ -752,7 +915,7 @@ if prompt:
         }
         idx = len(st.session_state.details)
         st.session_state.details.append(detail)
-        msgs.add_ai_message(f"DETAILS_INDEX:{idx}")
+        msgs.add_ai_message(f"{UI_DETAIL_MARKER_PREFIX}{idx}")
 
 # ---------------- Always-on analysis panel (bottom) ----------------
 st.markdown("---")
@@ -775,7 +938,7 @@ if st.session_state.get("details"):
             tabs = st.tabs(
                 [
                     "AI Reasoning",
-                    "Data (raw/clean/features)",
+                    "Data (raw/sql/wrangle/clean/features)",
                     "Charts",
                     "Reports",
                     "Models/MLflow",
@@ -795,12 +958,16 @@ if st.session_state.get("details"):
                     st.write(txt if txt else "No reasoning available.")
             with tabs[1]:
                 raw_df = detail.get("data_raw_df")
+                sql_df = detail.get("data_sql_df")
                 wrangled_df = detail.get("data_wrangled_df")
                 cleaned_df = detail.get("data_cleaned_df")
                 feature_df = detail.get("feature_data_df")
                 if raw_df is not None:
                     st.markdown("**Raw Preview**")
                     st.dataframe(raw_df)
+                if sql_df is not None:
+                    st.markdown("**SQL Preview**")
+                    st.dataframe(sql_df)
                 if wrangled_df is not None:
                     st.markdown("**Wrangled Preview**")
                     st.dataframe(wrangled_df)
@@ -812,6 +979,7 @@ if st.session_state.get("details"):
                     st.dataframe(feature_df)
                 if (
                     raw_df is None
+                    and sql_df is None
                     and wrangled_df is None
                     and cleaned_df is None
                     and feature_df is None

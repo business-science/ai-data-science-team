@@ -83,6 +83,8 @@ class SupervisorDSState(TypedDict):
     next: str
     last_worker: Optional[str]
     active_data_key: Optional[str]
+    active_dataset_id: Optional[str]
+    datasets: Dict[str, Any]
     handled_request_id: Optional[str]
     handled_steps: Dict[str, bool]
     attempted_steps: Dict[str, bool]
@@ -586,9 +588,97 @@ Examples:
             elif state.get("data_raw") is not None:
                 active_data_key = "data_raw"
 
-        data_ready = (
-            active_data_key is not None and state.get(active_data_key) is not None
-        )
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        state_with_datasets: dict = {
+            **(state or {}),
+            "active_data_key": active_data_key,
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+        }
+
+        # Handle explicit dataset switching requests (no agent needed).
+        last_human_text = _get_last_human(clean_msgs)
+        requested_dataset_id = None
+        try:
+            import re
+
+            lower = (last_human_text or "").lower()
+            wants_switch = any(
+                k in lower
+                for k in (
+                    "use dataset",
+                    "switch dataset",
+                    "set dataset",
+                    "use the dataset",
+                    "switch to dataset",
+                )
+            )
+            if wants_switch and isinstance(datasets, dict) and datasets:
+                m = re.search(r"\\bdataset\\b\\s*[:#]?\\s*([a-zA-Z0-9_\\-]+)", lower)
+                token = (m.group(1) if m else "").strip()
+                if token.isdigit():
+                    ordered = sorted(
+                        datasets.items(),
+                        key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                        if isinstance(kv[1], dict)
+                        else 0.0,
+                        reverse=True,
+                    )
+                    idx = int(token) - 1
+                    if 0 <= idx < len(ordered):
+                        requested_dataset_id = ordered[idx][0]
+                elif token and token in datasets:
+                    requested_dataset_id = token
+
+            if requested_dataset_id is None and isinstance(datasets, dict) and datasets:
+                # Convenience switching by stage
+                stage_hint = None
+                if "use sql" in lower or "use sql results" in lower:
+                    stage_hint = "sql"
+                elif "use cleaned" in lower or "use clean" in lower:
+                    stage_hint = "cleaned"
+                elif "use wrangled" in lower or "use wrangle" in lower:
+                    stage_hint = "wrangled"
+                elif "use features" in lower or "use feature" in lower:
+                    stage_hint = "feature"
+                elif "use raw" in lower:
+                    stage_hint = "raw"
+                if stage_hint:
+                    candidates = [
+                        (float(e.get("created_ts") or 0.0), did)
+                        for did, e in datasets.items()
+                        if isinstance(e, dict) and e.get("stage") == stage_hint
+                    ]
+                    if candidates:
+                        candidates.sort(reverse=True)
+                        requested_dataset_id = candidates[0][1]
+        except Exception:
+            requested_dataset_id = None
+
+        if requested_dataset_id and requested_dataset_id != active_dataset_id:
+            selected = datasets.get(requested_dataset_id) if isinstance(datasets, dict) else None
+            label = selected.get("label") if isinstance(selected, dict) else requested_dataset_id
+            msg = AIMessage(
+                content=f"Switched active dataset to `{label}` (`{requested_dataset_id}`).",
+                name="supervisor",
+            )
+            return {
+                "messages": [msg],
+                "next": "FINISH",
+                "active_data_key": active_data_key,
+                "datasets": datasets,
+                "active_dataset_id": requested_dataset_id,
+                "handled_request_id": handled_request_id,
+                "handled_steps": handled_steps,
+                "attempted_steps": attempted_steps,
+                "workflow_plan_request_id": state_plan_req,
+                "workflow_plan": state_plan,
+            }
+
+        data_ready = _get_active_data(
+            state_with_datasets,
+            ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
+        ) is not None
         last_worker = state.get("last_worker")
 
         def _loader_loaded_dataset(loader_artifacts: Any) -> bool:
@@ -767,6 +857,8 @@ Examples:
                     "messages": [AIMessage(content=msg, name="workflow_planner_agent")],
                     "next": "FINISH",
                     "active_data_key": active_data_key,
+                    "datasets": datasets,
+                    "active_dataset_id": active_dataset_id,
                     "handled_request_id": handled_request_id,
                     "handled_steps": handled_steps,
                     "attempted_steps": attempted_steps,
@@ -882,6 +974,8 @@ Examples:
                             **({"messages": planner_messages} if planner_messages else {}),
                             "next": "FINISH",
                             "active_data_key": active_data_key,
+                            "datasets": datasets,
+                            "active_dataset_id": active_dataset_id,
                             "handled_request_id": handled_request_id,
                             "handled_steps": handled_steps,
                             "attempted_steps": attempted_steps,
@@ -898,6 +992,8 @@ Examples:
                             **({"messages": planner_messages} if planner_messages else {}),
                             "next": "Data_Loader_Tools_Agent",
                             "active_data_key": active_data_key,
+                            "datasets": datasets,
+                            "active_dataset_id": active_dataset_id,
                             "handled_request_id": handled_request_id,
                             "handled_steps": handled_steps,
                             "attempted_steps": attempted_steps,
@@ -912,6 +1008,8 @@ Examples:
                         **({"messages": planner_messages} if planner_messages else {}),
                         "next": worker,
                         "active_data_key": active_data_key,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
                         "handled_request_id": handled_request_id,
                         "handled_steps": handled_steps,
                         "attempted_steps": attempted_steps,
@@ -925,6 +1023,8 @@ Examples:
                     **({"messages": planner_messages} if planner_messages else {}),
                     "next": "FINISH",
                     "active_data_key": active_data_key,
+                    "datasets": datasets,
+                    "active_dataset_id": active_dataset_id,
                     "handled_request_id": handled_request_id,
                     "handled_steps": handled_steps,
                     "attempted_steps": attempted_steps,
@@ -972,6 +1072,8 @@ Examples:
         return {
             "next": next_worker,
             "active_data_key": active_data_key,
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "handled_request_id": handled_request_id,
             "handled_steps": handled_steps,
             "attempted_steps": attempted_steps,
@@ -1205,6 +1307,8 @@ Examples:
         except Exception:
             return data
 
+    DATASET_REGISTRY_MAX = 10
+
     def _shape(obj):
         try:
             import pandas as pd
@@ -1219,7 +1323,152 @@ Examples:
             return None
         return None
 
+    def _dataset_meta(data: Any) -> tuple[Any, list[str] | None]:
+        df = _ensure_df(data)
+        shape = _shape(df)
+        cols = None
+        try:
+            cols = [str(c) for c in list(getattr(df, "columns", []))]
+            cols = cols[:200] if cols else None
+        except Exception:
+            cols = None
+        return shape, cols
+
+    def _prune_datasets(datasets: dict[str, Any]) -> dict[str, Any]:
+        if len(datasets) <= DATASET_REGISTRY_MAX:
+            return datasets
+        items: list[tuple[float, str]] = []
+        for did, entry in datasets.items():
+            ts = 0.0
+            if isinstance(entry, dict):
+                try:
+                    ts = float(entry.get("created_ts") or 0.0)
+                except Exception:
+                    ts = 0.0
+            items.append((ts, did))
+        items.sort(reverse=True)
+        keep = {did for _ts, did in items[:DATASET_REGISTRY_MAX]}
+        return {did: datasets[did] for did in keep if did in datasets}
+
+    def _ensure_dataset_registry(state: SupervisorDSState) -> tuple[dict[str, Any], str | None]:
+        datasets = state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+        active_id = state.get("active_dataset_id")
+        active_id = active_id if isinstance(active_id, str) else None
+
+        # Bootstrap from known state slots if registry is empty.
+        if not datasets:
+            import time
+            import uuid
+            from datetime import datetime, timezone
+
+            def _add(stage: str, data_key: str):
+                nonlocal datasets
+                data = state.get(data_key)
+                if data is None:
+                    return
+                did = f"{stage}_{uuid.uuid4().hex[:8]}"
+                shape, cols = _dataset_meta(data)
+                ts = time.time()
+                datasets[did] = {
+                    "id": did,
+                    "label": data_key,
+                    "stage": stage,
+                    "data": data,
+                    "shape": shape,
+                    "columns": cols,
+                    "created_ts": ts,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_by": "bootstrap",
+                    "provenance": {"source_type": "state_slot", "source": data_key},
+                    "parent_id": None,
+                }
+
+            _add("raw", "data_raw")
+            _add("sql", "data_sql")
+            _add("wrangled", "data_wrangled")
+            _add("cleaned", "data_cleaned")
+            _add("feature", "feature_data")
+
+        # Pick a reasonable default active dataset if missing.
+        if active_id is None and isinstance(datasets, dict) and datasets:
+            # Prefer the dataset whose stage matches active_data_key, else newest.
+            active_key = state.get("active_data_key")
+            stage_for_key = {
+                "data_raw": "raw",
+                "data_sql": "sql",
+                "data_wrangled": "wrangled",
+                "data_cleaned": "cleaned",
+                "feature_data": "feature",
+            }.get(active_key)
+            if stage_for_key:
+                matching = [
+                    did
+                    for did, e in datasets.items()
+                    if isinstance(e, dict) and e.get("stage") == stage_for_key
+                ]
+                if matching:
+                    active_id = matching[-1]
+            if active_id is None:
+                newest = sorted(
+                    datasets.items(),
+                    key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                    if isinstance(kv[1], dict)
+                    else 0.0,
+                )
+                active_id = newest[-1][0] if newest else None
+
+        if active_id is not None and active_id not in datasets:
+            active_id = None
+
+        return _prune_datasets(datasets), active_id
+
+    def _register_dataset(
+        state: SupervisorDSState,
+        *,
+        data: Any,
+        stage: str,
+        label: str,
+        created_by: str,
+        provenance: dict[str, Any],
+        parent_id: str | None = None,
+        make_active: bool = True,
+    ) -> tuple[dict[str, Any], str | None, str]:
+        import time
+        import uuid
+        from datetime import datetime, timezone
+
+        datasets, current_active = _ensure_dataset_registry(state)
+        did = f"{stage}_{uuid.uuid4().hex[:8]}"
+        shape, cols = _dataset_meta(data)
+        ts = time.time()
+        datasets = {
+            **datasets,
+            did: {
+                "id": did,
+                "label": label or did,
+                "stage": stage,
+                "data": data,
+                "shape": shape,
+                "columns": cols,
+                "created_ts": ts,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": created_by,
+                "provenance": provenance or {},
+                "parent_id": parent_id,
+            },
+        }
+        datasets = _prune_datasets(datasets)
+        active_id = did if make_active else current_active
+        return datasets, active_id, did
+
     def _get_active_data(state: SupervisorDSState, fallback_keys: Sequence[str]):
+        datasets = state.get("datasets")
+        active_id = state.get("active_dataset_id")
+        if isinstance(datasets, dict) and isinstance(active_id, str):
+            entry = datasets.get(active_id)
+            if isinstance(entry, dict) and entry.get("data") is not None:
+                return entry.get("data")
         active_key = state.get("active_data_key")
         if active_key and state.get(active_key) is not None:
             return state.get(active_key)
@@ -1254,6 +1503,7 @@ Examples:
         loaded_dataset = None
         loaded_dataset_label = None
         multiple_loaded_files = None
+        multiple_loaded_datasets: list[tuple[str, Any]] | None = None
         fallback_loaded_dataset = False
 
         # Normalize artifacts into a dict so we can inspect tool intent
@@ -1303,6 +1553,7 @@ Examples:
                 if len(ok_items) > 1:
                     # Multiple datasets loaded; don't guess which one becomes active.
                     multiple_loaded_files = [fname for fname, _ in ok_items]
+                    multiple_loaded_datasets = ok_items
                     loaded_dataset = None
                     loaded_dataset_label = None
                     break
@@ -1415,6 +1666,62 @@ Examples:
                     loader_artifacts = {"load_file_fallback": marker}
 
         print(f"  loader data_raw shape={_shape(data_raw)} active_data_key={active_data_key}")
+
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        # Register newly loaded datasets in the dataset registry.
+        if loaded_dataset is not None:
+            try:
+                import os
+
+                label = loaded_dataset_label or "data_raw"
+                if isinstance(label, str):
+                    label = os.path.basename(label) or label
+                provenance = {
+                    "source_type": "file",
+                    "source": loaded_dataset_label,
+                    "user_request": last_human,
+                    "fallback_loader": bool(fallback_loaded_dataset),
+                }
+                datasets, active_dataset_id, _did = _register_dataset(
+                    {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
+                    data=data_raw,
+                    stage="raw",
+                    label=str(label),
+                    created_by="Data_Loader_Tools_Agent",
+                    provenance=provenance,
+                    parent_id=None,
+                    make_active=True,
+                )
+            except Exception:
+                # Never fail the load step due to registry bookkeeping.
+                pass
+        elif multiple_loaded_datasets:
+            # Keep the already-loaded datasets available for explicit selection, but do not auto-switch.
+            try:
+                state_for_register = {**state, "datasets": datasets, "active_dataset_id": active_dataset_id}
+                # Register only the most recent N to avoid unbounded growth.
+                for fname, data in list(multiple_loaded_datasets)[-DATASET_REGISTRY_MAX:]:
+                    datasets, active_dataset_id, _did = _register_dataset(
+                        state_for_register,
+                        data=data,
+                        stage="raw",
+                        label=str(fname),
+                        created_by="Data_Loader_Tools_Agent",
+                        provenance={
+                            "source_type": "directory_load",
+                            "source": fname,
+                            "user_request": last_human,
+                        },
+                        parent_id=None,
+                        make_active=False,
+                    )
+                    state_for_register = {
+                        **state_for_register,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
+                    }
+            except Exception:
+                pass
 
         # Add a lightweight AI summary message so supervisor can progress
         summary_msg = None
@@ -1636,6 +1943,8 @@ Examples:
             **merged,
             "data_raw": data_raw,
             "active_data_key": active_data_key,
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_loader": loader_artifacts,
@@ -1648,7 +1957,14 @@ Examples:
         print("---DATA WRANGLING---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
-        active_df = _ensure_df(_get_active_data(state, ["data_raw", "data_sql", "data_wrangled", "data_cleaned", "feature_data"]))
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        active_df = _ensure_df(
+            _get_active_data(
+                state_with_datasets,
+                ["data_raw", "data_sql", "data_wrangled", "data_cleaned", "feature_data"],
+            )
+        )
         if _is_empty_df(active_df):
             return {
                 "messages": [
@@ -1680,6 +1996,20 @@ Examples:
                 AIMessage(content=summary_text, name="data_wrangling_agent")
             )
         data_wrangled = response.get("data_wrangled")
+        if data_wrangled is not None:
+            try:
+                datasets, active_dataset_id, _did = _register_dataset(
+                    state_with_datasets,
+                    data=data_wrangled,
+                    stage="wrangled",
+                    label="data_wrangled",
+                    created_by="Data_Wrangling_Agent",
+                    provenance={"source_type": "agent", "user_request": last_human},
+                    parent_id=active_dataset_id,
+                    make_active=True,
+                )
+            except Exception:
+                pass
         downstream_resets = (
             {
                 "data_cleaned": None,
@@ -1696,6 +2026,8 @@ Examples:
             **merged,
             "data_wrangled": data_wrangled,
             "active_data_key": "data_wrangled" if data_wrangled is not None else state.get("active_data_key"),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_wrangling": data_wrangled,
@@ -1708,7 +2040,14 @@ Examples:
         print("---DATA CLEANING---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
-        active_df = _ensure_df(_get_active_data(state, ["data_wrangled", "data_raw", "data_sql", "data_cleaned", "feature_data"]))
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        active_df = _ensure_df(
+            _get_active_data(
+                state_with_datasets,
+                ["data_wrangled", "data_raw", "data_sql", "data_cleaned", "feature_data"],
+            )
+        )
         if _is_empty_df(active_df):
             return {
                 "messages": [
@@ -1740,6 +2079,20 @@ Examples:
                 AIMessage(content=summary_text, name="data_cleaning_agent")
             )
         data_cleaned = response.get("data_cleaned")
+        if data_cleaned is not None:
+            try:
+                datasets, active_dataset_id, _did = _register_dataset(
+                    state_with_datasets,
+                    data=data_cleaned,
+                    stage="cleaned",
+                    label="data_cleaned",
+                    created_by="Data_Cleaning_Agent",
+                    provenance={"source_type": "agent", "user_request": last_human},
+                    parent_id=active_dataset_id,
+                    make_active=True,
+                )
+            except Exception:
+                pass
         downstream_resets = (
             {
                 "eda_artifacts": None,
@@ -1755,6 +2108,8 @@ Examples:
             **merged,
             "data_cleaned": data_cleaned,
             "active_data_key": "data_cleaned" if data_cleaned is not None else state.get("active_data_key"),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_cleaning": data_cleaned,
@@ -1767,6 +2122,7 @@ Examples:
         print("---SQL DATABASE---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
         sql_database_agent.invoke_messages(
             messages=before_msgs,
             user_instructions=last_human,
@@ -1785,10 +2141,34 @@ Examples:
                 AIMessage(content=summary_text, name="sql_database_agent")
             )
         data_sql = response.get("data_sql")
+        if data_sql is not None:
+            try:
+                sql_code = response.get("sql_query_code")
+                if isinstance(sql_code, str) and len(sql_code) > 2000:
+                    sql_code = sql_code[:2000] + "\n...[truncated]..."
+                datasets, active_dataset_id, _did = _register_dataset(
+                    {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
+                    data=data_sql,
+                    stage="sql",
+                    label="data_sql",
+                    created_by="SQL_Database_Agent",
+                    provenance={
+                        "source_type": "sql",
+                        "user_request": last_human,
+                        "sql_query_code": sql_code,
+                        "sql_database_function": response.get("sql_database_function"),
+                    },
+                    parent_id=None,
+                    make_active=True,
+                )
+            except Exception:
+                pass
         return {
             **merged,
             "data_sql": data_sql,
             "active_data_key": "data_sql" if data_sql is not None else state.get("active_data_key"),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "artifacts": {
                 **state.get("artifacts", {}),
                 "sql": {
@@ -1927,9 +2307,11 @@ Examples:
         print("---FEATURE ENGINEERING---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
         active_df = _ensure_df(
             _get_active_data(
-                state,
+                state_with_datasets,
                 ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
             )
         )
@@ -1964,6 +2346,20 @@ Examples:
                 AIMessage(content=summary_text, name="feature_engineering_agent")
             )
         feature_data = response.get("data_engineered")
+        if feature_data is not None:
+            try:
+                datasets, active_dataset_id, _did = _register_dataset(
+                    state_with_datasets,
+                    data=feature_data,
+                    stage="feature",
+                    label="feature_data",
+                    created_by="Feature_Engineering_Agent",
+                    provenance={"source_type": "agent", "user_request": last_human},
+                    parent_id=active_dataset_id,
+                    make_active=False,
+                )
+            except Exception:
+                pass
         downstream_resets = (
             {"model_info": None, "mlflow_artifacts": None}
             if feature_data is not None
@@ -1974,6 +2370,8 @@ Examples:
             "feature_data": feature_data,
             # Keep the current active dataset for EDA/viz; modeling nodes explicitly prefer feature_data.
             "active_data_key": state.get("active_data_key"),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
             "artifacts": {
                 **state.get("artifacts", {}),
                 "feature_engineering": response,
