@@ -921,7 +921,20 @@ if prompt:
             },
         )
     except Exception as e:
-        st.error(f"Error running team: {e}")
+        msg = str(e)
+        if (
+            "rate_limit_exceeded" in msg
+            or "tokens per min" in msg
+            or "tpm" in msg.lower()
+            or "request too large" in msg.lower()
+        ):
+            st.error(f"Error running team (rate limit): {e}")
+            st.info(
+                "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
+                "or switching to a smaller model."
+            )
+        else:
+            st.error(f"Error running team: {e}")
         result = None
 
     if result:

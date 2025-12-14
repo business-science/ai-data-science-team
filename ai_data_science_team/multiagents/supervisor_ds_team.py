@@ -13,8 +13,28 @@ from langgraph.types import Checkpointer
 from langgraph.graph.message import add_messages
 
 
-TEAM_MAX_MESSAGES = 30
-TEAM_MAX_MESSAGE_CHARS = 4000
+# Keep the conversation context small to avoid token-rate-limit errors and
+# to prevent verbose agent outputs (code/JSON) from bloating subsequent calls.
+TEAM_MAX_MESSAGES = 20
+TEAM_MAX_MESSAGE_CHARS = 2000
+
+
+def _is_agent_output_report_message(m: BaseMessage) -> bool:
+    """
+    Detect verbose JSON "Agent Outputs" reports emitted by node_func_report_agent_outputs.
+    These are useful for debugging, but they bloat the LLM context and often cause
+    rate-limit errors in multi-step workflows. The UI surfaces details via artifacts/tabs.
+    """
+    if not isinstance(m, AIMessage):
+        return False
+    content = getattr(m, "content", None)
+    if not isinstance(content, str) or not content:
+        return False
+    s = content.lstrip()
+    if not s.startswith("{"):
+        return False
+    head = s[:1200]
+    return '"report_title"' in head and ("Agent Outputs" in head or "Agent Output Summary" in head)
 
 
 def _supervisor_merge_messages(
@@ -35,6 +55,8 @@ def _supervisor_merge_messages(
     for m in merged:
         role = getattr(m, "type", None) or getattr(m, "role", None)
         if role in ("tool", "function"):
+            continue
+        if _is_agent_output_report_message(m):
             continue
 
         content = getattr(m, "content", "")
