@@ -271,16 +271,23 @@ Examples:
                 cleaned.append(m)
         return cleaned
 
-    def _parse_intent(msgs: Sequence[BaseMessage]):
-        last_human = ""
+    # Optional LLM intent parser (enable via artifacts.config.use_llm_intent_parser).
+    def _parse_intent(msgs: Sequence[BaseMessage], *, use_llm: bool = False) -> dict[str, bool]:
+        last_human_text = ""
         for m in reversed(msgs or []):
             role = getattr(m, "role", getattr(m, "type", None))
             if role in ("human", "user"):
-                last_human = (getattr(m, "content", "") or "").lower()
+                last_human_text = getattr(m, "content", "") or ""
                 break
+        last_human = last_human_text.lower()
+
+        import re
 
         def has(*words):
             return any(w in last_human for w in words)
+
+        def has_word(*words):
+            return any(re.search(rf"\\b{re.escape(w)}\\b", last_human) for w in words)
 
         wants_workflow = has(
             "workflow",
@@ -319,21 +326,26 @@ Examples:
         )
         wants_feature = has("feature", "encode", "one-hot", "feat eng")
 
-        # "model" is ambiguous (e.g., "bike model" vs ML model). Only treat as ML intent when
-        # there are explicit ML/training signals, or action verbs paired with "model".
-        ml_signal = has(
-            "train",
-            "automl",
-            "predict",
+        # "model" is ambiguous (e.g., a product "bike model" vs an ML model). Prefer a conservative
+        # interpretation: only trigger ML modeling when the user explicitly requests training/AutoML/prediction,
+        # or when ML terminology appears without a feature-engineering intent.
+        explicit_modeling = (
+            has(
+                "train",
+                "automl",
+                "fit",
+                "tune",
+                "cross-validation",
+                "cross validation",
+                "cv",
+                "hyperparameter",
+            )
+            or has_word("predict")
+        )
+        ml_context = has(
             "classification",
             "classify",
             "regression",
-            "mlflow",
-            "cross-validation",
-            "cross validation",
-            "cv",
-            "hyperparameter",
-            "tune",
             "xgboost",
             "random forest",
             "lightgbm",
@@ -342,6 +354,7 @@ Examples:
             "neural network",
             "deep learning",
         )
+        ml_signal = explicit_modeling or (ml_context and not wants_feature)
         model_word = "model" in last_human
         product_model_context = has(
             "bike model",
@@ -351,12 +364,14 @@ Examples:
             "phone model",
             "vehicle model",
         ) or (wants_viz and has("by model", "per model", "for each model"))
+        model_ready_context = has("model-ready", "model ready", "model-ready data", "model ready data")
         wants_model = bool(
             ml_signal
             or (
                 model_word
                 and has("build", "create", "fit", "train", "tune", "predict", "develop")
                 and not product_model_context
+                and not model_ready_context
             )
         )
         wants_eval = has(
@@ -425,7 +440,7 @@ Examples:
             ]
         )
         load_only = wants_load and mentions_file and not wants_more_processing
-        return {
+        heuristic_intents: dict[str, bool] = {
             "list_files": wants_list_files,
             "preview": wants_preview,
             "viz": wants_viz,
@@ -443,6 +458,63 @@ Examples:
             "load": wants_load and mentions_file,
             "load_only": load_only,
         }
+
+        if not use_llm:
+            return heuristic_intents
+
+        # LLM-based classification can resolve ambiguous prompts (e.g., "bike model" vs ML model).
+        import json
+
+        allowed_keys = list(heuristic_intents.keys())
+        llm_intents: dict[str, bool] = {}
+        try:
+            intent_prompt = (
+                "You classify user intent for a data-science assistant router.\n"
+                "Return ONLY valid JSON with boolean fields:\n"
+                f"{', '.join(allowed_keys)}\n\n"
+                "Guidelines:\n"
+                "- Set `viz` when the user asks to plot/chart/visualize.\n"
+                "- Set `model` ONLY for ML modeling (train/AutoML/predict), not product/bike 'model'.\n"
+                "- Set `load_only` only when the user only wants data loaded (no preview/eda/viz/etc).\n"
+                "- If `mlflow_log` or `mlflow_tools` is true, set `mlflow` true.\n"
+                "- If `workflow` is true, you may also set common steps true (clean/eda/viz/model/evaluate).\n"
+            )
+            intent_llm = llm.bind(temperature=0) if hasattr(llm, "bind") else llm
+            raw = intent_llm.invoke(
+                [
+                    SystemMessage(content=intent_prompt),
+                    HumanMessage(content=last_human_text),
+                ]
+            )
+            content = getattr(raw, "content", raw)
+            if not isinstance(content, str):
+                content = str(content)
+
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                m = re.search(r"\{.*\}", content, flags=re.DOTALL)
+                parsed = json.loads(m.group(0)) if m else {}
+
+            if isinstance(parsed, dict):
+                for k in allowed_keys:
+                    if k in parsed:
+                        llm_intents[k] = bool(parsed.get(k))
+        except Exception:
+            llm_intents = {}
+
+        if llm_intents.get("load_only"):
+            llm_intents["load"] = True
+        if llm_intents.get("mlflow_log") or llm_intents.get("mlflow_tools"):
+            llm_intents["mlflow"] = True
+        if llm_intents.get("workflow"):
+            llm_intents["clean"] = True
+            llm_intents["eda"] = True
+            llm_intents["viz"] = True
+            llm_intents["model"] = True
+            llm_intents["evaluate"] = True
+
+        return {**heuristic_intents, **llm_intents}
 
     def _get_last_human(msgs: Sequence[BaseMessage]) -> str:
         for m in reversed(msgs or []):
@@ -462,8 +534,15 @@ Examples:
     def supervisor_node(state: SupervisorDSState):
         print("---SUPERVISOR---")
         clean_msgs = _clean_messages(state.get("messages", []))
-        intents = _parse_intent(clean_msgs)
+        # Ensure every message has an ID so per-request step tracking is reliable even
+        # when upstream callers don't set message IDs (e.g., Streamlit chat history).
+        try:
+            clean_msgs = add_messages([], clean_msgs)  # type: ignore[arg-type]
+        except Exception:
+            pass
         cfg = (state.get("artifacts") or {}).get("config") or {}
+        use_llm_intent_parser = bool(cfg.get("use_llm_intent_parser")) if isinstance(cfg, dict) else False
+        intents = _parse_intent(clean_msgs, use_llm=use_llm_intent_parser)
         proactive_mode = bool(cfg.get("proactive_workflow_mode")) if isinstance(cfg, dict) else False
 
         # Track per-user-request steps (within the current user message) to support
@@ -1876,7 +1955,7 @@ Examples:
         )
         summary_text = _format_result_with_llm(
             "feature_engineering_agent",
-            response.get("feature_engineered_data"),
+            response.get("data_engineered"),
             _get_last_human(before_msgs),
             extra_text="Feature engineering completed.",
         )
@@ -1884,7 +1963,7 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="feature_engineering_agent")
             )
-        feature_data = response.get("feature_engineered_data")
+        feature_data = response.get("data_engineered")
         downstream_resets = (
             {"model_info": None, "mlflow_artifacts": None}
             if feature_data is not None
@@ -1893,7 +1972,8 @@ Examples:
         return {
             **merged,
             "feature_data": feature_data,
-            "active_data_key": "feature_data" if feature_data is not None else state.get("active_data_key"),
+            # Keep the current active dataset for EDA/viz; modeling nodes explicitly prefer feature_data.
+            "active_data_key": state.get("active_data_key"),
             "artifacts": {
                 **state.get("artifacts", {}),
                 "feature_engineering": response,
@@ -1906,11 +1986,9 @@ Examples:
         print("---H2O ML---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
-        active_df = _ensure_df(
-            _get_active_data(
-                state,
-                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
-            )
+        feature_df = _ensure_df(state.get("feature_data"))
+        active_df = feature_df if not _is_empty_df(feature_df) else _ensure_df(
+            _get_active_data(state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"])
         )
         if _is_empty_df(active_df):
             return {
@@ -1993,11 +2071,9 @@ Examples:
     def node_eval(state: SupervisorDSState):
         print("---MODEL EVALUATION---")
         before_msgs = list(state.get("messages", []) or [])
-        active_df = _ensure_df(
-            _get_active_data(
-                state,
-                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
-            )
+        feature_df = _ensure_df(state.get("feature_data"))
+        active_df = feature_df if not _is_empty_df(feature_df) else _ensure_df(
+            _get_active_data(state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"])
         )
         if _is_empty_df(active_df):
             return {
@@ -2061,11 +2137,9 @@ Examples:
             if not run_id and isinstance(h2o_art.get("model_results"), dict):
                 run_id = h2o_art["model_results"].get("mlflow_run_id")
 
-        active_df = _ensure_df(
-            _get_active_data(
-                state,
-                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
-            )
+        feature_df = _ensure_df(state.get("feature_data"))
+        active_df = feature_df if not _is_empty_df(feature_df) else _ensure_df(
+            _get_active_data(state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"])
         )
         viz_graph = state.get("viz_graph")
         eval_payload = (state.get("artifacts") or {}).get("eval")

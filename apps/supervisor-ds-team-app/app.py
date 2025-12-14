@@ -115,7 +115,7 @@ def get_checkpointer():
 
 
 with st.expander(
-    "I’m a full data science copilot. Load data, wrangle/clean, run EDA, visualize, query SQL, engineer features, and train/evaluate models (H2O/MLflow). Try these on the sample Telco churn data:"
+    "I’m a full data science copilot. Load data, wrangle/clean, run EDA, visualize, engineer features, and train/evaluate models (H2O/MLflow). Try these on the sample Telco churn data:"
 ):
     st.markdown(
         """
@@ -135,13 +135,15 @@ with st.expander(
         #### Visualization
         - Make a violin+box plot of MonthlyCharges by Churn.
         - Plot tenure distribution split by InternetService.
-
+        
         #### SQL (if a DB is connected)
         - Show the tables in the connected database (do not call other agents).
-        - Write SQL to count customers by Contract type and execute it.
+        - Write SQL to count customers by Contract type and execute it.      
 
-        #### Feature engineering / ML
+        #### Feature engineering
         - Create model-ready features for churn (encode categoricals, handle totals/averages).
+        
+        #### Machine Learning / MLflow
         - Train an H2O AutoML classifier on Churn with max runtime 30 seconds and report leaderboard.
         - Log best model to MLflow and show run info.
         """
@@ -193,6 +195,12 @@ with st.sidebar:
         help="When enabled, the supervisor may propose and run a multi-step end-to-end workflow for broad requests (and will ask clarifying questions when needed).",
     )
     st.session_state["proactive_workflow_mode"] = proactive_workflow_mode
+    use_llm_intent_parser = st.checkbox(
+        "LLM intent parsing",
+        value=True,
+        help="When enabled, the supervisor uses a lightweight LLM call to classify user intent for routing. Can improve ambiguous requests, but adds latency/cost.",
+    )
+    st.session_state["use_llm_intent_parser"] = use_llm_intent_parser
     st.markdown("---")
     st.markdown("**Data options**")
     use_sample = st.checkbox("Load sample Telco churn data", value=False)
@@ -340,7 +348,7 @@ def render_history(history: list[BaseMessage]):
         tabs = st.tabs(
             [
                 "AI Reasoning",
-                "Data (raw/clean)",
+                "Data (raw/clean/features)",
                 "Charts",
                 "Reports",
                 "Models/MLflow",
@@ -367,6 +375,7 @@ def render_history(history: list[BaseMessage]):
             raw_df = detail.get("data_raw_df")
             wrangled_df = detail.get("data_wrangled_df")
             cleaned_df = detail.get("data_cleaned_df")
+            feature_df = detail.get("feature_data_df")
             if raw_df is not None:
                 st.markdown("**Raw Preview**")
                 st.dataframe(raw_df)
@@ -376,7 +385,15 @@ def render_history(history: list[BaseMessage]):
             if cleaned_df is not None:
                 st.markdown("**Cleaned Preview**")
                 st.dataframe(cleaned_df)
-            if raw_df is None and wrangled_df is None and cleaned_df is None:
+            if feature_df is not None:
+                st.markdown("**Feature-engineered Preview**")
+                st.dataframe(feature_df)
+            if (
+                raw_df is None
+                and wrangled_df is None
+                and cleaned_df is None
+                and feature_df is None
+            ):
                 st.info("No data frames returned.")
         # Charts
         with tabs[2]:
@@ -537,6 +554,9 @@ if prompt:
                         "proactive_workflow_mode": st.session_state.get(
                             "proactive_workflow_mode", True
                         ),
+                        "use_llm_intent_parser": st.session_state.get(
+                            "use_llm_intent_parser", True
+                        ),
                     }
                 },
                 "data_raw": data_raw_dict,
@@ -685,6 +705,7 @@ if prompt:
             "data_raw_df": _to_df(result.get("data_raw")),
             "data_wrangled_df": _to_df(result.get("data_wrangled")),
             "data_cleaned_df": _to_df(result.get("data_cleaned")),
+            "feature_data_df": _to_df(result.get("feature_data")),
             # Only show artifacts produced during this invocation to avoid stale charts/models.
             "eda_reports": (
                 _extract_eda_reports(artifacts)
@@ -752,7 +773,13 @@ if st.session_state.get("details"):
             # Minimal duplication: render via a small inline function to avoid leaking outer scope.
             detail = details[int(selected)]
             tabs = st.tabs(
-                ["AI Reasoning", "Data (raw/clean)", "Charts", "Reports", "Models/MLflow"]
+                [
+                    "AI Reasoning",
+                    "Data (raw/clean/features)",
+                    "Charts",
+                    "Reports",
+                    "Models/MLflow",
+                ]
             )
             with tabs[0]:
                 reasoning_items = detail.get("reasoning_items", [])
@@ -770,6 +797,7 @@ if st.session_state.get("details"):
                 raw_df = detail.get("data_raw_df")
                 wrangled_df = detail.get("data_wrangled_df")
                 cleaned_df = detail.get("data_cleaned_df")
+                feature_df = detail.get("feature_data_df")
                 if raw_df is not None:
                     st.markdown("**Raw Preview**")
                     st.dataframe(raw_df)
@@ -779,7 +807,15 @@ if st.session_state.get("details"):
                 if cleaned_df is not None:
                     st.markdown("**Cleaned Preview**")
                     st.dataframe(cleaned_df)
-                if raw_df is None and wrangled_df is None and cleaned_df is None:
+                if feature_df is not None:
+                    st.markdown("**Feature-engineered Preview**")
+                    st.dataframe(feature_df)
+                if (
+                    raw_df is None
+                    and wrangled_df is None
+                    and cleaned_df is None
+                    and feature_df is None
+                ):
                     st.info("No data frames returned.")
             with tabs[2]:
                 graph_json = detail.get("plotly_graph")
@@ -796,7 +832,9 @@ if st.session_state.get("details"):
                 else:
                     st.info("No charts returned.")
             with tabs[3]:
-                reports = detail.get("eda_reports") if isinstance(detail, dict) else None
+                reports = (
+                    detail.get("eda_reports") if isinstance(detail, dict) else None
+                )
                 sweetviz_file = (
                     reports.get("sweetviz_report_file")
                     if isinstance(reports, dict)
