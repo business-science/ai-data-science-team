@@ -3359,10 +3359,7 @@ Examples:
 
                             def _run_has_model_artifact(rid: str) -> bool:
                                 try:
-                                    for item in client.list_artifacts(rid, path=""):
-                                        if getattr(item, "path", None) == "model":
-                                            return True
-                                    return False
+                                    return bool(client.list_artifacts(rid, path="model"))
                                 except Exception:
                                     return False
 

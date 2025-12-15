@@ -991,6 +991,58 @@ def make_h2o_ml_agent(
                             mlflow.set_tracking_uri(mlflow_tracking_uri)
                         mlflow.set_experiment(mlflow_experiment_name or "H2O AutoML")
 
+                        def _sanitize_metric_name(name: str) -> str:
+                            n = str(name or "").strip()
+                            n = n.replace(" ", "_").replace("/", "_").replace("-", "_")
+                            return n
+
+                        def _extract_metrics_from_leaderboard(lb_dict: dict) -> dict:
+                            if not lb_dict:
+                                return {}
+                            # Supported shapes:
+                            # 1) MLflow table json: {"columns": [...], "data": [[...], ...]}
+                            # 2) pandas.DataFrame.to_dict() outputs (dict-of-dicts or dict-of-lists)
+                            # 3) list-of-records
+                            cols = lb_dict.get("columns") if isinstance(lb_dict, dict) else None
+                            rows = lb_dict.get("data") if isinstance(lb_dict, dict) else None
+                            if isinstance(cols, list) and isinstance(rows, list) and rows:
+                                first = rows[0]
+                                if isinstance(first, list) and len(first) == len(cols):
+                                    out = {}
+                                    for c, v in zip(cols, first):
+                                        if c in (None, "", "model_id"):
+                                            continue
+                                        try:
+                                            fv = float(v)
+                                        except Exception:
+                                            continue
+                                        if fv != fv:  # NaN
+                                            continue
+                                        out[_sanitize_metric_name(str(c))] = fv
+                                    return out
+
+                            try:
+                                import pandas as pd
+
+                                df = pd.DataFrame(lb_dict)
+                                if df is None or df.empty:
+                                    return {}
+                                row = df.iloc[0].to_dict()
+                                out = {}
+                                for c, v in row.items():
+                                    if c in (None, "", "model_id"):
+                                        continue
+                                    try:
+                                        fv = float(v)
+                                    except Exception:
+                                        continue
+                                    if fv != fv:  # NaN
+                                        continue
+                                    out[_sanitize_metric_name(str(c))] = fv
+                                return out
+                            except Exception:
+                                return {}
+
                         # Only start our own run if the generated code didn't already do it.
                         run_ctx = (
                             mlflow.start_run(run_id=str(existing_run_id))
@@ -1017,6 +1069,7 @@ def make_h2o_ml_agent(
                                         "target_variable": target_col_final or target_col or "",
                                         "function_name": state.get("h2o_train_function_name") or "",
                                         "max_runtime_secs": 30,
+                                        "best_model_id": best_id or "",
                                     }
                                 )
                             except Exception:
@@ -1032,6 +1085,12 @@ def make_h2o_ml_agent(
                                         mlflow.log_dict(lb, "leaderboard.json")
                                 except Exception:
                                     pass
+                            try:
+                                metrics = _extract_metrics_from_leaderboard(lb)
+                                if metrics:
+                                    mlflow.log_metrics(metrics)
+                            except Exception:
+                                pass
 
                             # Log leader model (H2O)
                             try:
@@ -1040,7 +1099,10 @@ def make_h2o_ml_agent(
                                 h2o.init()
                                 if isinstance(best_id, str) and best_id.strip():
                                     leader_model = h2o.get_model(best_id.strip())
-                                    mlflow.h2o.log_model(leader_model, artifact_path="model")
+                                    try:
+                                        mlflow.h2o.log_model(leader_model, name="model")
+                                    except TypeError:
+                                        mlflow.h2o.log_model(leader_model, artifact_path="model")
                             except Exception:
                                 pass
                     except Exception:

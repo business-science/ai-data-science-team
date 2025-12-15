@@ -459,19 +459,20 @@ def mlflow_search_runs(
         except Exception:
                 duration_s = None
 
+        rid = getattr(run.info, "run_id", None)
         metrics = dict(getattr(run.data, "metrics", {}) or {})
         params = dict(getattr(run.data, "params", {}) or {})
         tags = dict(getattr(run.data, "tags", {}) or {})
         has_model = False
         try:
-            has_model = any(
-                k in tags for k in ("mlflow.log-model.history", "mlflow.loggedModels")
-            ) or ("model" in (tags.get("mlflow.loggedArtifacts") or ""))
+            if isinstance(rid, str) and rid:
+                model_items = client.list_artifacts(rid, path="model")
+                has_model = bool(model_items)
         except Exception:
             has_model = False
 
         run_record = {
-            "run_id": getattr(run.info, "run_id", None),
+            "run_id": rid,
             "run_name": getattr(run.info, "run_name", None),
             "status": getattr(run.info, "status", None),
             "experiment_id": str(getattr(run.info, "experiment_id", "") or ""),
@@ -480,7 +481,7 @@ def mlflow_search_runs(
             "end_time": _ms_to_iso(end_ms),
             "duration_seconds": duration_s,
             "has_model": has_model,
-            "model_uri": f"runs:/{getattr(run.info, 'run_id', '')}/model" if has_model else None,
+            "model_uri": f"runs:/{rid}/model" if (has_model and isinstance(rid, str) and rid) else None,
             "params_preview": _kv_preview(params),
             "metrics_preview": _kv_preview(metrics),
         }
