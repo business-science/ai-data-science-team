@@ -166,6 +166,7 @@ def make_supervisor_ds_team(
 
     subagent_names = [
         "Data_Loader_Tools_Agent",
+        "Data_Merge_Agent",
         "Data_Wrangling_Agent",
         "Data_Cleaning_Agent",
         "EDA_Tools_Agent",
@@ -193,6 +194,7 @@ You are a supervisor managing a data science team with these workers: {subagent_
 
 Each worker has specific tools/capabilities (names are a hint for routing):
 - Data_Loader_Tools_Agent: Good for inspecting file folder system, finding files, searching and loading data. Has the following tools: load_file, load_directory, search_files_by_pattern, list_directory_contents/recursive.
+- Data_Merge_Agent: Deterministically merges multiple already-loaded datasets (join/concat) based on user/UX configuration. Use for combining datasets into a single modeling table. Must have 2+ datasets loaded/selected.
 - Data_Wrangling_Agent: Can work with one or more datasets, performing operations such as joining/merging multiple datasets, reshaping, aggregating, encoding, creating computed features, and ensuring consistent data types. Capabilities: recommend_wrangling_steps, create_data_wrangling_code, execute_data_wrangling_code (transform/rename/format). Must have data loaded/ready.
 - Data_Cleaning_Agent: Strong in cleaning data, removing anomalies, and fixing data issues. Capabilities: recommend_cleaning_steps, create_data_cleaner_code, execute_data_cleaner_code (impute/clean). Must have data loaded/ready.
 - EDA_Tools_Agent: Strong in exploring data, analysing data, and providing information about the data. Has several powerful tools: describe_dataset, explain_data, visualize_missing, correlation_funnel, sweetviz (use for previews/head/describe). Must have data loaded/ready.
@@ -210,6 +212,7 @@ Routing guidance (explicit intent -> worker):
 - Load/import/read file (e.g., "load data/churn_data.csv"): Data_Loader_Tools_Agent ONCE, then FINISH unless more is requested.
 - Show first N rows / preview / head / describe: EDA_Tools_Agent then FINISH.
 - Plot/chart/visual/graph: Data_Visualization_Agent.
+- Merge/join/concat multiple datasets into one: Data_Merge_Agent.
 - Clean/impute/wrangle/standardize: Data_Wrangling_Agent or Data_Cleaning_Agent.
 - SQL/database/query/tables: SQL_Database_Agent.
 - Feature creation/encoding: Feature_Engineering_Agent.
@@ -344,6 +347,16 @@ Examples:
         wants_viz = has("plot", "chart", "visual", "graph")
         wants_sql = has("sql", "query", "database", "table")
         wants_clean = has("clean", "impute", "missing", "null", "na", "outlier")
+        merge_signal = has("merge", "concat", "append", "union", "combine")
+        join_signal = has("join")
+        merge_context = (
+            has("with", "between", "together", "into", "using")
+            or (" on " in last_human)
+            or has("dataset", "datasets", "dataframe", "table", "tables")
+            or has("left join", "right join", "inner join", "outer join")
+            or has(".csv", ".parquet", ".xlsx", ".xls", ".json")
+        )
+        wants_merge = bool(merge_signal or (join_signal and merge_context))
         # NOTE: "standardize" is ambiguous (scaling vs column-name normalization). Treat it as
         # wrangling only when it clearly refers to column naming/structure.
         standardize_column_names = has("standardize") and has(
@@ -358,8 +371,6 @@ Examples:
             "wrangle",
             "transform",
             "reshape",
-            "merge",
-            "join",
             "pivot",
             "melt",
             "rename",
@@ -507,6 +518,7 @@ Examples:
                 wants_preview,
                 wants_viz,
                 wants_sql,
+                wants_merge,
                 wants_clean,
                 wants_wrangling,
                 wants_eda,
@@ -518,6 +530,7 @@ Examples:
         heuristic_intents: dict[str, bool] = {
             "list_files": wants_list_files,
             "preview": wants_preview,
+            "merge": wants_merge,
             "viz": wants_viz,
             "sql": wants_sql,
             "clean": wants_clean,
@@ -549,6 +562,7 @@ Examples:
                 f"{', '.join(allowed_keys)}\n\n"
                 "Guidelines:\n"
                 "- Set `viz` when the user asks to plot/chart/visualize.\n"
+                "- Set `merge` when the user asks to merge/join/concat multiple datasets.\n"
                 "- Sweetviz/D-Tale requests are EDA reports: set `eda` true and keep `viz` false unless an additional plot is requested.\n"
                 "- Set `model` ONLY for ML modeling (train/AutoML/predict), not product/bike 'model'.\n"
                 "- Set `load_only` only when the user only wants data loaded (no preview/eda/viz/etc).\n"
@@ -618,8 +632,6 @@ Examples:
             "wrangle",
             "transform",
             "reshape",
-            "merge",
-            "join",
             "pivot",
             "melt",
             "rename",
@@ -629,6 +641,8 @@ Examples:
             llm_intents["wrangle"] = False
         if bool(feature_action) and not explicit_cleaning:
             llm_intents["clean"] = False
+        if llm_intents.get("preview") and not llm_intents.get("workflow"):
+            llm_intents["merge"] = False
 
         return {**heuristic_intents, **llm_intents}
 
@@ -843,6 +857,8 @@ Examples:
                     handled_steps["load"] = True
                 if _loader_listed_directory(loader_art):
                     handled_steps["list_files"] = True
+            elif last_worker == "Data_Merge_Agent" and (state.get("artifacts") or {}).get("merge") is not None:
+                handled_steps["merge"] = True
             elif last_worker == "SQL_Database_Agent" and state.get("data_sql") is not None:
                 handled_steps["sql"] = True
             elif last_worker == "Data_Wrangling_Agent" and state.get("data_wrangled") is not None:
@@ -867,6 +883,7 @@ Examples:
         step_to_worker = {
             "list_files": "Data_Loader_Tools_Agent",
             "load": "Data_Loader_Tools_Agent",
+            "merge": "Data_Merge_Agent",
             "sql": "SQL_Database_Agent",
             "wrangle": "Data_Wrangling_Agent",
             "clean": "Data_Cleaning_Agent",
@@ -885,6 +902,7 @@ Examples:
             for k in (
                 "list_files",
                 "load",
+                "merge",
                 "sql",
                 "wrangle",
                 "clean",
@@ -985,6 +1003,7 @@ Examples:
                 intents.get("list_files"),
                 intents.get("load_only"),
                 intents.get("load"),
+                intents.get("merge"),
                 intents.get("sql"),
                 intents.get("wrangle"),
                 intents.get("clean"),
@@ -1024,6 +1043,7 @@ Examples:
                 # If the user requested data-dependent work but no data is present, attempt a load first.
                 needs_data = any(
                     [
+                        intents.get("merge"),
                         intents.get("wrangle"),
                         intents.get("clean"),
                         intents.get("eda"),
@@ -1040,6 +1060,8 @@ Examples:
                     steps.insert(0, "load")
 
                 # Transformations
+                if intents.get("merge"):
+                    steps.append("merge")
                 if intents.get("wrangle"):
                     steps.append("wrangle")
                 if intents.get("clean"):
@@ -1099,7 +1121,7 @@ Examples:
                         }
 
                     # Guard data-dependent steps.
-                    if step in ("wrangle", "clean", "eda", "viz", "feature", "model", "evaluate") and not data_ready:
+                    if step in ("merge", "wrangle", "clean", "eda", "viz", "feature", "model", "evaluate") and not data_ready:
                         print(f"  step '{step}' requires data but none is ready -> Data_Loader_Tools_Agent")
                         attempted_steps["load"] = True
                         return {
@@ -1569,6 +1591,7 @@ Examples:
                     "created_by": "bootstrap",
                     "provenance": provenance,
                     "parent_id": None,
+                    "parent_ids": [],
                 }
 
             _add("raw", "data_raw")
@@ -1619,6 +1642,7 @@ Examples:
         created_by: str,
         provenance: dict[str, Any],
         parent_id: str | None = None,
+        parent_ids: Sequence[str] | None = None,
         make_active: bool = True,
     ) -> tuple[dict[str, Any], str | None, str]:
         import time
@@ -1629,6 +1653,13 @@ Examples:
         did = f"{stage}_{uuid.uuid4().hex[:8]}"
         shape, cols, schema, schema_hash, fingerprint = _dataset_meta(data)
         ts = time.time()
+        normalized_parents: list[str] = []
+        if isinstance(parent_ids, (list, tuple)):
+            normalized_parents = [str(p) for p in parent_ids if isinstance(p, str) and p]
+        if parent_id and parent_id not in normalized_parents:
+            normalized_parents = [parent_id, *normalized_parents]
+        normalized_parents = [p for p in normalized_parents if p]
+        parent_id = normalized_parents[0] if normalized_parents else parent_id
         datasets = {
             **datasets,
             did: {
@@ -1646,6 +1677,7 @@ Examples:
                 "created_by": created_by,
                 "provenance": provenance or {},
                 "parent_id": parent_id,
+                "parent_ids": normalized_parents,
             },
         }
         datasets = _prune_datasets(datasets)
@@ -2164,6 +2196,288 @@ Examples:
                 "data_loader": loader_artifacts,
             },
             "last_worker": "Data_Loader_Tools_Agent",
+            **downstream_resets,
+        }
+
+    def node_merge(state: SupervisorDSState):
+        print("---DATA MERGE---")
+        before_msgs = list(state.get("messages", []) or [])
+        last_human = _get_last_human(before_msgs)
+        datasets, active_dataset_id = _ensure_dataset_registry(state)
+        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+
+        cfg = (state.get("artifacts") or {}).get("config") or {}
+        merge_cfg = cfg.get("merge") if isinstance(cfg, dict) else None
+        merge_cfg = merge_cfg if isinstance(merge_cfg, dict) else {}
+
+        def _parse_list(val: Any) -> list[str]:
+            if isinstance(val, list):
+                return [str(x).strip() for x in val if str(x).strip()]
+            if isinstance(val, tuple):
+                return [str(x).strip() for x in val if str(x).strip()]
+            if isinstance(val, str):
+                parts = [p.strip() for p in val.split(",")]
+                return [p for p in parts if p]
+            return []
+
+        def _dedupe_keep_order(items: list[str]) -> list[str]:
+            out: list[str] = []
+            seen: set[str] = set()
+            for x in items:
+                if x in seen:
+                    continue
+                seen.add(x)
+                out.append(x)
+            return out
+
+        def _resolve_dataset_ids_from_text(text: str) -> list[str]:
+            if not text or not isinstance(datasets, dict):
+                return []
+            t = text.lower()
+            matches: list[str] = []
+            for did, entry in datasets.items():
+                if not isinstance(entry, dict):
+                    continue
+                label = str(entry.get("label") or "").lower()
+                prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
+                original = str(prov.get("original_name") or "").lower()
+                source = str(prov.get("source") or "").lower()
+                if did.lower() in t:
+                    matches.append(did)
+                    continue
+                if label and label in t:
+                    matches.append(did)
+                    continue
+                if original and original in t:
+                    matches.append(did)
+                    continue
+                if source and source in t:
+                    matches.append(did)
+                    continue
+            return matches
+
+        selected_ids = _parse_list(merge_cfg.get("dataset_ids"))
+        selected_ids = [d for d in selected_ids if d in datasets]
+
+        # Fallback: attempt to infer datasets from the user request
+        if len(selected_ids) < 2:
+            inferred = _resolve_dataset_ids_from_text(last_human)
+            selected_ids = [*selected_ids, *inferred]
+
+        # Fallback: if only one is identified, use the active dataset plus the newest other dataset
+        if len(selected_ids) < 2 and isinstance(active_dataset_id, str) and active_dataset_id in datasets:
+            selected_ids = [active_dataset_id]
+            ordered = sorted(
+                datasets.items(),
+                key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                if isinstance(kv[1], dict)
+                else 0.0,
+                reverse=True,
+            )
+            for did, _e in ordered:
+                if did != active_dataset_id:
+                    selected_ids.append(did)
+                    break
+
+        selected_ids = _dedupe_keep_order([d for d in selected_ids if d in datasets])
+
+        if len(selected_ids) < 2:
+            available = []
+            try:
+                ordered = sorted(
+                    datasets.items(),
+                    key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                    if isinstance(kv[1], dict)
+                    else 0.0,
+                    reverse=True,
+                )
+                for did, e in ordered[:10]:
+                    if not isinstance(e, dict):
+                        continue
+                    available.append(f"- `{did}` ({e.get('stage')}:{e.get('label')})")
+            except Exception:
+                pass
+            msg = (
+                "To merge datasets, select 2+ dataset IDs in the sidebar under **Merge options**, "
+                "or mention them in your request.\n\n"
+                + ("Available datasets:\n" + "\n".join(available) if available else "")
+            ).strip()
+            return {
+                "messages": [AIMessage(content=msg, name="data_merge_agent")],
+                "last_worker": "Data_Merge_Agent",
+            }
+
+        dfs = []
+        for did in selected_ids:
+            entry = datasets.get(did)
+            df = _ensure_df(entry.get("data") if isinstance(entry, dict) else None)
+            if _is_empty_df(df):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=f"Dataset `{did}` is empty/unavailable; load it again before merging.",
+                            name="data_merge_agent",
+                        )
+                    ],
+                    "last_worker": "Data_Merge_Agent",
+                }
+            dfs.append(df)
+
+        op = str(merge_cfg.get("operation") or "join").strip().lower()
+        if any(w in last_human.lower() for w in ("concat", "append", "union")):
+            op = "concat"
+        if op not in ("join", "concat"):
+            op = "join"
+
+        import pandas as pd
+
+        merge_code_lines: list[str] = ["# Auto-generated merge step"]
+        merged_df = None
+        merge_meta: dict[str, Any] = {"operation": op, "dataset_ids": selected_ids}
+
+        if op == "concat":
+            axis = merge_cfg.get("axis", 0)
+            try:
+                axis = int(axis)
+            except Exception:
+                axis = 0
+            ignore_index = bool(merge_cfg.get("ignore_index", True))
+            merged_df = pd.concat(dfs, axis=axis, ignore_index=(ignore_index if axis == 0 else False))
+            merge_meta.update({"axis": axis, "ignore_index": ignore_index})
+            merge_code_lines.append(
+                f"df = pd.concat([{', '.join([f'df_{i}' for i in range(len(dfs))])}], axis={axis}, ignore_index={ignore_index if axis == 0 else False})"
+            )
+        else:
+            how = str(merge_cfg.get("how") or "inner").strip().lower()
+            if how not in ("inner", "left", "right", "outer"):
+                how = "inner"
+            on_cols = _parse_list(merge_cfg.get("on"))
+            left_on = _parse_list(merge_cfg.get("left_on"))
+            right_on = _parse_list(merge_cfg.get("right_on"))
+            suffixes_raw = str(merge_cfg.get("suffixes") or "_x,_y")
+            suffixes_parts = [p.strip() for p in suffixes_raw.split(",") if p.strip()]
+            suffixes = (
+                (suffixes_parts[0], suffixes_parts[1])
+                if len(suffixes_parts) >= 2
+                else ("_x", "_y")
+            )
+
+            # Infer join keys when not provided.
+            if not on_cols and not (left_on and right_on):
+                common = set(dfs[0].columns)
+                for df in dfs[1:]:
+                    common = common.intersection(set(df.columns))
+                if common:
+                    preferred = sorted(
+                        list(common),
+                        key=lambda c: (0 if "id" in str(c).lower() else 1, str(c).lower()),
+                    )
+                    on_cols = [preferred[0]]
+
+            if not on_cols and not (left_on and right_on):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "I couldn't infer join keys for the selected datasets. "
+                                "Specify join keys in the sidebar (Merge options → Join keys), "
+                                "or ask like: `join on customerID`."
+                            ),
+                            name="data_merge_agent",
+                        )
+                    ],
+                    "last_worker": "Data_Merge_Agent",
+                }
+
+            merged_df = dfs[0]
+            merge_code_lines.append("df = df_0")
+            for i in range(1, len(dfs)):
+                if left_on and right_on:
+                    merged_df = merged_df.merge(
+                        dfs[i],
+                        how=how,
+                        left_on=left_on,
+                        right_on=right_on,
+                        suffixes=suffixes,
+                    )
+                    merge_code_lines.append(
+                        f"df = df.merge(df_{i}, how={how!r}, left_on={left_on!r}, right_on={right_on!r}, suffixes={suffixes!r})"
+                    )
+                else:
+                    merged_df = merged_df.merge(
+                        dfs[i],
+                        how=how,
+                        on=on_cols,
+                        suffixes=suffixes,
+                    )
+                    merge_code_lines.append(
+                        f"df = df.merge(df_{i}, how={how!r}, on={on_cols!r}, suffixes={suffixes!r})"
+                    )
+
+            merge_meta.update(
+                {
+                    "how": how,
+                    "on": on_cols,
+                    "left_on": left_on,
+                    "right_on": right_on,
+                    "suffixes": suffixes,
+                }
+            )
+
+        merge_code = "\n".join(merge_code_lines).strip() + "\n"
+        merge_code_hash = _sha256_text(merge_code)
+
+        datasets, active_dataset_id, merged_id = _register_dataset(
+            state_with_datasets,
+            data=merged_df,
+            stage="wrangled",
+            label="data_merged",
+            created_by="Data_Merge_Agent",
+            provenance={
+                "source_type": "agent",
+                "user_request": last_human,
+                "transform": {
+                    "kind": "python_merge",
+                    "merge": merge_meta,
+                    "merge_code": _truncate_text(merge_code, 12000),
+                    "code_sha256": merge_code_hash,
+                },
+            },
+            parent_ids=selected_ids,
+            make_active=True,
+        )
+
+        msg_lines = [
+            f"Merged {len(selected_ids)} datasets ({op}).",
+            f"Result shape: {getattr(merged_df, 'shape', None)}.",
+            f"Active dataset id: `{merged_id}`.",
+        ]
+        merged = {"messages": [AIMessage(content=" ".join([m for m in msg_lines if m]), name="data_merge_agent")]}
+        merged["messages"] = _tag_messages(merged.get("messages"), "data_merge_agent")
+        downstream_resets = {
+            "data_cleaned": None,
+            "eda_artifacts": None,
+            "viz_graph": None,
+            "feature_data": None,
+            "model_info": None,
+            "mlflow_artifacts": None,
+        }
+        return {
+            **merged,
+            "data_wrangled": merged_df,
+            "active_data_key": "data_wrangled",
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+            "artifacts": {
+                **state.get("artifacts", {}),
+                "merge": {
+                    "dataset_ids": selected_ids,
+                    "operation": op,
+                    "active_dataset_id": merged_id,
+                    "merge_config": merge_cfg,
+                },
+            },
+            "last_worker": "Data_Merge_Agent",
             **downstream_resets,
         }
 
@@ -3004,6 +3318,7 @@ Examples:
 
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("Data_Loader_Tools_Agent", node_loader)
+    workflow.add_node("Data_Merge_Agent", node_merge)
     workflow.add_node("Data_Wrangling_Agent", node_wrangling)
     workflow.add_node("Data_Cleaning_Agent", node_cleaning)
     workflow.add_node("EDA_Tools_Agent", node_eda)

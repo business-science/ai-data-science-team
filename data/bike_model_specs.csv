@@ -1,0 +1,10 @@
+bike_model,bike_category,frame_material,brake_type,wheel_size,weight_kg,msrp_usd,is_electric
+Commuter Swift,Commuter,Aluminum,Disc,700c,11.8,999,0
+Urban Rider,Urban,Aluminum,Disc,700c,12.6,799,0
+City Cruiser,City,Steel,Rim,700c,13.9,699,0
+Mountain Trail Pro,Mountain,Aluminum,Disc,29,14.8,1899,0
+Gravel Explorer,Gravel,Carbon,Disc,700c,10.2,2499,0
+Roadster GT,Road,Carbon,Disc,700c,8.7,2199,0
+Speedster Elite,Racing,Carbon,Disc,700c,7.9,3299,0
+Carbon Storm,Racing,Carbon,Disc,700c,7.4,4999,0
+Titanium Falcon,Endurance,Titanium,Disc,700c,8.9,3999,0

@@ -77,6 +77,7 @@ class WorkflowPlannerAgent(BaseAgent):
             "You can plan ONLY these executable steps (in order):\n"
             "- list_files (list files in a directory; do not load file contents)\n"
             "- load (load file from disk)\n"
+            "- merge (merge/join/concat multiple datasets)\n"
             "- sql (run a SQL query)\n"
             "- wrangle (reshape/transform)\n"
             "- clean (impute/fix types/outliers)\n"
@@ -131,6 +132,7 @@ class WorkflowPlannerAgent(BaseAgent):
         allowed = {
             "list_files",
             "load",
+            "merge",
             "sql",
             "wrangle",
             "clean",

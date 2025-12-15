@@ -368,8 +368,74 @@ with st.sidebar:
             help="Overrides which dataset is considered active for downstream steps (EDA/viz/wrangle/clean).",
             key="active_dataset_id_override",
         )
+
+        st.markdown("**Merge options**")
+        merge_default_ids = st.session_state.get("merge_dataset_ids") or []
+        merge_ids = st.multiselect(
+            "Datasets to merge/join",
+            options=[did for did, _e in ordered],
+            default=[d for d in merge_default_ids if d in datasets],
+            format_func=_fmt_dataset,
+            help="Select 2+ datasets to merge. Then ask in chat to merge (or describe how to join).",
+            key="merge_dataset_ids",
+        )
+        merge_operation = st.selectbox(
+            "Merge operation",
+            options=["join", "concat"],
+            index=0,
+            help="Use join for relational merges (SQL-like). Use concat to stack or combine columns by index.",
+            key="merge_operation",
+        )
+        if merge_operation == "join":
+            st.selectbox(
+                "Join type",
+                options=["inner", "left", "right", "outer"],
+                index=0,
+                help="How to join datasets when using 'join'.",
+                key="merge_how",
+            )
+            st.text_input(
+                "Join keys (optional, comma-separated)",
+                value=st.session_state.get("merge_on", ""),
+                help="Example: customerID. If blank, the team will try to infer common keys or ask.",
+                key="merge_on",
+            )
+            with st.expander("Advanced join options", expanded=False):
+                st.text_input(
+                    "Left keys (optional, comma-separated)",
+                    value=st.session_state.get("merge_left_on", ""),
+                    help="Use when left/right key names differ.",
+                    key="merge_left_on",
+                )
+                st.text_input(
+                    "Right keys (optional, comma-separated)",
+                    value=st.session_state.get("merge_right_on", ""),
+                    help="Use when left/right key names differ.",
+                    key="merge_right_on",
+                )
+                st.text_input(
+                    "Suffixes (optional, comma-separated)",
+                    value=st.session_state.get("merge_suffixes", "_x,_y"),
+                    help="Example: _left,_right",
+                    key="merge_suffixes",
+                )
+        else:
+            st.selectbox(
+                "Concat axis",
+                options=[0, 1],
+                index=0,
+                help="axis=0 stacks rows; axis=1 concatenates columns by index.",
+                key="merge_axis",
+            )
+            st.checkbox(
+                "Ignore index (axis=0)",
+                value=True,
+                help="When stacking rows, reset the index for a clean result.",
+                key="merge_ignore_index",
+            )
     else:
         st.session_state["active_dataset_id_override"] = ""
+        st.session_state["merge_dataset_ids"] = []
         st.selectbox(
             "Active dataset (override)",
             options=[""],
@@ -662,11 +728,16 @@ def render_history(history: list[BaseMessage]):
                 else:
                     pipe = pipelines.get(target_key) or pipe
             if isinstance(pipe, dict) and pipe.get("lineage"):
+                inputs = pipe.get("inputs") or []
+                inputs_txt = ""
+                if isinstance(inputs, list) and inputs:
+                    inputs_txt = f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
                 st.markdown(
                     f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
                     f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                     f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                    f"{inputs_txt}"
                 )
                 if pipe.get("persisted_dir"):
                     st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
@@ -908,6 +979,17 @@ if prompt:
                     "use_llm_intent_parser": st.session_state.get(
                         "use_llm_intent_parser", True
                     ),
+                    "merge": {
+                        "dataset_ids": st.session_state.get("merge_dataset_ids") or [],
+                        "operation": st.session_state.get("merge_operation") or "join",
+                        "how": st.session_state.get("merge_how") or "inner",
+                        "on": st.session_state.get("merge_on") or "",
+                        "left_on": st.session_state.get("merge_left_on") or "",
+                        "right_on": st.session_state.get("merge_right_on") or "",
+                        "suffixes": st.session_state.get("merge_suffixes") or "_x,_y",
+                        "axis": st.session_state.get("merge_axis", 0),
+                        "ignore_index": bool(st.session_state.get("merge_ignore_index", True)),
+                    },
                 }
             },
             "data_raw": data_raw_dict,
@@ -1366,11 +1448,16 @@ if st.session_state.get("details"):
                     else:
                         pipe = pipelines.get(target_key) or pipe
                 if isinstance(pipe, dict) and pipe.get("lineage"):
+                    inputs = pipe.get("inputs") or []
+                    inputs_txt = ""
+                    if isinstance(inputs, list) and inputs:
+                        inputs_txt = f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
                     st.markdown(
                         f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
                         f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                         f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
                         f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                        f"{inputs_txt}"
                     )
                     if pipe.get("persisted_dir"):
                         st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
