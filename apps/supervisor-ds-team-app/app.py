@@ -7,6 +7,7 @@ Command:
 
 from __future__ import annotations
 
+import re
 import uuid
 import os
 import json
@@ -46,6 +47,9 @@ TITLE = "Supervisor-led Data Science Team"
 st.title(TITLE)
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
+DEFAULT_SQL_URL = "sqlite:///:memory:"
+SQL_URL_INPUT_KEY = "sql_url_input"
+SQL_URL_SYNC_FLAG = "_sync_sql_url_input"
 
 
 def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -60,6 +64,217 @@ def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
             continue
         cleaned.append(m)
     return cleaned
+
+
+def _redact_sqlalchemy_url(url: str) -> str:
+    """
+    Render a SQLAlchemy URL while hiding any password component.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    try:
+        parsed = sql.engine.make_url(url.strip())
+        return parsed.render_as_string(hide_password=True)
+    except Exception:
+        return url.strip()
+
+
+def _extract_db_target_from_prompt(prompt: str) -> tuple[str | None, tuple[int, int] | None]:
+    """
+    Extract a DB target (SQLAlchemy URL or sqlite file path) from a natural-language prompt.
+    Returns (target, (start, end)) where span refers to the target substring in prompt.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None, None
+
+    # Quoted targets after connect/use/switch (allows spaces)
+    m = re.search(
+        r"(?is)\b(?:connect|switch|use)\b[^\n]*?(?:\bto\b\s*)?(?P<q>['\"`])(?P<target>.+?)(?P=q)",
+        prompt,
+    )
+    if m:
+        return (m.group("target") or "").strip(), m.span("target")
+
+    # SQLAlchemy URLs (no spaces)
+    m = re.search(
+        r"(?is)\b(?P<target>(?:sqlite|postgresql|mysql|mssql|oracle|duckdb|snowflake)(?:\\+\\w+)?://[^\\s'\"`]+)",
+        prompt,
+    )
+    if m:
+        return (m.group("target") or "").strip(), m.span("target")
+
+    # SQLite file path mention (no spaces unless quoted above)
+    m = re.search(
+        r"(?is)\b(?P<target>(?:[a-zA-Z]:)?[\\w./~\\\\:-]+\\.(?:db|sqlite|sqlite3))\b",
+        prompt,
+    )
+    if m:
+        return (m.group("target") or "").strip(), m.span("target")
+
+    return None, None
+
+
+def _resolve_existing_sqlite_path(target: str, *, cwd: str) -> str | None:
+    """
+    Resolve a sqlite file target to an existing file path (best effort).
+    Does not create new files.
+    """
+    if not isinstance(target, str) or not target.strip():
+        return None
+    raw = target.strip().strip("'\"`")
+    raw = os.path.expandvars(os.path.expanduser(raw))
+    if os.path.isabs(raw):
+        return os.path.abspath(raw) if os.path.exists(raw) else None
+
+    # Relative path as-given
+    rel = os.path.abspath(os.path.join(cwd, raw))
+    if os.path.exists(rel):
+        return rel
+
+    # Basename search in common dirs
+    base = os.path.basename(raw)
+    if base == raw:
+        for d in (cwd, os.path.join(cwd, "data"), os.path.join(cwd, "temp")):
+            cand = os.path.abspath(os.path.join(d, base))
+            if os.path.exists(cand):
+                return cand
+
+    return None
+
+
+def _normalize_db_target_to_sqlalchemy_url(target: str, *, cwd: str) -> tuple[str | None, str | None]:
+    """
+    Convert a DB target (SQLAlchemy URL or sqlite file path) into a SQLAlchemy URL.
+    Returns (sql_url, error).
+    """
+    if not isinstance(target, str) or not target.strip():
+        return None, "No database target found."
+
+    t = target.strip().strip("'\"`")
+
+    # Treat anything that looks like a URL as a SQLAlchemy URL.
+    if "://" in t or t.lower().startswith("sqlite:"):
+        try:
+            parsed = sql.engine.make_url(t)
+        except Exception as e:
+            return None, f"Invalid SQLAlchemy URL: {e}"
+
+        # Avoid accidentally creating new sqlite files for typos.
+        if str(parsed.drivername or "").startswith("sqlite") and parsed.database not in (None, "", ":memory:"):
+            # database may be absolute or relative; interpret relative to cwd
+            db_path = str(parsed.database)
+            if not os.path.isabs(db_path):
+                db_path = os.path.abspath(os.path.join(cwd, db_path))
+            if not os.path.exists(db_path):
+                return None, f"SQLite file not found: {db_path}"
+        return t, None
+
+    # Otherwise assume it's a local sqlite file path.
+    resolved = _resolve_existing_sqlite_path(t, cwd=cwd)
+    if not resolved:
+        return None, f"SQLite file not found: {t}"
+
+    # sqlite:///relative or sqlite:////absolute
+    posix_path = resolved.replace("\\", "/")
+    return f"sqlite:///{posix_path}", None
+
+
+def _parse_db_connect_command(prompt: str) -> dict | None:
+    """
+    Parse DB connect/disconnect intent from the user prompt.
+    Returns a dict with:
+      - action: 'connect'|'disconnect'
+      - sql_url: str (for connect)
+      - display_prompt: str (redacted)
+      - team_prompt: str (with connect clause removed when possible)
+      - message: str (assistant confirmation)
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+
+    p = prompt.strip()
+    low = p.lower()
+
+    # Disconnect/reset
+    if re.search(r"(?i)\b(disconnect|reset|clear)\b.*\b(db|database|sql)\b", p):
+        display_prompt = p
+        message = f"Disconnected database. Reset SQL URL to `{DEFAULT_SQL_URL}`."
+        return {
+            "action": "disconnect",
+            "sql_url": DEFAULT_SQL_URL,
+            "display_prompt": display_prompt,
+            "team_prompt": "",
+            "message": message,
+        }
+
+    # Connect/switch/use with a target
+    if not re.search(r"(?i)\b(connect|switch|use)\b", p):
+        return None
+
+    target, span = _extract_db_target_from_prompt(p)
+    if not target:
+        return None
+
+    sql_url, err = _normalize_db_target_to_sqlalchemy_url(target, cwd=os.getcwd())
+    if err:
+        display_prompt = p
+        return {
+            "action": "connect",
+            "sql_url": None,
+            "display_prompt": display_prompt,
+            "team_prompt": "",
+            "message": f"Could not connect database: {err}",
+            "error": err,
+        }
+
+    redacted_url = _redact_sqlalchemy_url(sql_url or "")
+
+    # Redact secrets in what we store/show for the user message.
+    display_prompt = p
+    if span and redacted_url:
+        try:
+            display_prompt = p[: span[0]] + redacted_url + p[span[1] :]
+        except Exception:
+            display_prompt = p
+
+    # Best-effort: strip the connect clause so the team focuses on the actual task.
+    team_prompt = ""
+    if span:
+        tail_start = span[1]
+        # If the target was quoted, skip the closing quote/backtick.
+        if tail_start < len(p) and p[tail_start] in ("'", '"', "`"):
+            tail_start += 1
+        tail = p[tail_start:].strip()
+        tail = tail.lstrip(" .,:;-\n\t")
+        for kw in ("and", "then", "also"):
+            if tail.lower().startswith(kw + " "):
+                tail = tail[len(kw) + 1 :].lstrip()
+                break
+        team_prompt = tail.strip()
+
+    message = f"Connected database. Set SQL URL to `{redacted_url}`."
+    return {
+        "action": "connect",
+        "sql_url": sql_url,
+        "display_prompt": display_prompt,
+        "team_prompt": team_prompt,
+        "message": message,
+    }
+
+
+def _replace_last_human_message(messages: list[BaseMessage], new_content: str) -> list[BaseMessage]:
+    """
+    Return a shallow-copied messages list with the last HumanMessage content replaced.
+    """
+    if not messages:
+        return []
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if isinstance(m, HumanMessage):
+            out[i] = HumanMessage(content=new_content, id=getattr(m, "id", None))
+            break
+    return out
 
 
 def _apply_streamlit_plot_style(fig):
@@ -473,8 +688,20 @@ with st.sidebar:
     if st.session_state.get("last_pipeline_persist_dir"):
         st.caption(f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`")
     st.markdown("**SQL options**")
-    sql_url = st.text_input("SQLAlchemy URL (optional)", value="sqlite:///:memory:")
-    st.session_state["sql_url"] = sql_url
+    if "sql_url" not in st.session_state:
+        st.session_state["sql_url"] = DEFAULT_SQL_URL
+    if SQL_URL_INPUT_KEY not in st.session_state:
+        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get("sql_url", DEFAULT_SQL_URL)
+    if st.session_state.pop(SQL_URL_SYNC_FLAG, False):
+        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get("sql_url", DEFAULT_SQL_URL)
+
+    sql_url_input = st.text_input(
+        "SQLAlchemy URL (optional)",
+        key=SQL_URL_INPUT_KEY,
+        help="Tip: you can also type in chat `connect to data/northwind.db` or paste a SQLAlchemy URL (e.g., `postgresql://...`).",
+    )
+    sql_url_input = (sql_url_input or "").strip()
+    st.session_state["sql_url"] = sql_url_input or DEFAULT_SQL_URL
 
     st.markdown("**MLflow options**")
     enable_mlflow_logging = st.checkbox("Enable MLflow logging in training", value=True)
@@ -532,10 +759,18 @@ def build_team(
     eda_tools_agent = EDAToolsAgent(llm, log_tool_calls=True)
     data_visualization_agent = DataVisualizationAgent(llm, log=False)
     # SQL connection is optional; default to in-memory sqlite to satisfy constructor.
-    # Use check_same_thread=False so the connection can be reused safely in Streamlit threads.
-    conn = sql.create_engine(
-        sql_url or "sqlite:///:memory:", connect_args={"check_same_thread": False}
-    ).connect()
+    resolved_sql_url = (sql_url or DEFAULT_SQL_URL).strip() or DEFAULT_SQL_URL
+    engine_kwargs: dict = {}
+    try:
+        url_obj = sql.engine.make_url(resolved_sql_url)
+        if str(getattr(url_obj, "drivername", "")).startswith("sqlite"):
+            # Use check_same_thread=False so the connection can be reused safely in Streamlit threads.
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+    except Exception:
+        # Best effort: if URL parsing fails, assume sqlite when it looks like sqlite.
+        if resolved_sql_url.lower().startswith("sqlite"):
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+    conn = sql.create_engine(resolved_sql_url, **engine_kwargs).connect()
     sql_database_agent = SQLDatabaseAgent(llm, connection=conn, log=False)
     feature_engineering_agent = FeatureEngineeringAgent(llm, log=False)
     h2o_ml_agent = H2OMLAgent(
@@ -936,110 +1171,148 @@ if prompt:
         )
         st.stop()
 
-    st.chat_message("human").write(prompt)
-    msgs.add_user_message(prompt)
+    raw_prompt = prompt
+    db_cmd = _parse_db_connect_command(raw_prompt)
+    display_prompt = (
+        db_cmd.get("display_prompt") if isinstance(db_cmd, dict) else raw_prompt
+    ) or raw_prompt
+    if isinstance(db_cmd, dict) and db_cmd.get("action") in ("connect", "disconnect"):
+        team_prompt = (db_cmd.get("team_prompt") or "").strip()
+    else:
+        team_prompt = display_prompt.strip()
+
+    st.chat_message("human").write(display_prompt)
+    msgs.add_user_message(display_prompt)
+
+    # Apply DB connect/disconnect updates before building the team.
+    if isinstance(db_cmd, dict) and db_cmd.get("action") in ("connect", "disconnect"):
+        new_url = db_cmd.get("sql_url")
+        if isinstance(new_url, str) and new_url.strip():
+            st.session_state["sql_url"] = new_url.strip()
+            st.session_state[SQL_URL_SYNC_FLAG] = True
+        msg_text = db_cmd.get("message")
+        if isinstance(msg_text, str) and msg_text.strip():
+            st.chat_message("assistant").write(msg_text)
+            msgs.add_ai_message(msg_text)
 
     data_raw_dict = st.session_state.get("selected_data_raw")
     input_provenance = st.session_state.get("selected_data_provenance")
 
-    team = build_team(
-        model_choice,
-        add_memory,
-        st.session_state.get("sql_url", "sqlite:///:memory:"),
-        st.session_state.checkpointer if add_memory else None,
-        st.session_state.get("enable_mlflow_logging", True),
-        st.session_state.get("mlflow_tracking_uri"),
-        st.session_state.get("mlflow_experiment_name", "H2O AutoML"),
-    )
-    try:
-        # If LangGraph memory is enabled, pass only the new user message.
-        # The checkpointer will supply prior state/messages for continuity.
-        input_messages = (
-            [HumanMessage(content=prompt, id=str(uuid.uuid4()))]
-            if add_memory
-            else _strip_ui_marker_messages(msgs.messages)
+    result = None
+    # If this was only a connect/disconnect command, skip running the team.
+    if team_prompt:
+        team = build_team(
+            model_choice,
+            add_memory,
+            st.session_state.get("sql_url", DEFAULT_SQL_URL),
+            st.session_state.checkpointer if add_memory else None,
+            st.session_state.get("enable_mlflow_logging", True),
+            st.session_state.get("mlflow_tracking_uri"),
+            st.session_state.get("mlflow_experiment_name", "H2O AutoML"),
         )
-        active_dataset_override = st.session_state.get("active_dataset_id_override") or None
-        persisted = st.session_state.get("team_state", {})
-        persisted = persisted if isinstance(persisted, dict) else {}
-        invoke_payload = {
-            "messages": input_messages,
-            "artifacts": {
-                "config": {
-                    "mlflow_tracking_uri": st.session_state.get("mlflow_tracking_uri"),
-                    "mlflow_experiment_name": st.session_state.get(
-                        "mlflow_experiment_name", "H2O AutoML"
-                    ),
-                    "enable_mlflow_logging": st.session_state.get(
-                        "enable_mlflow_logging", True
-                    ),
-                    "proactive_workflow_mode": st.session_state.get(
-                        "proactive_workflow_mode", True
-                    ),
-                    "use_llm_intent_parser": st.session_state.get(
-                        "use_llm_intent_parser", True
-                    ),
-                    "merge": {
-                        "dataset_ids": st.session_state.get("merge_dataset_ids") or [],
-                        "operation": st.session_state.get("merge_operation") or "join",
-                        "how": st.session_state.get("merge_how") or "inner",
-                        "on": st.session_state.get("merge_on") or "",
-                        "left_on": st.session_state.get("merge_left_on") or "",
-                        "right_on": st.session_state.get("merge_right_on") or "",
-                        "suffixes": st.session_state.get("merge_suffixes") or "_x,_y",
-                        "axis": st.session_state.get("merge_axis", 0),
-                        "ignore_index": bool(st.session_state.get("merge_ignore_index", True)),
-                    },
-                }
-            },
-            "data_raw": data_raw_dict,
-        }
-        if input_provenance:
-            invoke_payload["artifacts"]["input_dataset"] = input_provenance
-        # Provide continuity when memory is disabled (no checkpointer).
-        if not add_memory and persisted:
-            invoke_payload.update(
-                {
-                    k: persisted.get(k)
-                    for k in (
-                        "data_sql",
-                        "data_wrangled",
-                        "data_cleaned",
-                        "feature_data",
-                        "active_data_key",
-                        "active_dataset_id",
-                        "datasets",
-                        "target_variable",
-                    )
-                    if k in persisted
-                }
+        try:
+            # If LangGraph memory is enabled, pass only the new user message.
+            # The checkpointer will supply prior state/messages for continuity.
+            input_messages = (
+                [HumanMessage(content=team_prompt, id=str(uuid.uuid4()))]
+                if add_memory
+                else _replace_last_human_message(
+                    _strip_ui_marker_messages(msgs.messages), team_prompt
+                )
             )
-        # Apply explicit user override last.
-        if active_dataset_override:
-            invoke_payload["active_dataset_id"] = active_dataset_override
-        result = team.invoke(
-            invoke_payload,
-            config={
-                "recursion_limit": recursion_limit,
-                "configurable": {"thread_id": st.session_state.thread_id},
-            },
-        )
-    except Exception as e:
-        msg = str(e)
-        if (
-            "rate_limit_exceeded" in msg
-            or "tokens per min" in msg
-            or "tpm" in msg.lower()
-            or "request too large" in msg.lower()
-        ):
-            st.error(f"Error running team (rate limit): {e}")
-            st.info(
-                "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
-                "or switching to a smaller model."
+            active_dataset_override = (
+                st.session_state.get("active_dataset_id_override") or None
             )
-        else:
-            st.error(f"Error running team: {e}")
-        result = None
+            persisted = st.session_state.get("team_state", {})
+            persisted = persisted if isinstance(persisted, dict) else {}
+            invoke_payload = {
+                "messages": input_messages,
+                "artifacts": {
+                    "config": {
+                        "mlflow_tracking_uri": st.session_state.get(
+                            "mlflow_tracking_uri"
+                        ),
+                        "mlflow_experiment_name": st.session_state.get(
+                            "mlflow_experiment_name", "H2O AutoML"
+                        ),
+                        "enable_mlflow_logging": st.session_state.get(
+                            "enable_mlflow_logging", True
+                        ),
+                        "proactive_workflow_mode": st.session_state.get(
+                            "proactive_workflow_mode", True
+                        ),
+                        "use_llm_intent_parser": st.session_state.get(
+                            "use_llm_intent_parser", True
+                        ),
+                        "merge": {
+                            "dataset_ids": st.session_state.get("merge_dataset_ids")
+                            or [],
+                            "operation": st.session_state.get("merge_operation")
+                            or "join",
+                            "how": st.session_state.get("merge_how") or "inner",
+                            "on": st.session_state.get("merge_on") or "",
+                            "left_on": st.session_state.get("merge_left_on") or "",
+                            "right_on": st.session_state.get("merge_right_on") or "",
+                            "suffixes": st.session_state.get("merge_suffixes")
+                            or "_x,_y",
+                            "axis": st.session_state.get("merge_axis", 0),
+                            "ignore_index": bool(
+                                st.session_state.get("merge_ignore_index", True)
+                            ),
+                        },
+                        "sql_url": _redact_sqlalchemy_url(
+                            st.session_state.get("sql_url", DEFAULT_SQL_URL)
+                        ),
+                    }
+                },
+                "data_raw": data_raw_dict,
+            }
+            if input_provenance:
+                invoke_payload["artifacts"]["input_dataset"] = input_provenance
+            # Provide continuity when memory is disabled (no checkpointer).
+            if not add_memory and persisted:
+                invoke_payload.update(
+                    {
+                        k: persisted.get(k)
+                        for k in (
+                            "data_sql",
+                            "data_wrangled",
+                            "data_cleaned",
+                            "feature_data",
+                            "active_data_key",
+                            "active_dataset_id",
+                            "datasets",
+                            "target_variable",
+                        )
+                        if k in persisted
+                    }
+                )
+            # Apply explicit user override last.
+            if active_dataset_override:
+                invoke_payload["active_dataset_id"] = active_dataset_override
+            result = team.invoke(
+                invoke_payload,
+                config={
+                    "recursion_limit": recursion_limit,
+                    "configurable": {"thread_id": st.session_state.thread_id},
+                },
+            )
+        except Exception as e:
+            msg = str(e)
+            if (
+                "rate_limit_exceeded" in msg
+                or "tokens per min" in msg
+                or "tpm" in msg.lower()
+                or "request too large" in msg.lower()
+            ):
+                st.error(f"Error running team (rate limit): {e}")
+                st.info(
+                    "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
+                    "or switching to a smaller model."
+                )
+            else:
+                st.error(f"Error running team: {e}")
+            result = None
 
     if result:
         # Persist data_raw from result for follow-on requests

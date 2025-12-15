@@ -36,7 +36,12 @@ def get_database_metadata(connection, n_samples=10) -> dict:
 
         metadata["dialect"] = sql_engine.dialect.name
         metadata["driver"] = sql_engine.driver
-        metadata["connection_url"] = str(sql_engine.url)
+        try:
+            metadata["connection_url"] = sql_engine.url.render_as_string(
+                hide_password=True
+            )
+        except Exception:
+            metadata["connection_url"] = str(sql_engine.url)
 
         inspector = inspect(sql_engine)
         preparer = inspector.bind.dialect.identifier_preparer
