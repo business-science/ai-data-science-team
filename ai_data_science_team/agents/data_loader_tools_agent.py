@@ -376,15 +376,23 @@ def make_data_loader_tools_agent(
         # Collect artifacts per tool if possible
         artifacts = {}
         last_tool_artifact = None
+        key_counts: dict[str, int] = {}
+
+        def _next_key(base: str) -> str:
+            b = (base or "artifact").strip() or "artifact"
+            key_counts[b] = key_counts.get(b, 0) + 1
+            n = key_counts[b]
+            return b if n == 1 else f"{b}_{n}"
+
         for msg in internal_messages:
             art = getattr(msg, "artifact", None)
             name = getattr(msg, "name", None)
             if art is not None:
-                key = name or f"artifact_{len(artifacts) + 1}"
+                key = _next_key(str(name) if name else "artifact")
                 artifacts[key] = art
                 last_tool_artifact = art
             elif isinstance(msg, dict) and "artifact" in msg:
-                key = msg.get("name") or f"artifact_{len(artifacts) + 1}"
+                key = _next_key(str(msg.get("name")) if msg.get("name") else "artifact")
                 artifacts[key] = msg["artifact"]
                 last_tool_artifact = msg["artifact"]
 
@@ -405,6 +413,14 @@ def make_data_loader_tools_agent(
                                     break
                         break
                 print(f"    * Tool: {name}{path_hint}")
+            try:
+                if isinstance(artifacts, dict) and artifacts:
+                    keys = list(artifacts.keys())
+                    print(f"    * Artifacts captured: {keys}")
+                else:
+                    print("    * Artifacts captured: none")
+            except Exception:
+                pass
 
         return {
             "messages": [last_ai_message],

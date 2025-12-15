@@ -1709,6 +1709,10 @@ Examples:
         print("---DATA LOADER---")
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
+        cfg = (state.get("artifacts") or {}).get("config") or {}
+        debug = bool(cfg.get("debug")) if isinstance(cfg, dict) else False
+        if debug:
+            print(f"  loader last_human={last_human!r}")
 
         # DataLoaderToolsAgent is tool-driven; the latest user request is already in messages.
         data_loader_agent.invoke_messages(messages=before_msgs)
@@ -1716,6 +1720,17 @@ Examples:
         merged = _merge_messages(before_msgs, response)
 
         loader_artifacts = response.get("data_loader_artifacts")
+        if debug:
+            try:
+                print(f"  loader response_keys={sorted(list(response.keys()))}")
+                if isinstance(loader_artifacts, dict):
+                    print(
+                        f"  loader artifacts_keys={list(loader_artifacts.keys())[:25]}"
+                    )
+                else:
+                    print(f"  loader artifacts_type={type(loader_artifacts)}")
+            except Exception:
+                pass
 
         previous_data_raw = state.get("data_raw")
         data_raw = previous_data_raw
@@ -1727,6 +1742,7 @@ Examples:
         multiple_loaded_files = None
         multiple_loaded_datasets: list[tuple[str, Any]] | None = None
         fallback_loaded_dataset = False
+        multi_file_load = False
 
         # Normalize artifacts into a dict so we can inspect tool intent
         artifacts_map: dict = {}
@@ -1740,6 +1756,11 @@ Examples:
                 artifacts_map = loader_artifacts
         else:
             artifacts_map = {"artifact": loader_artifacts}
+        if debug:
+            try:
+                print(f"  loader artifacts_map_keys={list(artifacts_map.keys())[:25]}")
+            except Exception:
+                pass
 
         # Detect directory listings (do NOT overwrite data_raw)
         for key, val in artifacts_map.items():
@@ -1749,15 +1770,15 @@ Examples:
                 dir_listing = val
                 break
 
+        load_file_ok_items: list[tuple[str, Any]] = []
         # Detect dataset loads
         for key, val in artifacts_map.items():
             tool_name = str(key)
             # load_file artifact: {"status":"ok","data":{...},"error":None}
             if tool_name.startswith("load_file") and isinstance(val, dict):
                 if val.get("status") == "ok" and val.get("data") is not None:
-                    loaded_dataset = val.get("data")
-                    loaded_dataset_label = tool_name
-                    break
+                    load_file_ok_items.append((tool_name, val.get("data")))
+                continue
 
             # load_directory artifact: {"file.csv": {"status","data","error"}, ...}
             if tool_name.startswith("load_directory") and isinstance(val, dict):
@@ -1769,9 +1790,9 @@ Examples:
                         and info.get("data") is not None
                     ):
                         ok_items.append((fname, info.get("data")))
-                if len(ok_items) == 1:
+                if len(ok_items) == 1 and loaded_dataset is None:
                     loaded_dataset_label, loaded_dataset = ok_items[0]
-                    break
+                    continue
                 if len(ok_items) > 1:
                     # Multiple datasets loaded; don't guess which one becomes active.
                     multiple_loaded_files = [fname for fname, _ in ok_items]
@@ -1779,6 +1800,130 @@ Examples:
                     loaded_dataset = None
                     loaded_dataset_label = None
                     break
+
+        if debug:
+            try:
+                print(f"  loader load_file_ok_items={len(load_file_ok_items)}")
+                for name, data in load_file_ok_items[:3]:
+                    print(f"    - ok {name}: data_type={type(data)} shape={_shape(data)}")
+            except Exception:
+                pass
+
+        # Fallback: if tool artifacts didn't yield usable data, load file paths directly from the user text.
+        if (
+            loaded_dataset is None
+            and not multiple_loaded_datasets
+            and not load_file_ok_items
+            and isinstance(last_human, str)
+            and last_human.strip()
+        ):
+            try:
+                import re
+                import pandas as pd
+
+                from ai_data_science_team.tools.data_loader import (
+                    auto_load_file,
+                    DEFAULT_MAX_ROWS,
+                )
+
+                last_human_lower = last_human.lower()
+                if any(w in last_human_lower for w in ("load", "read", "import", "open")):
+                    requested = re.findall(
+                        r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
+                        last_human,
+                        flags=re.IGNORECASE,
+                    )
+                    requested = [r.strip() for r in requested if str(r).strip()]
+                    seen_req: set[str] = set()
+                    requested_unique: list[str] = []
+                    for r in requested:
+                        if r in seen_req:
+                            continue
+                        seen_req.add(r)
+                        requested_unique.append(r)
+
+                    ok_items: list[tuple[str, Any]] = []
+                    errs: list[str] = []
+                    for fp in requested_unique:
+                        df_or_error = auto_load_file(fp, max_rows=DEFAULT_MAX_ROWS)
+                        if isinstance(df_or_error, pd.DataFrame):
+                            ok_items.append((fp, df_or_error.to_dict()))
+                        else:
+                            errs.append(f"{fp}: {df_or_error}")
+
+                    if ok_items:
+                        multi_file_load = len(ok_items) > 1
+                        multiple_loaded_files = [fp for fp, _ in ok_items]
+                        multiple_loaded_datasets = ok_items
+                        loaded_dataset_label, loaded_dataset = ok_items[-1]
+                        fallback_loaded_dataset = True
+                        dir_listing = None
+                        if debug:
+                            print(
+                                f"  loader deterministic_fallback_loaded={len(ok_items)} last={loaded_dataset_label!r}"
+                            )
+                    if errs and debug:
+                        print(f"  loader deterministic_fallback_errors={errs[:3]}")
+
+                    if errs:
+                        marker = {
+                            "status": "error",
+                            "data": None,
+                            "error": "; ".join(errs[:3]),
+                        }
+                        if isinstance(loader_artifacts, dict):
+                            loader_artifacts = {
+                                **loader_artifacts,
+                                "load_file_deterministic_fallback": marker,
+                            }
+                        elif loader_artifacts is None:
+                            loader_artifacts = {"load_file_deterministic_fallback": marker}
+            except Exception:
+                pass
+
+        # If multiple load_file calls succeeded, keep them all and default the active dataset to the last one.
+        if (
+            loaded_dataset is None
+            and not multiple_loaded_datasets
+            and len(load_file_ok_items) > 1
+        ):
+            import re
+
+            labels: list[str] = []
+            try:
+                requested = re.findall(
+                    r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
+                    last_human or "",
+                    flags=re.IGNORECASE,
+                )
+                requested = [r.strip() for r in requested if str(r).strip()]
+                # De-dupe while preserving order
+                seen_req: set[str] = set()
+                requested_unique: list[str] = []
+                for r in requested:
+                    if r in seen_req:
+                        continue
+                    seen_req.add(r)
+                    requested_unique.append(r)
+                labels = requested_unique[: len(load_file_ok_items)]
+            except Exception:
+                labels = []
+
+            if len(labels) != len(load_file_ok_items):
+                labels = [name for name, _ in load_file_ok_items]
+
+            multi_file_load = True
+            multiple_loaded_files = labels
+            multiple_loaded_datasets = [
+                (lbl, data) for lbl, (_name, data) in zip(labels, load_file_ok_items)
+            ]
+            loaded_dataset_label, loaded_dataset = multiple_loaded_datasets[-1]
+        elif (
+            loaded_dataset is None
+            and not multiple_loaded_datasets
+            and len(load_file_ok_items) == 1
+        ):
+            loaded_dataset_label, loaded_dataset = load_file_ok_items[0]
 
         # If the tool returned only a directory listing but the user requested a specific file to load,
         # attempt to load it deterministically (avoids "listing loop" regressions across turns).
@@ -1799,7 +1944,7 @@ Examples:
 
                 if any(w in last_human_lower for w in ("load", "read", "import", "open")):
                     m = re.search(
-                        r"(?:`|\"|')?([\\w\\-./~]+\\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\\.gz)?)",
+                        r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
                         last_human_text,
                         flags=re.IGNORECASE,
                     )
@@ -1891,7 +2036,68 @@ Examples:
 
         datasets, active_dataset_id = _ensure_dataset_registry(state)
         # Register newly loaded datasets in the dataset registry.
-        if loaded_dataset is not None:
+        if multi_file_load and multiple_loaded_datasets:
+            try:
+                import os
+                from pathlib import Path
+
+                state_for_register = {
+                    **state,
+                    "datasets": datasets,
+                    "active_dataset_id": active_dataset_id,
+                }
+                to_register = list(multiple_loaded_datasets)[-DATASET_REGISTRY_MAX:]
+                for idx, (fname, data) in enumerate(to_register):
+                    source = str(fname)
+                    try:
+                        p = Path(str(fname)).expanduser()
+                        candidates: list[Path] = []
+                        if p.is_absolute():
+                            candidates = [p]
+                        else:
+                            candidates = [
+                                (Path(os.getcwd()) / p),
+                                (Path(os.getcwd()) / "data" / p.name),
+                                (Path(os.getcwd()) / p.name),
+                            ]
+                        for cand in candidates:
+                            try:
+                                resolved = cand.expanduser().resolve()
+                            except Exception:
+                                continue
+                            if resolved.exists() and resolved.is_file():
+                                source = str(resolved)
+                                break
+                    except Exception:
+                        pass
+
+                    label = os.path.basename(source) or str(fname)
+                    provenance = {
+                        "source_type": "file",
+                        "source": source or str(fname),
+                        "user_request": last_human,
+                        "multi_load": True,
+                    }
+                    make_active = idx == (len(to_register) - 1)
+                    datasets, active_dataset_id, _did = _register_dataset(
+                        state_for_register,
+                        data=data,
+                        stage="raw",
+                        label=str(label),
+                        created_by="Data_Loader_Tools_Agent",
+                        provenance=provenance,
+                        parent_id=None,
+                        make_active=make_active,
+                    )
+                    state_for_register = {
+                        **state_for_register,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
+                    }
+            except Exception:
+                # Never fail the load step due to registry bookkeeping.
+                pass
+        elif loaded_dataset is not None:
             try:
                 import os
 
@@ -1903,7 +2109,7 @@ Examples:
 
                     if not (isinstance(source, str) and ("." in source and os.path.sep in source)):
                         m = re.search(
-                            r"(?:`|\"|')?([\\w\\-./~]+\\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\\.gz)?)",
+                            r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
                             last_human or "",
                             flags=re.IGNORECASE,
                         )
@@ -1971,7 +2177,58 @@ Examples:
 
         # Add a lightweight AI summary message so supervisor can progress
         summary_msg = None
-        if multiple_loaded_files:
+        if multi_file_load and multiple_loaded_datasets:
+            try:
+                import os
+                import pandas as pd
+
+                lines = []
+                for fname, data in multiple_loaded_datasets:
+                    label = os.path.basename(str(fname)) or str(fname)
+                    shape_txt = ""
+                    try:
+                        df = pd.DataFrame(data)
+                        shape_txt = f" ({df.shape[0]} rows × {df.shape[1]} cols)"
+                    except Exception:
+                        pass
+                    lines.append(f"- {label}{shape_txt}")
+
+                active_label = os.path.basename(str(loaded_dataset_label)) or str(
+                    loaded_dataset_label or ""
+                )
+                preview_txt = ""
+                try:
+                    df_active = pd.DataFrame(data_raw) if isinstance(data_raw, dict) else None
+                    if df_active is not None:
+                        preview_df = df_active.head(5)
+                        max_cols = 10
+                        if preview_df.shape[1] > max_cols:
+                            preview_df = preview_df.iloc[:, :max_cols]
+                        preview_txt = "\n\nPreview (first 5 rows):\n\n" + preview_df.to_markdown(
+                            index=False
+                        )
+                except Exception:
+                    pass
+
+                summary_msg = AIMessage(
+                    content=(
+                        f"Loaded {len(multiple_loaded_datasets)} datasets:\n\n"
+                        + "\n".join(lines)
+                        + (f"\n\nActive dataset: {active_label}." if active_label else "")
+                        + preview_txt
+                        + "\n\nUse the sidebar dataset selector to switch the active dataset or pick both under Merge options."
+                    ),
+                    name="data_loader_agent",
+                )
+            except Exception:
+                summary_msg = AIMessage(
+                    content=(
+                        f"Loaded {len(multiple_loaded_datasets)} datasets. "
+                        "Use the sidebar dataset selector to switch the active dataset or merge them."
+                    ),
+                    name="data_loader_agent",
+                )
+        elif multiple_loaded_files:
             joined = ", ".join(multiple_loaded_files[:20])
             more = (
                 f" (+{len(multiple_loaded_files) - 20} more)"
@@ -2158,9 +2415,45 @@ Examples:
                     name="data_loader_agent",
                 )
         elif loader_artifacts is not None:
+            # Include tool errors (if any) to help the user correct paths quickly.
+            errors: list[str] = []
+            try:
+                if isinstance(loader_artifacts, dict):
+                    # Single load_file artifact shape: {"status","data","error"}
+                    if {"status", "data"}.issubset(set(loader_artifacts.keys())):
+                        err = loader_artifacts.get("error")
+                        if isinstance(err, str) and err.strip():
+                            errors.append(err.strip())
+                    else:
+                        for k, v in loader_artifacts.items():
+                            if not str(k).startswith("load_file"):
+                                continue
+                            if isinstance(v, dict):
+                                if v.get("status") != "ok":
+                                    err = v.get("error")
+                                    if isinstance(err, str) and err.strip():
+                                        errors.append(err.strip())
+            except Exception:
+                errors = []
+
+            errors_txt = ""
+            if errors:
+                uniq: list[str] = []
+                seen: set[str] = set()
+                for e in errors:
+                    if e in seen:
+                        continue
+                    seen.add(e)
+                    uniq.append(e)
+                shown = uniq[:3]
+                errors_txt = "\n\nErrors:\n" + "\n".join([f"- {e}" for e in shown])
+                if len(uniq) > 3:
+                    errors_txt += f"\n- (+{len(uniq) - 3} more)"
+
             summary_msg = AIMessage(
                 content=(
                     "I couldn't load a tabular dataset from that request. "
+                    f"{errors_txt}\n\n"
                     "Try specifying a concrete file path (e.g., `data/churn_data.csv`) "
                     "or ask me to list files in a directory first."
                 ),
@@ -2427,9 +2720,18 @@ Examples:
         merge_code = "\n".join(merge_code_lines).strip() + "\n"
         merge_code_hash = _sha256_text(merge_code)
 
+        merged_data = merged_df
+        try:
+            import pandas as pd
+
+            if isinstance(merged_df, pd.DataFrame):
+                merged_data = merged_df.to_dict()
+        except Exception:
+            merged_data = merged_df
+
         datasets, active_dataset_id, merged_id = _register_dataset(
             state_with_datasets,
-            data=merged_df,
+            data=merged_data,
             stage="wrangled",
             label="data_merged",
             created_by="Data_Merge_Agent",
@@ -2464,7 +2766,7 @@ Examples:
         }
         return {
             **merged,
-            "data_wrangled": merged_df,
+            "data_wrangled": merged_data,
             "active_data_key": "data_wrangled",
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,

@@ -97,7 +97,7 @@ def _extract_db_target_from_prompt(prompt: str) -> tuple[str | None, tuple[int, 
 
     # SQLAlchemy URLs (no spaces)
     m = re.search(
-        r"(?is)\b(?P<target>(?:sqlite|postgresql|mysql|mssql|oracle|duckdb|snowflake)(?:\\+\\w+)?://[^\\s'\"`]+)",
+        r"(?is)\b(?P<target>(?:sqlite|postgresql|mysql|mssql|oracle|duckdb|snowflake)(?:\+\w+)?://[^\s'\"`]+)",
         prompt,
     )
     if m:
@@ -105,7 +105,7 @@ def _extract_db_target_from_prompt(prompt: str) -> tuple[str | None, tuple[int, 
 
     # SQLite file path mention (no spaces unless quoted above)
     m = re.search(
-        r"(?is)\b(?P<target>(?:[a-zA-Z]:)?[\\w./~\\\\:-]+\\.(?:db|sqlite|sqlite3))\b",
+        r"(?is)\b(?P<target>(?:[a-zA-Z]:)?[\w./~\\:-]+\.(?:db|sqlite|sqlite3))\b",
         prompt,
     )
     if m:
@@ -716,6 +716,14 @@ with st.sidebar:
     st.session_state["mlflow_tracking_uri"] = mlflow_tracking_uri or None
     st.session_state["mlflow_experiment_name"] = mlflow_experiment_name or "H2O AutoML"
 
+    st.markdown("**Debug options**")
+    st.checkbox(
+        "Verbose console logs",
+        value=bool(st.session_state.get("debug_mode", False)),
+        key="debug_mode",
+        help="Print extra debug info to the terminal to troubleshoot DB connect and multi-file loads.",
+    )
+
     if st.button("Clear chat"):
         st.session_state.chat_history = []
         st.session_state.details = []
@@ -1171,8 +1179,13 @@ if prompt:
         )
         st.stop()
 
+    debug_mode = bool(st.session_state.get("debug_mode", False))
     raw_prompt = prompt
+    if debug_mode:
+        print(f"[APP] raw_prompt={raw_prompt!r}")
     db_cmd = _parse_db_connect_command(raw_prompt)
+    if debug_mode:
+        print(f"[APP] db_cmd={db_cmd}")
     display_prompt = (
         db_cmd.get("display_prompt") if isinstance(db_cmd, dict) else raw_prompt
     ) or raw_prompt
@@ -1190,6 +1203,10 @@ if prompt:
         if isinstance(new_url, str) and new_url.strip():
             st.session_state["sql_url"] = new_url.strip()
             st.session_state[SQL_URL_SYNC_FLAG] = True
+            if debug_mode:
+                print(
+                    f"[APP] Updated sql_url={_redact_sqlalchemy_url(st.session_state.get('sql_url', ''))!r}"
+                )
         msg_text = db_cmd.get("message")
         if isinstance(msg_text, str) and msg_text.strip():
             st.chat_message("assistant").write(msg_text)
@@ -1244,6 +1261,7 @@ if prompt:
                         "use_llm_intent_parser": st.session_state.get(
                             "use_llm_intent_parser", True
                         ),
+                        "debug": bool(st.session_state.get("debug_mode", False)),
                         "merge": {
                             "dataset_ids": st.session_state.get("merge_dataset_ids")
                             or [],
