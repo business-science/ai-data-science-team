@@ -262,21 +262,42 @@ def build_reproducible_pipeline_script(
                 if idx == 0:
                     source_type = str(prov.get("source_type") or "")
                     source = prov.get("source")
-                    if source_type == "file" and isinstance(source, str) and source:
-                        s = source.lower()
+
+                    def _pick_file_source() -> Optional[str]:
+                        # Prefer explicit provenance source; fall back to original_name/label if needed.
+                        candidates: list[Any] = [
+                            source,
+                            prov.get("original_name"),
+                            label,
+                        ]
+                        for c in candidates:
+                            if not isinstance(c, str):
+                                continue
+                            s = c.strip()
+                            if not s:
+                                continue
+                            # Filter obvious tool-name placeholders
+                            if s in {"load_file", "load_directory", "artifact"} or s.startswith("load_file_"):
+                                continue
+                            return s
+                        return None
+
+                    file_source = _pick_file_source()
+                    if source_type == "file" and isinstance(file_source, str) and file_source:
+                        s = file_source.lower()
                         if s.endswith(".csv") or s.endswith(".csv.gz"):
-                            out.append(f"{df_var} = pd.read_csv({source!r})")
+                            out.append(f"{df_var} = pd.read_csv({file_source!r})")
                         elif s.endswith(".tsv") or s.endswith(".tsv.gz"):
-                            out.append(f"{df_var} = pd.read_csv({source!r}, sep='\\t')")
+                            out.append(f"{df_var} = pd.read_csv({file_source!r}, sep='\\t')")
                         elif s.endswith(".parquet"):
-                            out.append(f"{df_var} = pd.read_parquet({source!r})")
+                            out.append(f"{df_var} = pd.read_parquet({file_source!r})")
                         elif s.endswith(".json") or s.endswith(".jsonl") or s.endswith(".ndjson"):
-                            out.append(f"{df_var} = pd.read_json({source!r})")
+                            out.append(f"{df_var} = pd.read_json({file_source!r})")
                         elif s.endswith(".xlsx") or s.endswith(".xls"):
-                            out.append(f"{df_var} = pd.read_excel({source!r})")
+                            out.append(f"{df_var} = pd.read_excel({file_source!r})")
                         else:
-                            out.append(f"# TODO: add reader for: {source!r}")
-                            out.append(f"{df_var} = pd.read_csv({source!r})")
+                            out.append(f"# TODO: add reader for: {file_source!r}")
+                            out.append(f"{df_var} = pd.read_csv({file_source!r})")
                     elif stage == "sql" and isinstance(transform, dict) and transform.get("sql_query_code"):
                         sql_query = str(transform.get("sql_query_code") or "")
                         out.append("import sqlalchemy as sql")
@@ -377,21 +398,40 @@ def build_reproducible_pipeline_script(
         if idx == 0:
             source_type = str(prov.get("source_type") or "")
             source = prov.get("source")
-            if source_type == "file" and isinstance(source, str) and source:
-                s = source.lower()
+
+            def _pick_file_source() -> Optional[str]:
+                candidates: list[Any] = [
+                    source,
+                    prov.get("original_name"),
+                    label,
+                ]
+                for c in candidates:
+                    if not isinstance(c, str):
+                        continue
+                    s = c.strip()
+                    if not s:
+                        continue
+                    if s in {"load_file", "load_directory", "artifact"} or s.startswith("load_file_"):
+                        continue
+                    return s
+                return None
+
+            file_source = _pick_file_source()
+            if source_type == "file" and isinstance(file_source, str) and file_source:
+                s = file_source.lower()
                 if s.endswith(".csv") or s.endswith(".csv.gz"):
-                    lines.append(f"df = pd.read_csv({source!r})")
+                    lines.append(f"df = pd.read_csv({file_source!r})")
                 elif s.endswith(".tsv") or s.endswith(".tsv.gz"):
-                    lines.append(f"df = pd.read_csv({source!r}, sep='\\t')")
+                    lines.append(f"df = pd.read_csv({file_source!r}, sep='\\t')")
                 elif s.endswith(".parquet"):
-                    lines.append(f"df = pd.read_parquet({source!r})")
+                    lines.append(f"df = pd.read_parquet({file_source!r})")
                 elif s.endswith(".json") or s.endswith(".jsonl") or s.endswith(".ndjson"):
-                    lines.append(f"df = pd.read_json({source!r})")
+                    lines.append(f"df = pd.read_json({file_source!r})")
                 elif s.endswith(".xlsx") or s.endswith(".xls"):
-                    lines.append(f"df = pd.read_excel({source!r})")
+                    lines.append(f"df = pd.read_excel({file_source!r})")
                 else:
-                    lines.append(f"# TODO: add reader for: {source!r}")
-                    lines.append(f"df = pd.read_csv({source!r})")
+                    lines.append(f"# TODO: add reader for: {file_source!r}")
+                    lines.append(f"df = pd.read_csv({file_source!r})")
             elif stage == "sql" and isinstance(transform, dict) and transform.get("sql_query_code"):
                 sql_query = str(transform.get("sql_query_code") or "")
                 lines.append("import sqlalchemy as sql")

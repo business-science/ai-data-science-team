@@ -630,13 +630,13 @@ def make_h2o_ml_agent(
             Data summary for reference:
                 {all_datasets_summary}
 
-            Return only code in ```python``` with a single function definition. Use this as an example starting template:
-            ```python
+        Return only code in ```python``` with a single function definition. Use this as an example starting template:
+        ```python
             def {function_name}(
-                data_raw: List[Dict[str, Any]],
+                data_raw,
                 target: str,
                 max_runtime_secs: int,
-                exclude_algos: List[str],
+                exclude_algos: list[str],
                 balance_classes: bool,
                 nfolds: int,
                 seed: int,
@@ -645,10 +645,10 @@ def make_h2o_ml_agent(
                 stopping_tolerance: float,
                 stopping_rounds: int,
                 sort_metric: str ,
-                model_directory: Optional[str] = None,
-                log_path: Optional[str] = None,
+                model_directory: str | None = None,
+                log_path: str | None = None,
                 enable_mlflow: bool, # If use has specified to enable MLflow, make sure to make this True              
-                mlflow_tracking_uri: Optional[str], 
+                mlflow_tracking_uri: str | None, 
                 mlflow_experiment_name: str,
                 mlflow_run_name: str,
                 **kwargs # Additional parameters for H2OAutoML (feel free to add these based on user instructions and recommended steps)
@@ -784,6 +784,12 @@ def make_h2o_ml_agent(
             - dtype is only supported for one column frames
             
             - h2o.is_running() module 'h2o' has no attribute 'is_running'. Solution: just do h2o.init() and it will check if H2O is running.
+
+            Critical requirements (prevents common AutoML failures):
+            - If the target is binary (2 unique values) or non-numeric, make sure H2O treats it as classification by converting to a factor:
+              `data_h2o[target] = data_h2o[target].asfactor()` after creating the H2OFrame.
+            - Only use classification metrics (AUC/logloss/AUCPR) when the target is categorical; use regression metrics (RMSE/MAE) only for numeric targets.
+            - Do not set extremely small stopping_tolerance; prefer H2O defaults unless the user explicitly requests tuning.
             
             
             """,
@@ -874,16 +880,71 @@ def make_h2o_ml_agent(
 
     # 3) Execute code
     def execute_h2o_code(state):
+        user_instructions = state.get("user_instructions") or get_last_user_message_content(
+            state.get("messages", [])
+        )
         target_col = state.get("target_variable")
+        target_col = str(target_col).strip() if isinstance(target_col, str) else ""
+
+        def _infer_target(df: pd.DataFrame) -> str:
+            if target_col and target_col in df.columns:
+                return target_col
+            # Heuristic for churn-like requests
+            if isinstance(user_instructions, str) and "churn" in user_instructions.lower():
+                if "Churn" in df.columns:
+                    return "Churn"
+                if "churn" in df.columns:
+                    return "churn"
+            # Common target names
+            for cand in ("target", "Target", "label", "Label", "y", "Y"):
+                if cand in df.columns:
+                    return cand
+            # Fall back to last column
+            try:
+                return str(df.columns[-1])
+            except Exception:
+                return ""
+
+        target_col_final = ""
 
         def _preprocess(data_dict):
+            nonlocal target_col_final
             df = pd.DataFrame.from_dict(data_dict)
-            if target_col:
-                if target_col not in df.columns:
-                    raise ValueError(f"Target variable '{target_col}' not found in data.")
-                non_null = df[target_col].notnull().sum()
+            target_col_final = _infer_target(df)
+            if target_col_final:
+                if target_col_final not in df.columns:
+                    raise ValueError(
+                        f"Target variable '{target_col_final}' not found in data."
+                    )
+                non_null = df[target_col_final].notnull().sum()
                 if non_null == 0:
-                    raise ValueError(f"Target variable '{target_col}' has no non-null values.")
+                    raise ValueError(
+                        f"Target variable '{target_col_final}' has no non-null values."
+                    )
+                nunique = df[target_col_final].dropna().nunique()
+                if nunique < 2:
+                    vc = (
+                        df[target_col_final]
+                        .value_counts(dropna=False)
+                        .head(5)
+                        .to_dict()
+                    )
+                    raise ValueError(
+                        f"Target variable '{target_col_final}' has <2 classes (nunique={nunique}). "
+                        f"Value counts (top 5): {vc}"
+                    )
+                # If the target looks binary/categorical, coerce it to a categorical dtype so H2O
+                # treats this as classification (avoids regression + AUC/logloss metric errors).
+                try:
+                    is_bool = pd.api.types.is_bool_dtype(df[target_col_final])
+                    is_object = pd.api.types.is_object_dtype(df[target_col_final])
+                    is_category = pd.api.types.is_categorical_dtype(df[target_col_final])
+                    is_numeric = pd.api.types.is_numeric_dtype(df[target_col_final])
+                    if is_bool or is_object or is_category or (is_numeric and nunique == 2):
+                        # Normalize numeric 0/1 or 1/2, etc. to strings then category for stable factor inference.
+                        df[target_col_final] = df[target_col_final].astype(str).astype("category")
+                except Exception:
+                    pass
             return df
 
         result = node_func_execute_agent_code_on_data(
@@ -897,6 +958,8 @@ def make_h2o_ml_agent(
             post_processing=lambda x: x,
             error_message_prefix="Error occurred during H2O AutoML: ",
         )
+        if target_col_final:
+            result["target_variable"] = target_col_final
 
         # If no error, extract leaderboard, best_model_id, and model_path
         if not result["h2o_train_error"]:
@@ -912,6 +975,77 @@ def make_h2o_ml_agent(
                 result["best_model_id"] = best_id
                 result["model_path"] = mpath
                 result["model_results"] = model_results
+
+                # Robust MLflow logging: do it here so we don't rely on the LLM-generated code
+                # to correctly log models/params (and so `predict using mlflow` can find `model/`).
+                if enable_mlflow:
+                    existing_run_id = (
+                        result["h2o_train_result"].get("mlflow_run_id")
+                        if isinstance(result.get("h2o_train_result"), dict)
+                        else None
+                    )
+                    try:
+                        import mlflow
+
+                        if mlflow_tracking_uri:
+                            mlflow.set_tracking_uri(mlflow_tracking_uri)
+                        mlflow.set_experiment(mlflow_experiment_name or "H2O AutoML")
+
+                        # Only start our own run if the generated code didn't already do it.
+                        run_ctx = (
+                            mlflow.start_run(run_id=str(existing_run_id))
+                            if isinstance(existing_run_id, str) and existing_run_id.strip()
+                            else mlflow.start_run(run_name=mlflow_run_name)
+                        )
+                        with run_ctx as run:
+                            run_id = run.info.run_id if run is not None else None
+                            if isinstance(run_id, str) and run_id:
+                                result["mlflow_run_id"] = run_id
+                                if isinstance(result.get("h2o_train_result"), dict):
+                                    result["h2o_train_result"]["mlflow_run_id"] = run_id
+
+                            # Tags/params
+                            try:
+                                mlflow.set_tag("agent", AGENT_NAME)
+                                if isinstance(user_instructions, str) and user_instructions.strip():
+                                    mlflow.set_tag("user_instructions", user_instructions.strip()[:5000])
+                            except Exception:
+                                pass
+                            try:
+                                mlflow.log_params(
+                                    {
+                                        "target_variable": target_col_final or target_col or "",
+                                        "function_name": state.get("h2o_train_function_name") or "",
+                                        "max_runtime_secs": 30,
+                                    }
+                                )
+                            except Exception:
+                                pass
+
+                            # Leaderboard + metrics
+                            try:
+                                if isinstance(lb, dict) and lb:
+                                    mlflow.log_table(lb, "leaderboard.json")
+                            except Exception:
+                                try:
+                                    if isinstance(lb, dict) and lb:
+                                        mlflow.log_dict(lb, "leaderboard.json")
+                                except Exception:
+                                    pass
+
+                            # Log leader model (H2O)
+                            try:
+                                import h2o
+
+                                h2o.init()
+                                if isinstance(best_id, str) and best_id.strip():
+                                    leader_model = h2o.get_model(best_id.strip())
+                                    mlflow.h2o.log_model(leader_model, artifact_path="model")
+                            except Exception:
+                                pass
+                    except Exception:
+                        # Never fail training because MLflow logging failed.
+                        pass
 
         if result.get("h2o_train_error") and log:
             error_log_path = log_ai_error(

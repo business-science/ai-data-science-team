@@ -142,17 +142,29 @@ def load_file(file_path: str) -> Tuple[str, Dict]:
         A tuple containing a message and a dictionary of the data frame.
     """
     print(f"    * Tool: load_file | {file_path}")
+    resolved_path, _matches = resolve_existing_file_path(file_path)
+    resolved_path_str = str(resolved_path) if resolved_path is not None else str(file_path)
     df_or_error = auto_load_file(file_path, max_rows=DEFAULT_MAX_ROWS)
 
     if isinstance(df_or_error, pd.DataFrame):
         return (
             f"Returned the following data frame from this file: {file_path}",
-            {"status": "ok", "data": df_or_error.to_dict(), "error": None},
+            {
+                "status": "ok",
+                "data": df_or_error.to_dict(),
+                "error": None,
+                "file_path": resolved_path_str,
+            },
         )
 
     return (
         f"Could not load file: {file_path}. {df_or_error}",
-        {"status": "error", "data": None, "error": str(df_or_error)},
+        {
+            "status": "error",
+            "data": None,
+            "error": str(df_or_error),
+            "file_path": resolved_path_str,
+        },
     )
 
 
@@ -466,6 +478,126 @@ def search_files_by_pattern(
 # Loaders
 
 
+def resolve_existing_file_path(file_path: str) -> tuple[Path | None, list[str]]:
+    """
+    Resolve `file_path` to an existing file path (best effort).
+
+    Returns:
+      (resolved_path, candidate_matches_for_error)
+    """
+    raw = (file_path or "").strip()
+    if not raw:
+        return None, []
+
+    path = Path(raw).expanduser()
+    if path.is_file():
+        return path, []
+
+    def _candidate_roots() -> list[Path]:
+        roots: list[Path] = []
+        try:
+            cwd = Path(os.getcwd()).expanduser().resolve()
+            roots.append(cwd)
+            # Walk up a few levels so relative paths work even when Streamlit
+            # is launched from a subdirectory (e.g., apps/...).
+            for parent in list(cwd.parents)[: DEFAULT_MAX_DEPTH + 1]:
+                roots.append(parent)
+        except Exception:
+            roots.append(Path("."))
+
+        # Also try relative to the package location (helps when cwd isn't the repo root).
+        try:
+            here = Path(__file__).expanduser().resolve()
+            pkg_root = here.parents[2] if len(here.parents) > 2 else here.parent
+            roots.append(pkg_root)
+            for parent in list(pkg_root.parents)[: DEFAULT_MAX_DEPTH + 1]:
+                roots.append(parent)
+        except Exception:
+            pass
+
+        # De-dupe while preserving order.
+        out: list[Path] = []
+        seen: set[str] = set()
+        for r in roots:
+            try:
+                key = str(r)
+            except Exception:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+        return out
+
+    # If the user provided a relative filename (common in chat), try a few conventional locations.
+    candidates: list[Path] = []
+    if not path.is_absolute():
+        base = path.name
+        for root in _candidate_roots():
+            # As-given relative to each candidate root (handles `data/foo.csv`)
+            candidates.append(root / path)
+            if base:
+                # Common project folders
+                candidates.extend(
+                    [
+                        root / "data" / base,
+                        root / "temp" / base,
+                        root / "temp" / "uploads" / base,
+                    ]
+                )
+
+    for cand in candidates:
+        try:
+            resolved = cand.expanduser().resolve()
+        except Exception:
+            resolved = cand
+        if resolved.is_file():
+            return resolved, []
+
+    # Last resort: shallow, depth-limited search for the basename.
+    base = path.name
+    if not base or path.is_absolute():
+        return None, []
+
+    matches: list[str] = []
+    roots: list[Path] = []
+    for root in _candidate_roots()[:3]:
+        roots.extend([root / "data", root])
+    for root in roots:
+        try:
+            root = root.expanduser().resolve()
+        except Exception:
+            continue
+        if not root.exists() or not root.is_dir():
+            continue
+
+        root_depth = len(root.parts)
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                current = Path(dirpath)
+                depth = len(current.parts) - root_depth
+                if depth >= DEFAULT_MAX_DEPTH:
+                    dirnames[:] = []
+                for fn in filenames:
+                    if fn == base:
+                        try:
+                            matches.append(str((current / fn).resolve()))
+                        except Exception:
+                            matches.append(str(current / fn))
+                        if len(matches) >= 5:
+                            break
+                if len(matches) >= 5:
+                    break
+        except Exception:
+            continue
+        if matches:
+            break
+
+    if len(matches) == 1:
+        return Path(matches[0]), []
+    return None, matches
+
+
 def auto_load_file(file_path: str, max_rows: Optional[int] = None) -> pd.DataFrame:
     """
     Auto loads a file based on its extension.
@@ -481,124 +613,7 @@ def auto_load_file(file_path: str, max_rows: Optional[int] = None) -> pd.DataFra
     """
     import pandas as pd
 
-    def _resolve_existing_path(p: str) -> tuple[Path | None, list[str]]:
-        """
-        Resolve `p` to an existing file path (best effort).
-        Returns (resolved_path, candidate_matches_for_error).
-        """
-        raw = (p or "").strip()
-        if not raw:
-            return None, []
-        path = Path(raw).expanduser()
-        if path.is_file():
-            return path, []
-
-        def _candidate_roots() -> list[Path]:
-            roots: list[Path] = []
-            try:
-                cwd = Path(os.getcwd()).expanduser().resolve()
-                roots.append(cwd)
-                # Walk up a few levels so relative paths work even when Streamlit
-                # is launched from a subdirectory (e.g., apps/...).
-                for parent in list(cwd.parents)[: DEFAULT_MAX_DEPTH + 1]:
-                    roots.append(parent)
-            except Exception:
-                roots.append(Path("."))
-
-            # Also try relative to the package location (helps when cwd isn't the repo root).
-            try:
-                here = Path(__file__).expanduser().resolve()
-                pkg_root = here.parents[2] if len(here.parents) > 2 else here.parent
-                roots.append(pkg_root)
-                for parent in list(pkg_root.parents)[: DEFAULT_MAX_DEPTH + 1]:
-                    roots.append(parent)
-            except Exception:
-                pass
-
-            # De-dupe while preserving order.
-            out: list[Path] = []
-            seen: set[str] = set()
-            for r in roots:
-                try:
-                    key = str(r)
-                except Exception:
-                    continue
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(r)
-            return out
-
-        # If the user provided a relative filename (common in chat), try a few conventional locations.
-        candidates: list[Path] = []
-
-        if not path.is_absolute():
-            base = path.name
-            for root in _candidate_roots():
-                # As-given relative to each candidate root (handles `data/foo.csv`)
-                candidates.append(root / path)
-                if base:
-                    # Common project folders
-                    candidates.extend(
-                        [
-                            root / "data" / base,
-                            root / "temp" / base,
-                            root / "temp" / "uploads" / base,
-                        ]
-                    )
-
-        for cand in candidates:
-            try:
-                resolved = cand.expanduser().resolve()
-            except Exception:
-                resolved = cand
-            if resolved.is_file():
-                return resolved, []
-
-        # Last resort: shallow, depth-limited search for the basename.
-        base = path.name
-        if not base or path.is_absolute():
-            return None, []
-
-        matches: list[str] = []
-        roots = []
-        for root in _candidate_roots()[:3]:
-            roots.extend([root / "data", root])
-        for root in roots:
-            try:
-                root = root.expanduser().resolve()
-            except Exception:
-                continue
-            if not root.exists() or not root.is_dir():
-                continue
-
-            root_depth = len(root.parts)
-            try:
-                for dirpath, dirnames, filenames in os.walk(root):
-                    current = Path(dirpath)
-                    depth = len(current.parts) - root_depth
-                    if depth >= DEFAULT_MAX_DEPTH:
-                        dirnames[:] = []
-                    for fn in filenames:
-                        if fn == base:
-                            try:
-                                matches.append(str((current / fn).resolve()))
-                            except Exception:
-                                matches.append(str(current / fn))
-                            if len(matches) >= 5:
-                                break
-                    if len(matches) >= 5:
-                        break
-            except Exception:
-                continue
-            if matches:
-                break
-
-        if len(matches) == 1:
-            return Path(matches[0]), []
-        return None, matches
-
-    resolved_path, matches = _resolve_existing_path(file_path)
+    resolved_path, matches = resolve_existing_file_path(file_path)
     if resolved_path is None:
         if matches:
             shown = "\n".join([f"- {m}" for m in matches])

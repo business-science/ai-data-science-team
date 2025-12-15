@@ -4,6 +4,35 @@ from langchain.tools import tool
 import psutil
 
 
+def _ms_to_iso(ms: int | None) -> str | None:
+    if ms is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _escape_md_cell(value: Any) -> str:
+    s = "" if value is None else str(value)
+    return s.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
+def _records_to_md_table(records: list[dict], columns: list[str], max_rows: int = 10) -> str:
+    if not records:
+        return ""
+    cols = [c for c in columns if c]
+    rows = records[: max_rows if max_rows and max_rows > 0 else len(records)]
+    header = "| " + " | ".join(cols) + " |"
+    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+    body = [
+        "| " + " | ".join(_escape_md_cell(r.get(c)) for c in cols) + " |" for r in rows
+    ]
+    return "\n".join([header, sep] + body)
+
+
 def _resolve_active_run(
     *,
     run_id: Optional[str] = None,
@@ -281,7 +310,7 @@ def mlflow_search_experiments(
     filter_string: Optional[str] = None,
     tracking_uri: str | None = None,
     registry_uri: str | None = None,
-) -> str:
+) -> tuple[str, dict]:
     """
     Search and list existing MLflow experiments.
 
@@ -303,37 +332,56 @@ def mlflow_search_experiments(
     Returns
     -------
     tuple
-        - JSON-serialized list of experiment metadata (ID, name, etc.).
-        - DataFrame of experiment metadata.
+        - Content string (human readable).
+        - Artifact dict with `experiments` as a list of records.
     """
     print("    * Tool: mlflow_search_experiments")
     from mlflow.tracking import MlflowClient
-    import pandas as pd
 
     client = MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
     experiments = client.search_experiments(filter_string=filter_string)
-    # Convert to a dictionary in a list
-    experiments_data = [dict(e) for e in experiments]
-    # Convert to a DataFrame
-    experiments_df = pd.DataFrame(experiments_data)
-    # Convert timestamps to datetime objects
-    experiments_df["last_update_time"] = pd.to_datetime(
-        experiments_df["last_update_time"], unit="ms"
-    )
-    experiments_df["creation_time"] = pd.to_datetime(
-        experiments_df["creation_time"], unit="ms"
-    )
+    records: list[dict] = []
+    for e in experiments or []:
+        d = dict(e)
+        records.append(
+            {
+                "experiment_id": str(d.get("experiment_id") or ""),
+                "name": d.get("name"),
+                "artifact_location": d.get("artifact_location"),
+                "lifecycle_stage": d.get("lifecycle_stage"),
+                "creation_time": _ms_to_iso(d.get("creation_time")),
+                "last_update_time": _ms_to_iso(d.get("last_update_time")),
+            }
+        )
 
-    return (experiments_df.to_dict(), experiments_df.to_dict())
+    if not records:
+        return ("No experiments found.", {"experiments": [], "count": 0})
+
+    table = _records_to_md_table(
+        records,
+        columns=[
+            "experiment_id",
+            "name",
+            "lifecycle_stage",
+            "creation_time",
+            "last_update_time",
+        ],
+        max_rows=15,
+    )
+    content = f"Found {len(records)} experiment(s).\n\n{table}"
+    return (content, {"experiments": records, "count": len(records)})
 
 
 @tool(response_format="content_and_artifact")
 def mlflow_search_runs(
     experiment_ids: Optional[Union[List[str], List[int], str, int]] = None,
     filter_string: Optional[str] = None,
+    max_results: int = 5,
+    order_by: Optional[List[str]] = None,
+    include_details: bool = False,
     tracking_uri: str | None = None,
     registry_uri: str | None = None,
-) -> str:
+) -> tuple[str, dict]:
     """
     Search runs within one or more MLflow experiments, optionally filtering by a filter_string.
 
@@ -343,6 +391,12 @@ def mlflow_search_runs(
         One or more Experiment IDs.
     filter_string : str, optional
         MLflow filter expression, e.g. "metrics.rmse < 1.0".
+    max_results : int, optional
+        Max number of runs to return (default: 5).
+    order_by : list[str], optional
+        MLflow order-by expressions (default: ["attributes.start_time DESC"]).
+    include_details : bool, optional
+        If True, include full `metrics`/`params`/`tags` in each run record. Defaults to False.
     tracking_uri: str, optional
         Address of local or remote tracking server.
         If not provided, defaults
@@ -354,12 +408,12 @@ def mlflow_search_runs(
 
     Returns
     -------
-    str
-        JSON-formatted list of runs that match the query.
+    tuple
+        - Content string (human readable).
+        - Artifact dict with `runs` as a list of records.
     """
     print("    * Tool: mlflow_search_runs")
     from mlflow.tracking import MlflowClient
-    import pandas as pd
 
     client = MlflowClient(tracking_uri=tracking_uri, registry_uri=registry_uri)
 
@@ -368,38 +422,103 @@ def mlflow_search_runs(
     if isinstance(experiment_ids, (str, int)):
         experiment_ids = [experiment_ids]
 
+    exp_ids = [str(x) for x in experiment_ids]
+    if order_by is None:
+        order_by = ["attributes.start_time DESC"]
+
     runs = client.search_runs(
-        experiment_ids=experiment_ids, filter_string=filter_string
+        experiment_ids=exp_ids,
+        filter_string=filter_string,
+        max_results=int(max_results) if max_results is not None else 50,
+        order_by=order_by,
     )
 
-    # If no runs are found, return an empty DataFrame
     if not runs:
-        return "No runs found.", pd.DataFrame()
+        return ("No runs found.", {"runs": [], "count": 0, "experiment_ids": exp_ids})
 
-    # Extract relevant information
-    data = []
+    def _kv_preview(d: dict, max_items: int = 8) -> str:
+        if not isinstance(d, dict) or not d:
+            return ""
+        items = []
+        for k in sorted(d.keys())[:max_items]:
+            v = d.get(k)
+            if isinstance(v, float):
+                v = round(v, 6)
+            items.append(f"{k}={v}")
+        suffix = " …" if len(d) > max_items else ""
+        return ", ".join(items) + suffix
+
+    records: list[dict] = []
     for run in runs:
-        run_info = {
-            "run_id": run.info.run_id,
-            "run_name": run.info.run_name,
-            "status": run.info.status,
-            "start_time": pd.to_datetime(run.info.start_time, unit="ms"),
-            "end_time": pd.to_datetime(run.info.end_time, unit="ms"),
-            "experiment_id": run.info.experiment_id,
-            "user_id": run.info.user_id,
+        start_ms = getattr(run.info, "start_time", None)
+        end_ms = getattr(run.info, "end_time", None)
+        duration_s = None
+        try:
+            if start_ms is not None and end_ms is not None:
+                duration_s = max(0.0, (end_ms - start_ms) / 1000.0)
+        except Exception:
+                duration_s = None
+
+        metrics = dict(getattr(run.data, "metrics", {}) or {})
+        params = dict(getattr(run.data, "params", {}) or {})
+        tags = dict(getattr(run.data, "tags", {}) or {})
+        has_model = False
+        try:
+            has_model = any(
+                k in tags for k in ("mlflow.log-model.history", "mlflow.loggedModels")
+            ) or ("model" in (tags.get("mlflow.loggedArtifacts") or ""))
+        except Exception:
+            has_model = False
+
+        run_record = {
+            "run_id": getattr(run.info, "run_id", None),
+            "run_name": getattr(run.info, "run_name", None),
+            "status": getattr(run.info, "status", None),
+            "experiment_id": str(getattr(run.info, "experiment_id", "") or ""),
+            "user_id": getattr(run.info, "user_id", None),
+            "start_time": _ms_to_iso(start_ms),
+            "end_time": _ms_to_iso(end_ms),
+            "duration_seconds": duration_s,
+            "has_model": has_model,
+            "model_uri": f"runs:/{getattr(run.info, 'run_id', '')}/model" if has_model else None,
+            "params_preview": _kv_preview(params),
+            "metrics_preview": _kv_preview(metrics),
         }
+        if include_details:
+            run_record["artifact_uri"] = getattr(run.info, "artifact_uri", None)
+            run_record["metrics"] = metrics
+            run_record["params"] = params
+            run_record["tags"] = tags
 
-        # Flatten metrics, parameters, and tags
-        run_info.update(run.data.metrics)
-        run_info.update({f"param_{k}": v for k, v in run.data.params.items()})
-        run_info.update({f"tag_{k}": v for k, v in run.data.tags.items()})
+        records.append(
+            run_record
+        )
 
-        data.append(run_info)
-
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-
-    return (df.iloc[:, 0:15].to_dict(), df.to_dict())
+    table = _records_to_md_table(
+        records,
+        columns=[
+            "run_id",
+            "run_name",
+            "status",
+            "start_time",
+            "duration_seconds",
+            "has_model",
+        ],
+        max_rows=min(15, max(1, int(max_results or 5))),
+    )
+    content = f"Showing {len(records)} most recent run(s) (max_results={max_results}).\n\n{table}"
+    return (
+        content,
+        {
+            "runs": records,
+            "count": len(records),
+            "experiment_ids": exp_ids,
+            "filter_string": filter_string,
+            "order_by": order_by,
+            "max_results": max_results,
+            "include_details": include_details,
+        },
+    )
 
 
 @tool(response_format="content")

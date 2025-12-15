@@ -581,14 +581,22 @@ def node_func_execute_agent_code_on_data(
     # Execute the code snippet to define the agent function
     local_vars = {}
     global_vars = {}
-    exec(agent_code, global_vars, local_vars)
+    agent_function = None
+    exec_error = None
+    try:
+        exec(agent_code, global_vars, local_vars)
+        # Retrieve the agent function from the executed code
+        agent_function = local_vars.get(agent_function_name, None)
+        if agent_function is None or not callable(agent_function):
+            raise ValueError(
+                f"Agent function '{agent_function_name}' not found or not callable in the provided code."
+            )
+    except Exception as e:
+        exec_error = f"{error_message_prefix}{str(e)}"
 
-    # Retrieve the agent function from the executed code
-    agent_function = local_vars.get(agent_function_name, None)
-    if agent_function is None or not callable(agent_function):
-        raise ValueError(
-            f"Agent function '{agent_function_name}' not found or not callable in the provided code."
-        )
+    # If code couldn't be executed/loaded, return early with an error (do not crash the team).
+    if exec_error:
+        return {result_key: None, error_key: exec_error}
 
     # Execute the agent function
     agent_error = None

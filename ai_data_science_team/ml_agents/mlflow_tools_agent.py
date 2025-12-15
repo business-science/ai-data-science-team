@@ -307,6 +307,11 @@ class MLflowToolsAgent(BaseAgent):
 
         # Try to convert to DataFrame sensibly
         try:
+            if isinstance(artifact, dict):
+                if isinstance(artifact.get("runs"), list):
+                    return pd.DataFrame(artifact.get("runs"))
+                if isinstance(artifact.get("experiments"), list):
+                    return pd.DataFrame(artifact.get("experiments"))
             return pd.DataFrame(artifact)
         except Exception:
             return pd.DataFrame({"artifact": [artifact]})

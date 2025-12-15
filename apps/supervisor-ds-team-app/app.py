@@ -79,7 +79,9 @@ def _redact_sqlalchemy_url(url: str) -> str:
         return url.strip()
 
 
-def _extract_db_target_from_prompt(prompt: str) -> tuple[str | None, tuple[int, int] | None]:
+def _extract_db_target_from_prompt(
+    prompt: str,
+) -> tuple[str | None, tuple[int, int] | None]:
     """
     Extract a DB target (SQLAlchemy URL or sqlite file path) from a natural-language prompt.
     Returns (target, (start, end)) where span refers to the target substring in prompt.
@@ -142,7 +144,9 @@ def _resolve_existing_sqlite_path(target: str, *, cwd: str) -> str | None:
     return None
 
 
-def _normalize_db_target_to_sqlalchemy_url(target: str, *, cwd: str) -> tuple[str | None, str | None]:
+def _normalize_db_target_to_sqlalchemy_url(
+    target: str, *, cwd: str
+) -> tuple[str | None, str | None]:
     """
     Convert a DB target (SQLAlchemy URL or sqlite file path) into a SQLAlchemy URL.
     Returns (sql_url, error).
@@ -160,7 +164,9 @@ def _normalize_db_target_to_sqlalchemy_url(target: str, *, cwd: str) -> tuple[st
             return None, f"Invalid SQLAlchemy URL: {e}"
 
         # Avoid accidentally creating new sqlite files for typos.
-        if str(parsed.drivername or "").startswith("sqlite") and parsed.database not in (None, "", ":memory:"):
+        if str(parsed.drivername or "").startswith(
+            "sqlite"
+        ) and parsed.database not in (None, "", ":memory:"):
             # database may be absolute or relative; interpret relative to cwd
             db_path = str(parsed.database)
             if not os.path.isabs(db_path):
@@ -262,7 +268,9 @@ def _parse_db_connect_command(prompt: str) -> dict | None:
     }
 
 
-def _replace_last_human_message(messages: list[BaseMessage], new_content: str) -> list[BaseMessage]:
+def _replace_last_human_message(
+    messages: list[BaseMessage], new_content: str
+) -> list[BaseMessage]:
     """
     Return a shallow-copied messages list with the last HumanMessage content replaced.
     """
@@ -367,7 +375,9 @@ def persist_pipeline_artifacts(
 
         base_dir = os.path.abspath(os.path.expanduser(base_dir))
         if os.path.exists(base_dir) and not os.path.isdir(base_dir):
-            return {"error": f"Pipeline persist path exists and is not a directory: {base_dir}"}
+            return {
+                "error": f"Pipeline persist path exists and is not a directory: {base_dir}"
+            }
 
         pipeline_hash = pipeline.get("pipeline_hash")
         model_id = pipeline.get("model_dataset_id") or pipeline.get("active_dataset_id")
@@ -440,8 +450,9 @@ with st.expander(
     st.markdown(
         """
         #### Data loading / discovery
-        - Load `data/churn_data.csv` and show the first 5 rows.
         - What files are in `./data`? List only CSVs.
+        - Load `data/churn_data.csv` and show the first 5 rows.
+        - Load multiple files: `Load data/bike_sales_data.csv and data/bike_model_specs.csv`
 
         #### Wrangling / cleaning
         - Clean the churn data; fix TotalCharges numeric conversion and missing values; summarize changes.
@@ -457,15 +468,21 @@ with st.expander(
         - Plot tenure distribution split by InternetService.
         
         #### SQL (if a DB is connected)
+        - Connect to a DB: `connect to data/northwind.db`
         - Show the tables in the connected database (do not call other agents).
         - Write SQL to count customers by Contract type and execute it.      
 
         #### Feature engineering
         - Create model-ready features for churn (encode categoricals, handle totals/averages).
         
-        #### Machine Learning / MLflow
+        #### Machine Learning (Logs To MLFlow by default)
         - Train an H2O AutoML classifier on Churn with max runtime 30 seconds and report leaderboard.
-        - Log best model to MLflow and show run info.
+        - Score using an H2O model id (current cluster): ``predict with model `XGBoost_grid_...` on the dataset``
+        
+        #### MLflow
+        - What runs are available in the H2O AutoML experiment?
+        - Score using MLflow (latest run): `predict using mlflow on the dataset`
+        - Score using MLflow (specific run): `predict using mlflow run <run_id> on the dataset`
         """
     )
 
@@ -533,10 +550,16 @@ with st.sidebar:
     datasets = team_state.get("datasets")
     datasets = datasets if isinstance(datasets, dict) else {}
     current_active_id = team_state.get("active_dataset_id")
-    current_active_id = current_active_id if isinstance(current_active_id, str) else None
+    current_active_id = (
+        current_active_id if isinstance(current_active_id, str) else None
+    )
     current_active_key = team_state.get("active_data_key")
 
-    if current_active_id and current_active_id in datasets and isinstance(datasets[current_active_id], dict):
+    if (
+        current_active_id
+        and current_active_id in datasets
+        and isinstance(datasets[current_active_id], dict)
+    ):
         entry = datasets[current_active_id]
         label = entry.get("label") or current_active_id
         stage = entry.get("stage")
@@ -686,14 +709,20 @@ with st.sidebar:
         help="If SQL is generated, also saves `sql/query.sql` and `sql/sql_executor.py` under the pipeline folder.",
     )
     if st.session_state.get("last_pipeline_persist_dir"):
-        st.caption(f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`")
+        st.caption(
+            f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`"
+        )
     st.markdown("**SQL options**")
     if "sql_url" not in st.session_state:
         st.session_state["sql_url"] = DEFAULT_SQL_URL
     if SQL_URL_INPUT_KEY not in st.session_state:
-        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get("sql_url", DEFAULT_SQL_URL)
+        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get(
+            "sql_url", DEFAULT_SQL_URL
+        )
     if st.session_state.pop(SQL_URL_SYNC_FLAG, False):
-        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get("sql_url", DEFAULT_SQL_URL)
+        st.session_state[SQL_URL_INPUT_KEY] = st.session_state.get(
+            "sql_url", DEFAULT_SQL_URL
+        )
 
     sql_url_input = st.text_input(
         "SQLAlchemy URL (optional)",
@@ -704,17 +733,31 @@ with st.sidebar:
     st.session_state["sql_url"] = sql_url_input or DEFAULT_SQL_URL
 
     st.markdown("**MLflow options**")
-    enable_mlflow_logging = st.checkbox("Enable MLflow logging in training", value=True)
+    # Use separate widget keys so we can normalize/sync into the internal config keys
+    # without violating Streamlit's "no session_state mutation after widget instantiation" rule.
+    enable_mlflow_logging = st.checkbox(
+        "Enable MLflow logging in training",
+        value=bool(st.session_state.get("enable_mlflow_logging", True)),
+        key="enable_mlflow_logging_input",
+    )
     default_mlflow_uri = f"file:{os.path.abspath('mlruns')}"
     mlflow_tracking_uri = st.text_input(
-        "MLflow tracking URI", value=default_mlflow_uri
+        "MLflow tracking URI",
+        value=st.session_state.get("mlflow_tracking_uri") or default_mlflow_uri,
+        key="mlflow_tracking_uri_input",
     ).strip()
     mlflow_experiment_name = st.text_input(
-        "MLflow experiment name", value="H2O AutoML"
+        "MLflow experiment name",
+        value=st.session_state.get("mlflow_experiment_name") or "H2O AutoML",
+        key="mlflow_experiment_name_input",
     ).strip()
-    st.session_state["enable_mlflow_logging"] = enable_mlflow_logging
-    st.session_state["mlflow_tracking_uri"] = mlflow_tracking_uri or None
-    st.session_state["mlflow_experiment_name"] = mlflow_experiment_name or "H2O AutoML"
+    st.session_state["enable_mlflow_logging"] = bool(enable_mlflow_logging)
+    st.session_state["mlflow_tracking_uri"] = (
+        mlflow_tracking_uri or ""
+    ).strip() or None
+    st.session_state["mlflow_experiment_name"] = (
+        mlflow_experiment_name or ""
+    ).strip() or "H2O AutoML"
 
     st.markdown("**Debug options**")
     st.checkbox(
@@ -722,6 +765,12 @@ with st.sidebar:
         value=bool(st.session_state.get("debug_mode", False)),
         key="debug_mode",
         help="Print extra debug info to the terminal to troubleshoot DB connect and multi-file loads.",
+    )
+    st.checkbox(
+        "Show progress in chat",
+        value=bool(st.session_state.get("show_progress", True)),
+        key="show_progress",
+        help="Shows which agent is running while the team works (best effort).",
     )
 
     if st.button("Clear chat"):
@@ -847,7 +896,9 @@ def get_input_data():
             safe_name = os.path.basename(getattr(uploaded_file, "name", "upload.csv"))
             upload_dir = os.path.join("temp", "uploads")
             os.makedirs(upload_dir, exist_ok=True)
-            saved_path = os.path.abspath(os.path.join(upload_dir, f"{digest}_{safe_name}"))
+            saved_path = os.path.abspath(
+                os.path.join(upload_dir, f"{digest}_{safe_name}")
+            )
             if not os.path.exists(saved_path):
                 with open(saved_path, "wb") as f:
                     f.write(raw_bytes)
@@ -974,7 +1025,9 @@ def render_history(history: list[BaseMessage]):
                 inputs = pipe.get("inputs") or []
                 inputs_txt = ""
                 if isinstance(inputs, list) and inputs:
-                    inputs_txt = f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
+                    inputs_txt = (
+                        f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
+                    )
                 st.markdown(
                     f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
                     f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
@@ -1011,7 +1064,9 @@ def render_history(history: list[BaseMessage]):
                     )
                     st.code(script, language="python")
             else:
-                st.info("No pipeline available yet. Load data and run a transform (wrangle/clean/features).")
+                st.info(
+                    "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
+                )
         # SQL
         with tabs[3]:
             sql_query = detail.get("sql_query_code")
@@ -1119,7 +1174,15 @@ def render_history(history: list[BaseMessage]):
             mlflow_art = detail.get("mlflow_artifacts")
             if model_info is not None:
                 st.markdown("**Model Info**")
-                st.json(model_info)
+                try:
+                    if isinstance(model_info, dict):
+                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                    elif isinstance(model_info, list):
+                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                    else:
+                        st.json(model_info)
+                except Exception:
+                    st.json(model_info)
             if eval_art is not None:
                 st.markdown("**Evaluation**")
                 st.json(eval_art)
@@ -1138,7 +1201,71 @@ def render_history(history: list[BaseMessage]):
                     st.error(f"Error rendering evaluation chart: {e}")
             if mlflow_art is not None:
                 st.markdown("**MLflow Artifacts**")
-                st.json(mlflow_art)
+
+                def _render_mlflow_artifact(obj):
+                    try:
+                        if isinstance(obj, dict) and isinstance(obj.get("runs"), list):
+                            df = pd.DataFrame(obj["runs"])
+                            preferred_cols = [
+                                c
+                                for c in [
+                                    "run_id",
+                                    "run_name",
+                                    "status",
+                                    "start_time",
+                                    "duration_seconds",
+                                    "has_model",
+                                    "model_uri",
+                                    "params_preview",
+                                    "metrics_preview",
+                                ]
+                                if c in df.columns
+                            ]
+                            st.dataframe(
+                                df[preferred_cols] if preferred_cols else df,
+                                width="stretch",
+                            )
+                            # If detailed fields exist, keep them accessible without cluttering the table.
+                            if any(c in df.columns for c in ("params", "metrics", "tags", "artifact_uri")):
+                                with st.expander("Raw run details", expanded=False):
+                                    st.json(obj)
+                            return
+                        if isinstance(obj, dict) and isinstance(
+                            obj.get("experiments"), list
+                        ):
+                            df = pd.DataFrame(obj["experiments"])
+                            preferred_cols = [
+                                c
+                                for c in [
+                                    "experiment_id",
+                                    "name",
+                                    "lifecycle_stage",
+                                    "creation_time",
+                                    "last_update_time",
+                                    "artifact_location",
+                                ]
+                                if c in df.columns
+                            ]
+                            st.dataframe(
+                                df[preferred_cols] if preferred_cols else df,
+                                width="stretch",
+                            )
+                            return
+                        if isinstance(obj, list):
+                            st.dataframe(pd.DataFrame(obj), width="stretch")
+                            return
+                    except Exception:
+                        pass
+                    st.json(obj)
+
+                if isinstance(mlflow_art, dict) and not any(
+                    k in mlflow_art for k in ("runs", "experiments")
+                ):
+                    for tool_name, tool_art in mlflow_art.items():
+                        st.markdown(f"`{tool_name}`")
+                        _render_mlflow_artifact(tool_art)
+                else:
+                    _render_mlflow_artifact(mlflow_art)
             if model_info is None and eval_art is None and mlflow_art is None:
                 st.info("No model/evaluation/MLflow artifacts.")
 
@@ -1308,14 +1435,53 @@ if prompt:
             # Apply explicit user override last.
             if active_dataset_override:
                 invoke_payload["active_dataset_id"] = active_dataset_override
-            result = team.invoke(
-                invoke_payload,
-                config={
-                    "recursion_limit": recursion_limit,
-                    "configurable": {"thread_id": st.session_state.thread_id},
-                },
-            )
+            run_config = {
+                "recursion_limit": recursion_limit,
+                "configurable": {"thread_id": st.session_state.thread_id},
+            }
+            show_progress = bool(st.session_state.get("show_progress", True))
+            progress_box = st.empty() if show_progress else None
+            if progress_box is not None:
+                progress_box.info("Working…")
+
+            if show_progress and hasattr(team, "stream"):
+                last_event = None
+                for event in team.stream(
+                    invoke_payload, config=run_config, stream_mode="values"
+                ):
+                    if isinstance(event, dict):
+                        last_event = event
+                        label = None
+                        nxt = event.get("next")
+                        if (
+                            isinstance(nxt, str)
+                            and nxt.strip()
+                            and nxt.strip().upper() != "FINISH"
+                        ):
+                            label = f"Routing → {nxt.strip()}"
+                        elif (
+                            isinstance(event.get("last_worker"), str)
+                            and event.get("last_worker").strip()
+                        ):
+                            label = event.get("last_worker").strip()
+                        if (
+                            progress_box is not None
+                            and isinstance(label, str)
+                            and label.strip()
+                        ):
+                            progress_box.info(f"Working: `{label}`")
+                result = last_event
+            else:
+                result = team.invoke(invoke_payload, config=run_config)
+
+            if progress_box is not None:
+                progress_box.empty()
         except Exception as e:
+            try:
+                if "progress_box" in locals() and progress_box is not None:
+                    progress_box.empty()
+            except Exception:
+                pass
             msg = str(e)
             if (
                 "rate_limit_exceeded" in msg
@@ -1563,7 +1729,9 @@ if prompt:
             "artifacts": _summarize_artifacts(artifacts),
             "pipeline": (
                 build_pipeline_snapshot(
-                    result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                    result.get("datasets")
+                    if isinstance(result.get("datasets"), dict)
+                    else {},
                     active_dataset_id=result.get("active_dataset_id"),
                 )
                 if isinstance(result, dict)
@@ -1572,17 +1740,23 @@ if prompt:
             "pipelines": (
                 {
                     "model": build_pipeline_snapshot(
-                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        result.get("datasets")
+                        if isinstance(result.get("datasets"), dict)
+                        else {},
                         active_dataset_id=result.get("active_dataset_id"),
                         target="model",
                     ),
                     "active": build_pipeline_snapshot(
-                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        result.get("datasets")
+                        if isinstance(result.get("datasets"), dict)
+                        else {},
                         active_dataset_id=result.get("active_dataset_id"),
                         target="active",
                     ),
                     "latest": build_pipeline_snapshot(
-                        result.get("datasets") if isinstance(result.get("datasets"), dict) else {},
+                        result.get("datasets")
+                        if isinstance(result.get("datasets"), dict)
+                        else {},
                         active_dataset_id=result.get("active_dataset_id"),
                         target="latest",
                     ),
@@ -1623,17 +1797,27 @@ if prompt:
                     detail["pipeline"],
                     base_dir=st.session_state.get("pipeline_persist_dir"),
                     overwrite=bool(st.session_state.get("pipeline_persist_overwrite")),
-                    include_sql=bool(st.session_state.get("pipeline_persist_include_sql", True)),
+                    include_sql=bool(
+                        st.session_state.get("pipeline_persist_include_sql", True)
+                    ),
                     sql_query=detail.get("sql_query_code"),
                     sql_executor=detail.get("sql_database_function"),
                 )
                 if isinstance(saved, dict) and saved.get("persisted_dir"):
                     detail["pipeline"]["persisted_dir"] = saved.get("persisted_dir")
                     detail["pipeline"]["persisted_spec_path"] = saved.get("spec_path")
-                    detail["pipeline"]["persisted_script_path"] = saved.get("script_path")
-                    detail["pipeline"]["persisted_sql_query_path"] = saved.get("sql_query_path")
-                    detail["pipeline"]["persisted_sql_executor_path"] = saved.get("sql_executor_path")
-                    st.session_state.last_pipeline_persist_dir = saved.get("persisted_dir")
+                    detail["pipeline"]["persisted_script_path"] = saved.get(
+                        "script_path"
+                    )
+                    detail["pipeline"]["persisted_sql_query_path"] = saved.get(
+                        "sql_query_path"
+                    )
+                    detail["pipeline"]["persisted_sql_executor_path"] = saved.get(
+                        "sql_executor_path"
+                    )
+                    st.session_state.last_pipeline_persist_dir = saved.get(
+                        "persisted_dir"
+                    )
                     if isinstance(detail.get("pipelines"), dict):
                         detail["pipelines"]["model"] = detail["pipeline"]
                 if isinstance(saved, dict) and saved.get("error"):
@@ -1644,6 +1828,10 @@ if prompt:
         idx = len(st.session_state.details)
         st.session_state.details.append(detail)
         msgs.add_ai_message(f"{UI_DETAIL_MARKER_PREFIX}{idx}")
+
+        # Sidebar widgets render before the team run in Streamlit's top-to-bottom execution.
+        # Rerun once after saving results so the sidebar reflects the latest active dataset immediately.
+        st.rerun()
 
 # ---------------- Always-on analysis panel (bottom) ----------------
 st.markdown("---")
@@ -1716,7 +1904,9 @@ if st.session_state.get("details"):
                 ):
                     st.info("No data frames returned.")
             with tabs[2]:
-                pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
+                pipelines = (
+                    detail.get("pipelines") if isinstance(detail, dict) else None
+                )
                 if not isinstance(pipelines, dict):
                     pipelines = {}
                 pipe = detail.get("pipeline") if isinstance(detail, dict) else None
@@ -1779,7 +1969,9 @@ if st.session_state.get("details"):
                         )
                         st.code(script, language="python")
                 else:
-                    st.info("No pipeline available yet. Load data and run a transform (wrangle/clean/features).")
+                    st.info(
+                        "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
+                    )
             with tabs[3]:
                 sql_query = detail.get("sql_query_code")
                 sql_fn = detail.get("sql_database_function")
