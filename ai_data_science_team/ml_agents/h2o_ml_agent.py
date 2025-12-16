@@ -739,7 +739,11 @@ def make_h2o_ml_agent(
                         mlflow.log_metrics(numeric_metrics)
 
                         # Log artifact if we saved the model
-                        mlflow.h2o.log_model(aml.leader, artifact_path="model")
+                        # MLflow 3.x prefers `name=` (artifact_path is deprecated)
+                        try:
+                            mlflow.h2o.log_model(aml.leader, name="model")
+                        except TypeError:
+                            mlflow.h2o.log_model(aml.leader, artifact_path="model")
                         
                         # Log the leaderboard
                         mlflow.log_table(leaderboard_dict, "leaderboard.json")
@@ -1100,9 +1104,59 @@ def make_h2o_ml_agent(
                                 if isinstance(best_id, str) and best_id.strip():
                                     leader_model = h2o.get_model(best_id.strip())
                                     try:
-                                        mlflow.h2o.log_model(leader_model, name="model")
+                                        logged_model = mlflow.h2o.log_model(
+                                            leader_model, name="model"
+                                        )
                                     except TypeError:
-                                        mlflow.h2o.log_model(leader_model, artifact_path="model")
+                                        logged_model = mlflow.h2o.log_model(
+                                            leader_model, artifact_path="model"
+                                        )
+
+                                    # Store a stable model URI for downstream scoring.
+                                    model_uri = (
+                                        getattr(logged_model, "model_uri", None)
+                                        if logged_model is not None
+                                        else None
+                                    )
+                                    model_uri = (
+                                        model_uri
+                                        if isinstance(model_uri, str) and model_uri.strip()
+                                        else f"runs:/{run_id}/model"
+                                    )
+                                    result["mlflow_model_uri"] = model_uri
+                                    if isinstance(result.get("h2o_train_result"), dict):
+                                        result["h2o_train_result"]["mlflow_model_uri"] = model_uri
+
+                                    # Best-effort: capture a lightweight listing of model files
+                                    # so users can see that the model is persisted even if MLflow
+                                    # UI separates "Logged models" from run artifacts.
+                                    model_files: list[str] = []
+                                    try:
+                                        from mlflow.tracking import MlflowClient
+
+                                        client = MlflowClient()
+                                        model_files = [
+                                            getattr(a, "path", None)
+                                            for a in client.list_artifacts(run_id, path="model")
+                                        ]
+                                        model_files = [p for p in model_files if isinstance(p, str)]
+                                    except Exception:
+                                        model_files = []
+
+                                    model_art = {
+                                        "run_id": run_id,
+                                        "model_uri": model_uri,
+                                        "best_model_id": best_id,
+                                        "model_files": model_files,
+                                    }
+                                    result["mlflow_model"] = model_art
+                                    if isinstance(result.get("h2o_train_result"), dict):
+                                        result["h2o_train_result"]["mlflow_model"] = model_art
+
+                                    try:
+                                        mlflow.log_dict(model_art, artifact_file="model_info.json")
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                     except Exception:

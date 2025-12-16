@@ -426,6 +426,27 @@ def make_mlflow_tools_agent(
         print("    * POST-PROCESS RESULTS")
         internal_messages = state.get("messages", [])
 
+        def _escape_md_cell(value: Any) -> str:
+            s = "" if value is None else str(value)
+            return s.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+        def _records_to_md_table(
+            records: list[dict], columns: list[str], max_rows: int = 15
+        ) -> str:
+            if not records:
+                return ""
+            cols = [c for c in columns if c]
+            rows = records[: max_rows if max_rows and max_rows > 0 else len(records)]
+            header = "| " + " | ".join(cols) + " |"
+            sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+            body = [
+                "| "
+                + " | ".join(_escape_md_cell(r.get(c)) for c in cols)
+                + " |"
+                for r in rows
+            ]
+            return "\n".join([header, sep] + body)
+
         if not internal_messages:
             return {
                 "messages": [],
@@ -443,7 +464,7 @@ def make_mlflow_tools_agent(
         if last_ai is None:
             last_ai = internal_messages[-1]
 
-        last_ai_message = AIMessage(getattr(last_ai, "content", ""), role=AGENT_NAME)
+        last_ai_content = getattr(last_ai, "content", "")
 
         # Collect artifacts per tool if possible
         artifacts = {}
@@ -464,6 +485,68 @@ def make_mlflow_tools_agent(
         if log_tool_calls and tool_calls:
             for name in tool_calls:
                 print(f"    * Tool: {name}")
+
+        def _format_artifacts_table(art: Any) -> str | None:
+            if not isinstance(art, dict):
+                return None
+
+            parts: list[str] = []
+            exp_art = art.get("mlflow_search_experiments")
+            if isinstance(exp_art, dict) and isinstance(exp_art.get("experiments"), list):
+                exps = exp_art.get("experiments") or []
+                count = exp_art.get("count") if isinstance(exp_art.get("count"), int) else len(exps)
+                parts.append(f"Found {count} MLflow experiment(s).")
+                parts.append(
+                    _records_to_md_table(
+                        exps,
+                        columns=[
+                            "experiment_id",
+                            "name",
+                            "lifecycle_stage",
+                            "creation_time",
+                            "last_update_time",
+                            "artifact_location",
+                        ],
+                        max_rows=15,
+                    )
+                )
+
+            runs_art = art.get("mlflow_search_runs")
+            if isinstance(runs_art, dict) and isinstance(runs_art.get("runs"), list):
+                runs = runs_art.get("runs") or []
+                count = runs_art.get("count") if isinstance(runs_art.get("count"), int) else len(runs)
+                max_results = runs_art.get("max_results")
+                header = (
+                    f"Showing {count} most recent run(s) (max_results={max_results})."
+                    if isinstance(max_results, int)
+                    else f"Showing {count} run(s)."
+                )
+                parts.append(header)
+                parts.append(
+                    _records_to_md_table(
+                        runs,
+                        columns=[
+                            "run_id",
+                            "run_name",
+                            "status",
+                            "start_time",
+                            "duration_seconds",
+                            "has_model",
+                            "model_uri",
+                            "params_preview",
+                            "metrics_preview",
+                        ],
+                        max_rows=15,
+                    )
+                )
+
+            return "\n\n".join([p for p in parts if isinstance(p, str) and p.strip()]) or None
+
+        formatted = _format_artifacts_table(artifacts) or _format_artifacts_table(last_tool_artifact)
+        last_ai_message = AIMessage(
+            content=formatted or last_ai_content,
+            name=AGENT_NAME,
+        )
 
         return {
             "messages": [last_ai_message],

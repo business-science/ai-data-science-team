@@ -3660,10 +3660,27 @@ Examples:
                     name="h2o_ml_agent",
                 )
             )
+            model_uri = response.get("mlflow_model_uri")
+            if isinstance(model_uri, str) and model_uri.strip():
+                merged["messages"].append(
+                    AIMessage(
+                        content=f"MLflow model URI: `{model_uri.strip()}`",
+                        name="h2o_ml_agent",
+                    )
+                )
         leaderboard = response.get("leaderboard")
         return {
             **merged,
             "model_info": leaderboard,
+            "mlflow_artifacts": response.get("mlflow_model")
+            or (
+                {
+                    "run_id": mlflow_run_id,
+                    "model_uri": response.get("mlflow_model_uri"),
+                }
+                if mlflow_run_id
+                else None
+            ),
             "artifacts": {
                 **state.get("artifacts", {}),
                 "h2o": response,

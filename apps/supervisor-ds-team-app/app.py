@@ -740,7 +740,10 @@ with st.sidebar:
         value=bool(st.session_state.get("enable_mlflow_logging", True)),
         key="enable_mlflow_logging_input",
     )
-    default_mlflow_uri = f"file:{os.path.abspath('mlruns')}"
+    # Prefer a local SQLite backend store to avoid MLflow FileStore deprecation warnings.
+    # Note: this changes where runs are tracked; existing `file:.../mlruns` runs won't
+    # appear unless you switch the URI back (or migrate).
+    default_mlflow_uri = f"sqlite:///{os.path.abspath('mlflow.db')}"
     mlflow_tracking_uri = st.text_input(
         "MLflow tracking URI",
         value=st.session_state.get("mlflow_tracking_uri") or default_mlflow_uri,
@@ -1261,9 +1264,17 @@ def render_history(history: list[BaseMessage]):
                 if isinstance(mlflow_art, dict) and not any(
                     k in mlflow_art for k in ("runs", "experiments")
                 ):
-                    for tool_name, tool_art in mlflow_art.items():
-                        st.markdown(f"`{tool_name}`")
-                        _render_mlflow_artifact(tool_art)
+                    # If this looks like a dict-of-tool artifacts (from MLflowToolsAgent), render per tool.
+                    is_tool_map = all(
+                        isinstance(k, str) and k.startswith("mlflow_")
+                        for k in mlflow_art.keys()
+                    )
+                    if is_tool_map:
+                        for tool_name, tool_art in mlflow_art.items():
+                            st.markdown(f"`{tool_name}`")
+                            _render_mlflow_artifact(tool_art)
+                    else:
+                        _render_mlflow_artifact(mlflow_art)
                 else:
                     _render_mlflow_artifact(mlflow_art)
             if model_info is None and eval_art is None and mlflow_art is None:
