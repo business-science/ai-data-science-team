@@ -191,6 +191,7 @@ class H2OMLAgent(BaseAgent):
         bypass_explain_code=False,
         enable_mlflow=False,
         mlflow_tracking_uri=None,
+        mlflow_artifact_root=None,
         mlflow_experiment_name="H2O AutoML",
         mlflow_run_name=None,
         checkpointer: Optional[Checkpointer] = None,
@@ -209,6 +210,7 @@ class H2OMLAgent(BaseAgent):
             "bypass_explain_code": bypass_explain_code,
             "enable_mlflow": enable_mlflow,
             "mlflow_tracking_uri": mlflow_tracking_uri,
+            "mlflow_artifact_root": mlflow_artifact_root,
             "mlflow_experiment_name": mlflow_experiment_name,
             "mlflow_run_name": mlflow_run_name,
             "checkpointer": checkpointer,
@@ -435,6 +437,7 @@ def make_h2o_ml_agent(
     bypass_explain_code=False,
     enable_mlflow=False,
     mlflow_tracking_uri=None,
+    mlflow_artifact_root=None,
     mlflow_experiment_name="H2O AutoML",
     mlflow_run_name=None,
     checkpointer=None,
@@ -993,7 +996,32 @@ def make_h2o_ml_agent(
 
                         if mlflow_tracking_uri:
                             mlflow.set_tracking_uri(mlflow_tracking_uri)
-                        mlflow.set_experiment(mlflow_experiment_name or "H2O AutoML")
+                        exp_name = mlflow_experiment_name or "H2O AutoML"
+                        # Best-effort: if an artifact root is configured, ensure the experiment
+                        # exists with that artifact location. Existing experiments keep their
+                        # original artifact location in MLflow.
+                        try:
+                            from pathlib import Path
+                            from mlflow.tracking import MlflowClient
+                            import re
+
+                            if isinstance(mlflow_artifact_root, str) and mlflow_artifact_root.strip():
+                                root = Path(mlflow_artifact_root).expanduser().resolve()
+                                root.mkdir(parents=True, exist_ok=True)
+                                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(exp_name)).strip("_")
+                                safe = safe or "H2O_AutoML"
+                                artifact_location = (root / safe).as_uri()
+                                client = MlflowClient(tracking_uri=mlflow_tracking_uri)
+                                exp = client.get_experiment_by_name(str(exp_name))
+                                if exp is None:
+                                    client.create_experiment(
+                                        name=str(exp_name),
+                                        artifact_location=artifact_location,
+                                    )
+                        except Exception:
+                            pass
+
+                        mlflow.set_experiment(exp_name)
 
                         def _sanitize_metric_name(name: str) -> str:
                             n = str(name or "").strip()

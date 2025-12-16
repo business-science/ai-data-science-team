@@ -1,5 +1,5 @@
 """
-Streamlit app for the Supervisor-led Data Science Team.
+Streamlit app for the Supervisor-led AI Data Science Team.
 
 Command:
     streamlit run apps/supervisor-ds-team-app/app.py
@@ -43,7 +43,7 @@ from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
 st.set_page_config(
     page_title="Supervisor Data Science Team", page_icon=":bar_chart:", layout="wide"
 )
-TITLE = "Supervisor-led Data Science Team"
+TITLE = "Supervisor-led AI Data Science Team"
 st.title(TITLE)
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
@@ -749,6 +749,17 @@ with st.sidebar:
         value=st.session_state.get("mlflow_tracking_uri") or default_mlflow_uri,
         key="mlflow_tracking_uri_input",
     ).strip()
+    default_mlflow_artifact_root = os.path.abspath("mlflow_artifacts")
+    mlflow_artifact_root = st.text_input(
+        "MLflow artifact root (local path)",
+        value=st.session_state.get("mlflow_artifact_root")
+        or default_mlflow_artifact_root,
+        key="mlflow_artifact_root_input",
+        help=(
+            "Where MLflow stores artifacts (models, tables, plots). "
+            "This is used when creating new experiments; existing experiments keep their current artifact location."
+        ),
+    ).strip()
     mlflow_experiment_name = st.text_input(
         "MLflow experiment name",
         value=st.session_state.get("mlflow_experiment_name") or "H2O AutoML",
@@ -757,6 +768,9 @@ with st.sidebar:
     st.session_state["enable_mlflow_logging"] = bool(enable_mlflow_logging)
     st.session_state["mlflow_tracking_uri"] = (
         mlflow_tracking_uri or ""
+    ).strip() or None
+    st.session_state["mlflow_artifact_root"] = (
+        mlflow_artifact_root or ""
     ).strip() or None
     st.session_state["mlflow_experiment_name"] = (
         mlflow_experiment_name or ""
@@ -807,6 +821,7 @@ def build_team(
     checkpointer,
     enable_mlflow_logging: bool,
     mlflow_tracking_uri: str | None,
+    mlflow_artifact_root: str | None,
     mlflow_experiment_name: str,
 ):
     llm = ChatOpenAI(model=model_name)
@@ -838,6 +853,7 @@ def build_team(
         log=False,
         enable_mlflow=enable_mlflow_logging,
         mlflow_tracking_uri=mlflow_tracking_uri,
+        mlflow_artifact_root=mlflow_artifact_root,
         mlflow_experiment_name=mlflow_experiment_name,
     )
     model_evaluation_agent = ModelEvaluationAgent()
@@ -950,8 +966,10 @@ def render_history(history: list[BaseMessage]):
                 "Pipeline",
                 "SQL",
                 "Charts",
-                "Reports",
-                "Models/MLflow",
+                "EDA Reports",
+                "Models",
+                "Predictions",
+                "MLflow",
             ]
         )
         # AI Reasoning
@@ -1135,7 +1153,7 @@ def render_history(history: list[BaseMessage]):
                     st.error(f"Error rendering chart: {e}")
             else:
                 st.info("No charts returned.")
-        # Reports
+        # EDA Reports
         with tabs[5]:
             reports = detail.get("eda_reports") if isinstance(detail, dict) else None
             sweetviz_file = (
@@ -1169,12 +1187,11 @@ def render_history(history: list[BaseMessage]):
             if not sweetviz_file and not dtale_url:
                 st.info("No EDA reports returned.")
 
-        # Models / MLflow
+        # Models
         with tabs[6]:
             model_info = detail.get("model_info")
             eval_art = detail.get("eval_artifacts")
             eval_graph = detail.get("eval_plotly_graph")
-            mlflow_art = detail.get("mlflow_artifacts")
             if model_info is not None:
                 st.markdown("**Model Info**")
                 try:
@@ -1202,7 +1219,38 @@ def render_history(history: list[BaseMessage]):
                     )
                 except Exception as e:
                     st.error(f"Error rendering evaluation chart: {e}")
-            if mlflow_art is not None:
+
+            if model_info is None and eval_art is None and eval_graph is None:
+                st.info("No model or evaluation artifacts.")
+
+        # Predictions
+        with tabs[7]:
+            preds_df = detail.get("data_wrangled_df")
+            if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
+                lower_cols = {str(c).lower() for c in preds_df.columns}
+                looks_like_preds = (
+                    "predict" in lower_cols
+                    or any(str(c).lower().startswith("p") for c in preds_df.columns)
+                    or any(
+                        str(c).lower().startswith("actual_") for c in preds_df.columns
+                    )
+                )
+                if looks_like_preds:
+                    st.markdown("**Predictions Preview**")
+                    st.dataframe(preds_df)
+                else:
+                    st.info(
+                        "No predictions detected for this turn. (Tip: ask `predict using mlflow on the dataset` or `predict with model <id> on the dataset`.)"
+                    )
+            else:
+                st.info("No predictions returned.")
+
+        # MLflow
+        with tabs[8]:
+            mlflow_art = detail.get("mlflow_artifacts")
+            if mlflow_art is None:
+                st.info("No MLflow artifacts.")
+            else:
                 st.markdown("**MLflow Artifacts**")
 
                 def _render_mlflow_artifact(obj):
@@ -1228,8 +1276,10 @@ def render_history(history: list[BaseMessage]):
                                 df[preferred_cols] if preferred_cols else df,
                                 width="stretch",
                             )
-                            # If detailed fields exist, keep them accessible without cluttering the table.
-                            if any(c in df.columns for c in ("params", "metrics", "tags", "artifact_uri")):
+                            if any(
+                                c in df.columns
+                                for c in ("params", "metrics", "tags", "artifact_uri")
+                            ):
                                 with st.expander("Raw run details", expanded=False):
                                     st.json(obj)
                             return
@@ -1264,7 +1314,6 @@ def render_history(history: list[BaseMessage]):
                 if isinstance(mlflow_art, dict) and not any(
                     k in mlflow_art for k in ("runs", "experiments")
                 ):
-                    # If this looks like a dict-of-tool artifacts (from MLflowToolsAgent), render per tool.
                     is_tool_map = all(
                         isinstance(k, str) and k.startswith("mlflow_")
                         for k in mlflow_art.keys()
@@ -1277,8 +1326,6 @@ def render_history(history: list[BaseMessage]):
                         _render_mlflow_artifact(mlflow_art)
                 else:
                     _render_mlflow_artifact(mlflow_art)
-            if model_info is None and eval_art is None and mlflow_art is None:
-                st.info("No model/evaluation/MLflow artifacts.")
 
     for m in history:
         role = getattr(m, "role", getattr(m, "type", "assistant"))
@@ -1363,6 +1410,7 @@ if prompt:
             st.session_state.checkpointer if add_memory else None,
             st.session_state.get("enable_mlflow_logging", True),
             st.session_state.get("mlflow_tracking_uri"),
+            st.session_state.get("mlflow_artifact_root"),
             st.session_state.get("mlflow_experiment_name", "H2O AutoML"),
         )
         try:
@@ -1386,6 +1434,9 @@ if prompt:
                     "config": {
                         "mlflow_tracking_uri": st.session_state.get(
                             "mlflow_tracking_uri"
+                        ),
+                        "mlflow_artifact_root": st.session_state.get(
+                            "mlflow_artifact_root"
                         ),
                         "mlflow_experiment_name": st.session_state.get(
                             "mlflow_experiment_name", "H2O AutoML"
@@ -1869,8 +1920,10 @@ if st.session_state.get("details"):
                     "Pipeline",
                     "SQL",
                     "Charts",
-                    "Reports",
-                    "Models/MLflow",
+                    "EDA Reports",
+                    "Models",
+                    "Predictions",
+                    "MLflow",
                 ]
             )
             with tabs[0]:
@@ -2082,10 +2135,17 @@ if st.session_state.get("details"):
                 model_info = detail.get("model_info")
                 eval_art = detail.get("eval_artifacts")
                 eval_graph = detail.get("eval_plotly_graph")
-                mlflow_art = detail.get("mlflow_artifacts")
                 if model_info is not None:
                     st.markdown("**Model Info**")
-                    st.json(model_info)
+                    try:
+                        if isinstance(model_info, dict):
+                            st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        elif isinstance(model_info, list):
+                            st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        else:
+                            st.json(model_info)
+                    except Exception:
+                        st.json(model_info)
                 if eval_art is not None:
                     st.markdown("**Evaluation**")
                     st.json(eval_art)
@@ -2099,11 +2159,116 @@ if st.session_state.get("details"):
                     st.plotly_chart(
                         fig, width="stretch", key=f"bottom_eval_chart_{selected}"
                     )
-                if mlflow_art is not None:
+                if model_info is None and eval_art is None and eval_graph is None:
+                    st.info("No model or evaluation artifacts.")
+
+            with tabs[7]:
+                preds_df = detail.get("data_wrangled_df")
+                if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
+                    lower_cols = {str(c).lower() for c in preds_df.columns}
+                    looks_like_preds = (
+                        "predict" in lower_cols
+                        or any(str(c).lower().startswith("p") for c in preds_df.columns)
+                        or any(
+                            str(c).lower().startswith("actual_")
+                            for c in preds_df.columns
+                        )
+                    )
+                    if looks_like_preds:
+                        st.markdown("**Predictions Preview**")
+                        st.dataframe(preds_df)
+                    else:
+                        st.info("No predictions detected for this turn.")
+                else:
+                    st.info("No predictions returned.")
+
+            with tabs[8]:
+                mlflow_art = detail.get("mlflow_artifacts")
+                if mlflow_art is None:
+                    st.info("No MLflow artifacts.")
+                else:
                     st.markdown("**MLflow Artifacts**")
-                    st.json(mlflow_art)
-                if model_info is None and eval_art is None and mlflow_art is None:
-                    st.info("No model/evaluation/MLflow artifacts.")
+
+                    def _render_mlflow_artifact(obj):
+                        try:
+                            if isinstance(obj, dict) and isinstance(
+                                obj.get("runs"), list
+                            ):
+                                df = pd.DataFrame(obj["runs"])
+                                preferred_cols = [
+                                    c
+                                    for c in [
+                                        "run_id",
+                                        "run_name",
+                                        "status",
+                                        "start_time",
+                                        "duration_seconds",
+                                        "has_model",
+                                        "model_uri",
+                                        "params_preview",
+                                        "metrics_preview",
+                                    ]
+                                    if c in df.columns
+                                ]
+                                st.dataframe(
+                                    df[preferred_cols] if preferred_cols else df,
+                                    width="stretch",
+                                )
+                                if any(
+                                    c in df.columns
+                                    for c in (
+                                        "params",
+                                        "metrics",
+                                        "tags",
+                                        "artifact_uri",
+                                    )
+                                ):
+                                    with st.expander("Raw run details", expanded=False):
+                                        st.json(obj)
+                                return
+                            if isinstance(obj, dict) and isinstance(
+                                obj.get("experiments"), list
+                            ):
+                                df = pd.DataFrame(obj["experiments"])
+                                preferred_cols = [
+                                    c
+                                    for c in [
+                                        "experiment_id",
+                                        "name",
+                                        "lifecycle_stage",
+                                        "creation_time",
+                                        "last_update_time",
+                                        "artifact_location",
+                                    ]
+                                    if c in df.columns
+                                ]
+                                st.dataframe(
+                                    df[preferred_cols] if preferred_cols else df,
+                                    width="stretch",
+                                )
+                                return
+                            if isinstance(obj, list):
+                                st.dataframe(pd.DataFrame(obj), width="stretch")
+                                return
+                        except Exception:
+                            pass
+                        st.json(obj)
+
+                    if isinstance(mlflow_art, dict) and not any(
+                        k in mlflow_art for k in ("runs", "experiments")
+                    ):
+                        is_tool_map = all(
+                            isinstance(k, str) and k.startswith("mlflow_")
+                            for k in mlflow_art.keys()
+                        )
+                        if is_tool_map:
+                            for tool_name, tool_art in mlflow_art.items():
+                                st.markdown(f"`{tool_name}`")
+                                _render_mlflow_artifact(tool_art)
+                        else:
+                            _render_mlflow_artifact(mlflow_art)
+                    else:
+                        _render_mlflow_artifact(mlflow_art)
     except Exception as e:
         st.error(f"Could not render analysis details: {e}")
 else:

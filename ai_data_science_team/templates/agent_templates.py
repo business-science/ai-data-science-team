@@ -565,18 +565,22 @@ def node_func_execute_agent_code_on_data(
     data = state.get(data_key)
     agent_code = state.get(code_snippet_key)
 
-    # Preprocessing: If no pre-processing function is given, attempt a default handling
-    if pre_processing is None:
-        if isinstance(data, dict):
-            df = pd.DataFrame.from_dict(data)
-        elif isinstance(data, list):
-            df = [pd.DataFrame.from_dict(item) for item in data]
+    # Preprocessing: If no pre-processing function is given, attempt a default handling.
+    # Important: do not crash the whole team if preprocessing fails; return an error instead.
+    try:
+        if pre_processing is None:
+            if isinstance(data, dict):
+                df = pd.DataFrame.from_dict(data)
+            elif isinstance(data, list):
+                df = [pd.DataFrame.from_dict(item) for item in data]
+            else:
+                raise ValueError(
+                    "Data is not a dictionary or list and no pre_processing function was provided."
+                )
         else:
-            raise ValueError(
-                "Data is not a dictionary or list and no pre_processing function was provided."
-            )
-    else:
-        df = pre_processing(data)
+            df = pre_processing(data)
+    except Exception as e:
+        return {result_key: None, error_key: f"{error_message_prefix}{str(e)}"}
 
     # Execute the code snippet to define the agent function
     local_vars = {}

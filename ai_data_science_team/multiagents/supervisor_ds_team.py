@@ -3773,6 +3773,7 @@ Examples:
             cfg = {}
 
         tracking_uri = cfg.get("mlflow_tracking_uri") if isinstance(cfg, dict) else None
+        artifact_root = cfg.get("mlflow_artifact_root") if isinstance(cfg, dict) else None
         experiment_name = (
             cfg.get("mlflow_experiment_name") if isinstance(cfg, dict) else None
         )
@@ -3804,10 +3805,32 @@ Examples:
         try:
             import mlflow
             import json
+            from pathlib import Path
 
             if tracking_uri:
                 mlflow.set_tracking_uri(tracking_uri)
             if experiment_name:
+                # Best-effort: if an artifact root is configured, ensure the experiment exists
+                # with that artifact location (applies only when creating new experiments).
+                try:
+                    from mlflow.tracking import MlflowClient
+                    import re
+
+                    if isinstance(artifact_root, str) and artifact_root.strip():
+                        root = Path(artifact_root).expanduser().resolve()
+                        root.mkdir(parents=True, exist_ok=True)
+                        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(experiment_name)).strip("_")
+                        safe = safe or "experiment"
+                        artifact_location = (root / safe).as_uri()
+                        client = MlflowClient(tracking_uri=tracking_uri)
+                        exp = client.get_experiment_by_name(str(experiment_name))
+                        if exp is None:
+                            client.create_experiment(
+                                name=str(experiment_name),
+                                artifact_location=artifact_location,
+                            )
+                except Exception:
+                    pass
                 mlflow.set_experiment(experiment_name)
 
             # Start or resume the run

@@ -172,6 +172,7 @@ mlruns/
 reports/
 mlflow.db
 mlflow.db-*
+mlflow_artifacts/
 
 # Draw.io
 *.drawio
