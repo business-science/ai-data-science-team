@@ -11,6 +11,7 @@ import re
 import uuid
 import os
 import json
+import inspect
 from openai import OpenAI
 import pandas as pd
 import sqlalchemy as sql
@@ -21,6 +22,10 @@ import streamlit.components.v1 as components
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_openai import ChatOpenAI
+try:
+    from langchain_ollama import ChatOllama  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    ChatOllama = None
 from langgraph.checkpoint.memory import MemorySaver
 
 from ai_data_science_team.agents.data_loader_tools_agent import DataLoaderToolsAgent
@@ -488,42 +493,109 @@ with st.expander(
 
 
 # ---------------- Sidebar ----------------
+key_status = None
 with st.sidebar:
-    st.header("Enter your OpenAI API Key")
-    # Keep API key in session_state
-    st.session_state["OPENAI_API_KEY"] = st.text_input(
-        "API Key",
-        type="password",
-        help="Your OpenAI API key is required for the app to function.",
+    st.header("LLM")
+    llm_provider = st.selectbox(
+        "Provider",
+        ["OpenAI", "Ollama"],
+        index=0,
+        key="llm_provider",
+        help="Choose OpenAI (cloud) or Ollama (local).",
     )
 
-    key_status = None
-    if st.session_state["OPENAI_API_KEY"]:
-        try:
-            _ = OpenAI(api_key=st.session_state["OPENAI_API_KEY"]).models.list()
-            key_status = "ok"
-            st.success("API Key is valid!")
-        except Exception as e:
-            key_status = "bad"
-            st.error(f"Invalid API Key: {e}")
+    ollama_base_url = None
+    if llm_provider == "OpenAI":
+        openai_key_input = st.text_input(
+            "OpenAI API key",
+            type="password",
+            value=st.session_state.get("OPENAI_API_KEY") or "",
+            key="openai_api_key_input",
+            help="Required when using OpenAI models.",
+        )
+        openai_key = (openai_key_input or "").strip()
+        st.session_state["OPENAI_API_KEY"] = openai_key
+
+        if openai_key:
+            try:
+                _ = OpenAI(api_key=openai_key).models.list()
+                key_status = "ok"
+                st.success("API Key is valid!")
+            except Exception as e:
+                key_status = "bad"
+                st.error(f"Invalid API Key: {e}")
+        else:
+            st.info("Please enter your OpenAI API key to proceed (or switch to Ollama).")
+            st.stop()
+
+        model_choice = st.selectbox(
+            "Model",
+            [
+                "gpt-4.1-mini",
+                "gpt-4.1",
+                "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-5.2",
+                "gpt-5.1-mini",
+                "gpt-5.1",
+            ],
+            key="openai_model_choice",
+        )
     else:
-        st.info("Please enter your OpenAI API Key to proceed.")
-        st.stop()
+        if ChatOllama is None:
+            st.error(
+                "Ollama support requires `langchain-ollama`. Install it with `pip install langchain-ollama`."
+            )
+            st.stop()
+
+        default_ollama_url = st.session_state.get("ollama_base_url") or "http://localhost:11434"
+        default_ollama_model = st.session_state.get("ollama_model") or "llama3.1:8b"
+        ollama_base_url = st.text_input(
+            "Ollama base URL",
+            value=default_ollama_url,
+            key="ollama_base_url_input",
+            help="Usually `http://localhost:11434`.",
+        ).strip()
+        ollama_model = st.text_input(
+            "Ollama model",
+            value=default_ollama_model,
+            key="ollama_model_input",
+            help="Example: `llama3.1:8b` (run `ollama list` to see what's installed).",
+        ).strip()
+
+        st.session_state["ollama_base_url"] = ollama_base_url
+        st.session_state["ollama_model"] = ollama_model
+
+        model_choice = ollama_model
+
+        if st.button("Check Ollama connection", use_container_width=True, key="ollama_check"):
+            try:
+                from urllib.request import Request, urlopen
+                import json as _json
+
+                url = f"{ollama_base_url.rstrip('/')}/api/tags"
+                req = Request(url, headers={"Accept": "application/json"})
+                with urlopen(req, timeout=3) as resp:
+                    payload = _json.loads(resp.read().decode("utf-8", errors="replace"))
+                models = [
+                    m.get("name")
+                    for m in (payload.get("models") or [])
+                    if isinstance(m, dict) and isinstance(m.get("name"), str)
+                ]
+                if models:
+                    st.success(f"Connected. Found {len(models)} model(s).")
+                    st.write(models[:20])
+                else:
+                    st.warning(
+                        "Connected, but no models were returned. Run `ollama list` to confirm."
+                    )
+            except Exception as e:
+                st.error(f"Could not connect to Ollama at `{ollama_base_url}`: {e}")
+
+        st.caption("Tip: start Ollama with `ollama serve` and pull a model with `ollama pull <model>`.")
 
     # Settings
     st.header("Settings")
-    model_choice = st.selectbox(
-        "OpenAI model",
-        [
-            "gpt-4.1-mini",
-            "gpt-4.1",
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-5.2",
-            "gpt-5.1-mini",
-            "gpt-5.1",
-        ],
-    )
     recursion_limit = st.slider("Recursion limit", 4, 20, 10, 1)
     add_memory = st.checkbox("Enable short-term memory", value=True)
     proactive_workflow_mode = st.checkbox(
@@ -810,18 +882,27 @@ with st.sidebar:
         # Reset checkpointer when clearing chat
         st.session_state.checkpointer = get_checkpointer() if add_memory else None
 
-# Hard gate: require valid API key before rendering the rest of the app
+# Hard gate: only require an API key for OpenAI provider
+llm_provider_selected = st.session_state.get("llm_provider") or "OpenAI"
 resolved_api_key = st.session_state.get("OPENAI_API_KEY")
-if not resolved_api_key:
-    st.info("Please enter your OpenAI API key in the sidebar to proceed.")
-    st.stop()
-if key_status == "bad":
-    st.error("Invalid OpenAI API key. Please fix it in the sidebar.")
-    st.stop()
+if llm_provider_selected == "OpenAI":
+    if not resolved_api_key:
+        st.info("Please enter your OpenAI API key in the sidebar to proceed.")
+        st.stop()
+    if key_status == "bad":
+        st.error("Invalid OpenAI API key. Please fix it in the sidebar.")
+        st.stop()
+else:
+    if not (st.session_state.get("ollama_model") or "").strip():
+        st.info("Please enter an Ollama model name in the sidebar (e.g., `llama3.1:8b`).")
+        st.stop()
 
 
 def build_team(
+    llm_provider: str,
     model_name: str,
+    openai_api_key: str | None,
+    ollama_base_url: str | None,
     use_memory: bool,
     sql_url: str,
     checkpointer,
@@ -830,7 +911,26 @@ def build_team(
     mlflow_artifact_root: str | None,
     mlflow_experiment_name: str,
 ):
-    llm = ChatOpenAI(model=model_name)
+    llm_provider = (llm_provider or "OpenAI").strip()
+    if llm_provider.lower() == "ollama":
+        if ChatOllama is None:
+            raise RuntimeError(
+                "Ollama provider selected but `langchain-ollama` is not installed."
+            )
+        kwargs: dict[str, object] = {"model": model_name}
+        base_url = (ollama_base_url or "").strip()
+        if base_url:
+            try:
+                sig = inspect.signature(ChatOllama)
+                if "base_url" in sig.parameters:
+                    kwargs["base_url"] = base_url
+                elif "ollama_base_url" in sig.parameters:
+                    kwargs["ollama_base_url"] = base_url
+            except Exception:
+                kwargs["base_url"] = base_url
+        llm = ChatOllama(**kwargs)
+    else:
+        llm = ChatOpenAI(model=model_name, api_key=openai_api_key)
     workflow_planner_agent = WorkflowPlannerAgent(llm)
     data_loader_agent = DataLoaderToolsAgent(
         llm, invoke_react_agent_kwargs={"recursion_limit": 4}
@@ -1387,10 +1487,10 @@ st.session_state.selected_data_provenance = input_provenance
 # ---------------- User input ----------------
 prompt = st.chat_input("Ask the data science team...")
 if prompt:
-    if not resolved_api_key or key_status == "bad":
-        st.error(
-            "OpenAI API key is required and must be valid. Enter it in the sidebar."
-        )
+    if llm_provider_selected == "OpenAI" and (
+        not resolved_api_key or key_status == "bad"
+    ):
+        st.error("OpenAI API key is required and must be valid. Enter it in the sidebar.")
         st.stop()
 
     debug_mode = bool(st.session_state.get("debug_mode", False))
@@ -1433,7 +1533,10 @@ if prompt:
     # If this was only a connect/disconnect command, skip running the team.
     if team_prompt:
         team = build_team(
+            llm_provider_selected,
             model_choice,
+            resolved_api_key if llm_provider_selected == "OpenAI" else None,
+            st.session_state.get("ollama_base_url"),
             add_memory,
             st.session_state.get("sql_url", DEFAULT_SQL_URL),
             st.session_state.checkpointer if add_memory else None,

@@ -6,6 +6,9 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from IPython.display import Markdown
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers.openai_functions import JsonOutputFunctionsParser
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableLambda
+from langchain_core.utils.json import parse_json_markdown
 from langchain_openai import ChatOpenAI
 
 from langgraph.graph import StateGraph, START, END
@@ -263,18 +266,73 @@ Examples:
             MessagesPlaceholder(variable_name="messages"),
             (
                 "system",
-                "Given the conversation above, who should act next? Or FINISH? Select one of: {route_options}",
+                "Given the conversation above, who should act next? Or FINISH? "
+                "Respond with ONLY one of: {route_options}",
             ),
         ]
     ).partial(
         route_options=str(route_options), subagent_names=", ".join(subagent_names)
     )
 
-    supervisor_chain = (
-        prompt
-        | llm.bind(functions=[function_def], function_call={"name": "route"})
-        | JsonOutputFunctionsParser()
-    )
+    def _parse_router_output(text: str) -> dict[str, str]:
+        """
+        Parse router output into {"next": <route_option>}.
+
+        Supports:
+        - OpenAI function-calling JSON via JsonOutputFunctionsParser (handled separately)
+        - Raw JSON / JSON-in-markdown
+        - Plain-text worker name
+        """
+        t = (text or "").strip()
+        if not t:
+            return {"next": "FINISH"}
+
+        # Try JSON (raw or fenced) first.
+        try:
+            parsed = parse_json_markdown(t)
+            if isinstance(parsed, dict):
+                nxt = parsed.get("next")
+                if isinstance(nxt, str) and nxt in route_options:
+                    return {"next": nxt}
+        except Exception:
+            pass
+
+        lower = t.lower()
+        for opt in route_options:
+            if opt.lower() in lower:
+                return {"next": opt}
+
+        # Best-effort: handle formats like "next: Feature_Engineering_Agent"
+        try:
+            import re
+
+            m = re.search(r"(?:next|route)\\s*[:=]\\s*([A-Za-z0-9_]+)", t, flags=re.I)
+            if m:
+                cand = m.group(1).strip()
+                for opt in route_options:
+                    if cand == opt or cand.lower() == opt.lower():
+                        return {"next": opt}
+        except Exception:
+            pass
+
+        return {"next": "FINISH"}
+
+    # Router chain:
+    # - For OpenAI models: use function-calling for high-precision routing.
+    # - For other chat models (e.g., Ollama): fall back to strict text parsing.
+    if isinstance(llm, ChatOpenAI):
+        supervisor_chain = (
+            prompt
+            | llm.bind(functions=[function_def], function_call={"name": "route"})
+            | JsonOutputFunctionsParser()
+        )
+    else:
+        supervisor_chain = (
+            prompt
+            | llm
+            | StrOutputParser()
+            | RunnableLambda(_parse_router_output)
+        )
 
     def _clean_messages(msgs: Sequence[BaseMessage]) -> Sequence[BaseMessage]:
         """

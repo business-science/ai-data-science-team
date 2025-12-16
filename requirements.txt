@@ -1,6 +1,7 @@
 openpyxl
 langchain
 langchain_community
+langchain-ollama
 langchain_openai
 langchain_experimental
 langgraph >= 0.2.74

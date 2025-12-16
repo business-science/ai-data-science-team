@@ -169,6 +169,28 @@ pip install git+https://github.com/business-science/ai-data-science-team.git --u
 
 [See all examples here.](/examples)
 
+### Using Ollama (local LLM)
+
+You can run the agents with a local model via [Ollama](https://ollama.com/) using `langchain-ollama`.
+
+1. Install & start Ollama, then pull a model:
+
+``` bash
+ollama serve
+ollama pull llama3.1:8b
+```
+
+2. Use `ChatOllama` instead of `ChatOpenAI`:
+
+``` python
+from langchain_ollama import ChatOllama
+
+llm = ChatOllama(
+    model="llama3.1:8b",
+    base_url="http://localhost:11434",
+)
+```
+
 ### Example: H2O Machine Learning Agent
 
 [See the full example here.](https://github.com/business-science/ai-data-science-team/blob/master/examples/ml_agents/h2o_machine_learning_agent.ipynb)
