@@ -1275,7 +1275,7 @@ def render_history(history: list[BaseMessage]):
                     fig = _apply_streamlit_plot_style(pio.from_json(payload))
                     st.plotly_chart(
                         fig,
-                        width="stretch",
+                        use_container_width=True,
                         key=f"detail_chart_{key_suffix}",
                     )
                 except Exception as e:
@@ -1325,9 +1325,13 @@ def render_history(history: list[BaseMessage]):
                 st.markdown("**Model Info**")
                 try:
                     if isinstance(model_info, dict):
-                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        st.dataframe(
+                            pd.DataFrame(model_info), use_container_width=True
+                        )
                     elif isinstance(model_info, list):
-                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        st.dataframe(
+                            pd.DataFrame(model_info), use_container_width=True
+                        )
                     else:
                         st.json(model_info)
                 except Exception:
@@ -1344,7 +1348,9 @@ def render_history(history: list[BaseMessage]):
                     )
                     fig = _apply_streamlit_plot_style(pio.from_json(payload))
                     st.plotly_chart(
-                        fig, width="stretch", key=f"eval_chart_{key_suffix}"
+                        fig,
+                        use_container_width=True,
+                        key=f"eval_chart_{key_suffix}",
                     )
                 except Exception as e:
                     st.error(f"Error rendering evaluation chart: {e}")
@@ -1403,7 +1409,7 @@ def render_history(history: list[BaseMessage]):
                             ]
                             st.dataframe(
                                 df[preferred_cols] if preferred_cols else df,
-                                width="stretch",
+                                use_container_width=True,
                             )
                             if any(
                                 c in df.columns
@@ -1430,11 +1436,11 @@ def render_history(history: list[BaseMessage]):
                             ]
                             st.dataframe(
                                 df[preferred_cols] if preferred_cols else df,
-                                width="stretch",
+                                use_container_width=True,
                             )
                             return
                         if isinstance(obj, list):
-                            st.dataframe(pd.DataFrame(obj), width="stretch")
+                            st.dataframe(pd.DataFrame(obj), use_container_width=True)
                             return
                     except Exception:
                         pass
@@ -2262,12 +2268,396 @@ if prompt:
             pass
 
         idx = len(st.session_state.details)
+
+        # Phase 2 plumbing (lightweight): keep a per-dataset artifact index so Pipeline Studio
+        # can render node artifacts deterministically without scanning prior turns.
+        try:
+            import time
+
+            dsid = None
+            if isinstance(result, dict):
+                dsid = result.get("active_dataset_id")
+            if isinstance(detail.get("pipelines"), dict):
+                active_pipe = detail["pipelines"].get("active")
+                if isinstance(active_pipe, dict) and isinstance(
+                    active_pipe.get("target_dataset_id"), str
+                ):
+                    dsid = active_pipe.get("target_dataset_id")
+            dsid = dsid if isinstance(dsid, str) and dsid else None
+
+            def _safe_json(obj):
+                try:
+                    if isinstance(obj, pd.DataFrame):
+                        return obj.to_dict()
+                except Exception:
+                    pass
+                return obj
+
+            if dsid:
+                idx_map = st.session_state.get("pipeline_studio_artifacts")
+                idx_map = idx_map if isinstance(idx_map, dict) else {}
+                cur = idx_map.get(dsid) if isinstance(idx_map.get(dsid), dict) else {}
+                ts = time.time()
+                if detail.get("plotly_graph") is not None:
+                    cur["plotly_graph"] = {
+                        "json": _safe_json(detail.get("plotly_graph")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("eda_reports") is not None:
+                    cur["eda_reports"] = {
+                        "reports": _safe_json(detail.get("eda_reports")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("model_info") is not None:
+                    cur["model_info"] = {
+                        "info": _safe_json(detail.get("model_info")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("mlflow_artifacts") is not None:
+                    cur["mlflow_artifacts"] = {
+                        "artifacts": _safe_json(detail.get("mlflow_artifacts")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if cur:
+                    idx_map[dsid] = cur
+                    st.session_state["pipeline_studio_artifacts"] = idx_map
+        except Exception:
+            pass
+
         st.session_state.details.append(detail)
         msgs.add_ai_message(f"{UI_DETAIL_MARKER_PREFIX}{idx}")
 
         # Sidebar widgets render before the team run in Streamlit's top-to-bottom execution.
         # Rerun once after saving results so the sidebar reflects the latest active dataset immediately.
         st.rerun()
+
+# ---------------- Pipeline Studio ----------------
+st.markdown("---")
+st.subheader("Pipeline Studio")
+
+try:
+    studio_state = st.session_state.get("team_state", {})
+    studio_state = studio_state if isinstance(studio_state, dict) else {}
+    studio_datasets = studio_state.get("datasets")
+    studio_datasets = studio_datasets if isinstance(studio_datasets, dict) else {}
+    studio_active_id = studio_state.get("active_dataset_id")
+    studio_active_id = studio_active_id if isinstance(studio_active_id, str) else None
+
+    def _dataset_entry_to_df(entry: dict) -> pd.DataFrame | None:
+        if not isinstance(entry, dict):
+            return None
+        data = entry.get("data")
+        try:
+            if isinstance(data, pd.DataFrame):
+                return data
+        except Exception:
+            pass
+        try:
+            if isinstance(data, dict):
+                return pd.DataFrame.from_dict(data)
+            if isinstance(data, list):
+                return pd.DataFrame(data)
+        except Exception:
+            return None
+        return None
+
+    def _latest_detail_for_dataset_id(
+        dataset_id: str, *, require_chart: bool = False
+    ) -> dict | None:
+        details = st.session_state.get("details") or []
+        if not isinstance(details, list):
+            return None
+        for d in reversed(details):
+            if not isinstance(d, dict):
+                continue
+            pipelines = d.get("pipelines") if isinstance(d.get("pipelines"), dict) else {}
+            active_pipe = pipelines.get("active") if isinstance(pipelines.get("active"), dict) else None
+            active_target_id = (
+                active_pipe.get("target_dataset_id")
+                if isinstance(active_pipe, dict)
+                else None
+            )
+            if active_target_id == dataset_id:
+                if require_chart and not d.get("plotly_graph"):
+                    continue
+                return d
+        return None
+
+    if not studio_datasets:
+        st.info("No pipeline yet. Load data and run a transform to build one.")
+    else:
+        target_options = [
+            ("Model (latest feature)", "model"),
+            ("Active dataset", "active"),
+            ("Latest dataset", "latest"),
+        ]
+        target_label = st.radio(
+            "Pipeline target",
+            options=[k for k, _v in target_options],
+            index=0,
+            horizontal=True,
+            key="pipeline_studio_target",
+        )
+        target_key = dict(target_options).get(target_label, "model")
+        pipe = build_pipeline_snapshot(
+            studio_datasets, active_dataset_id=studio_active_id, target=target_key
+        )
+        lineage = pipe.get("lineage") if isinstance(pipe, dict) else None
+        lineage = lineage if isinstance(lineage, list) else []
+
+        if not lineage:
+            st.info(
+                "No pipeline available yet. Load data and run a transform (wrangle/clean/features/model/predict)."
+            )
+        else:
+            meta_by_id = {
+                str(x.get("id")): x for x in lineage if isinstance(x, dict) and x.get("id")
+            }
+            node_ids = [did for did in meta_by_id.keys() if did]
+
+            left, right = st.columns([0.35, 0.65], gap="large")
+
+            with left:
+                st.markdown(
+                    f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                    f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
+                    f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                )
+
+                script = pipe.get("script") if isinstance(pipe, dict) else None
+                if isinstance(script, str) and script.strip():
+                    st.download_button(
+                        "Download pipeline script",
+                        data=script.encode("utf-8"),
+                        file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
+                        mime="text/x-python",
+                        key="pipeline_studio_download_repro",
+                    )
+
+                auto_follow_default = bool(
+                    st.session_state.get("pipeline_studio_autofollow", True)
+                )
+                auto_follow = st.checkbox(
+                    "Auto-follow latest step",
+                    value=auto_follow_default,
+                    key="pipeline_studio_autofollow",
+                    help="When enabled, the studio auto-selects the newest pipeline node after each run.",
+                )
+
+                # Keep selection valid and optionally auto-follow newest node.
+                if node_ids:
+                    desired = node_ids[-1]
+                    current = st.session_state.get("pipeline_studio_node_id")
+                    if auto_follow:
+                        st.session_state["pipeline_studio_node_id"] = desired
+                    elif not isinstance(current, str) or current not in node_ids:
+                        st.session_state["pipeline_studio_node_id"] = desired
+
+                def _node_label(did: str) -> str:
+                    m = meta_by_id.get(did) or {}
+                    label = m.get("label") or did
+                    stage = m.get("stage") or ""
+                    shape = m.get("shape")
+                    tk = m.get("transform_kind") or ""
+                    bits = []
+                    if stage:
+                        bits.append(str(stage))
+                    if tk:
+                        bits.append(str(tk))
+                    if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                        bits.append(f"{shape[0]}×{shape[1]}")
+                    meta = f" ({', '.join(bits)})" if bits else ""
+                    return f"{label}{meta}"
+
+                selected_node_id = st.selectbox(
+                    "Pipeline step",
+                    options=node_ids,
+                    format_func=_node_label,
+                    key="pipeline_studio_node_id",
+                )
+
+                m = meta_by_id.get(selected_node_id) or {}
+                with st.expander("Selected step details", expanded=False):
+                    st.json(m)
+
+            with right:
+                view = st.radio(
+                    "Workspace",
+                    ["Table", "Chart", "Code", "Predictions"],
+                    horizontal=True,
+                    key="pipeline_studio_view",
+                )
+
+                entry = (
+                    studio_datasets.get(selected_node_id)
+                    if isinstance(studio_datasets, dict)
+                    else None
+                )
+                entry = entry if isinstance(entry, dict) else {}
+                df_sel = _dataset_entry_to_df(entry)
+
+                if view == "Table":
+                    if df_sel is None:
+                        st.info("No tabular data available for this pipeline step.")
+                    else:
+                        n_rows = int(getattr(df_sel, "shape", (0, 0))[0] or 0)
+                        n_cols = int(getattr(df_sel, "shape", (0, 0))[1] or 0)
+                        st.caption(f"Shape: {n_rows} rows × {n_cols} columns")
+                        rows = st.slider(
+                            "Preview rows",
+                            min_value=5,
+                            max_value=200,
+                            value=25,
+                            step=5,
+                            key="pipeline_studio_preview_rows",
+                        )
+                        st.dataframe(
+                            df_sel.head(int(rows)), use_container_width=True
+                        )
+
+                elif view == "Chart":
+                    graph_json = None
+                    idx_map = st.session_state.get("pipeline_studio_artifacts")
+                    if isinstance(idx_map, dict):
+                        entry_art = idx_map.get(selected_node_id)
+                        entry_art = entry_art if isinstance(entry_art, dict) else {}
+                        pg = entry_art.get("plotly_graph")
+                        pg = pg if isinstance(pg, dict) else {}
+                        graph_json = pg.get("json")
+                    if not graph_json:
+                        detail = _latest_detail_for_dataset_id(
+                            selected_node_id, require_chart=True
+                        )
+                        graph_json = (
+                            detail.get("plotly_graph") if isinstance(detail, dict) else None
+                        )
+                    if not graph_json:
+                        st.info(
+                            "No chart found for this dataset yet. Try: `plot ...` while this dataset is active."
+                        )
+                    else:
+                        payload = (
+                            json.dumps(graph_json)
+                            if isinstance(graph_json, dict)
+                            else graph_json
+                        )
+                        fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"pipeline_studio_chart_{selected_node_id}",
+                        )
+
+                elif view == "Code":
+                    prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
+                    transform = prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
+                    kind = str(transform.get("kind") or "")
+
+                    st.markdown("**Provenance**")
+                    st.json(
+                        {
+                            "source_type": prov.get("source_type"),
+                            "source": prov.get("source"),
+                            "transform_kind": kind or None,
+                            "created_by": entry.get("created_by"),
+                            "created_at": entry.get("created_at"),
+                        }
+                    )
+
+                    code_text = None
+                    code_lang = "python"
+                    title = None
+                    if kind == "python_function":
+                        title = "Transform function (Python)"
+                        code_text = transform.get("function_code")
+                    elif kind == "sql_query":
+                        title = "SQL query"
+                        code_text = transform.get("sql_query_code")
+                        code_lang = "sql"
+                    elif kind == "python_merge":
+                        title = "Merge code (Python)"
+                        code_text = transform.get("merge_code")
+                    elif kind == "mlflow_predict":
+                        run_id = transform.get("run_id")
+                        run_id = run_id.strip() if isinstance(run_id, str) else ""
+                        title = "Prediction (MLflow) snippet"
+                        code_text = (
+                            "\n".join(
+                                [
+                                    "import pandas as pd",
+                                    "import mlflow",
+                                    "",
+                                    f"model_uri = 'runs:/{run_id}/model'",
+                                    "model = mlflow.pyfunc.load_model(model_uri)",
+                                    "preds = model.predict(df)",
+                                    "df_preds = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)",
+                                ]
+                            ).strip()
+                            + "\n"
+                        )
+                    elif kind == "h2o_predict":
+                        model_id = transform.get("model_id")
+                        model_id = model_id.strip() if isinstance(model_id, str) else ""
+                        title = "Prediction (H2O) snippet"
+                        code_text = (
+                            "\n".join(
+                                [
+                                    "import h2o",
+                                    "",
+                                    "h2o.init()",
+                                    f"model = h2o.get_model('{model_id}')",
+                                    "frame = h2o.H2OFrame(df)",
+                                    "preds = model.predict(frame)",
+                                    "df_preds = preds.as_data_frame(use_pandas=True)",
+                                ]
+                            ).strip()
+                            + "\n"
+                        )
+
+                    if isinstance(code_text, str) and code_text.strip():
+                        st.markdown(f"**{title or 'Code'}**")
+                        st.code(code_text, language=code_lang)
+                    else:
+                        st.info("No runnable code recorded for this step.")
+
+                    if isinstance(script, str) and script.strip():
+                        with st.expander("Full pipeline repro script", expanded=False):
+                            st.code(script, language="python")
+
+                elif view == "Predictions":
+                    prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
+                    transform = prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
+                    kind = str(transform.get("kind") or "")
+                    is_pred = kind in {"mlflow_predict", "h2o_predict"}
+                    if not is_pred:
+                        st.info(
+                            "This pipeline step does not look like a predictions dataset. "
+                            "Select a `*_predict` step to view predictions."
+                        )
+                    elif df_sel is None:
+                        st.info("No tabular predictions data available for this step.")
+                    else:
+                        st.markdown("**Predictions preview**")
+                        meta = {
+                            "kind": kind,
+                            "run_id": transform.get("run_id")
+                            if kind == "mlflow_predict"
+                            else None,
+                            "model_uri": transform.get("model_uri")
+                            if kind == "mlflow_predict"
+                            else None,
+                            "model_id": transform.get("model_id")
+                            if kind == "h2o_predict"
+                            else None,
+                        }
+                        st.json({k: v for k, v in meta.items() if v})
+                        st.dataframe(df_sel.head(50), use_container_width=True)
+except Exception as e:
+    st.error(f"Could not render Pipeline Studio: {e}")
 
 # ---------------- Always-on analysis panel (bottom) ----------------
 st.markdown("---")
@@ -2490,7 +2880,9 @@ if st.session_state.get("details"):
                 )
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
-                    fig, width="stretch", key=f"bottom_detail_chart_{selected}"
+                    fig,
+                    use_container_width=True,
+                    key=f"bottom_detail_chart_{selected}",
                 )
             else:
                 st.info("No charts returned.")
@@ -2535,9 +2927,13 @@ if st.session_state.get("details"):
                 st.markdown("**Model Info**")
                 try:
                     if isinstance(model_info, dict):
-                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        st.dataframe(
+                            pd.DataFrame(model_info), use_container_width=True
+                        )
                     elif isinstance(model_info, list):
-                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                        st.dataframe(
+                            pd.DataFrame(model_info), use_container_width=True
+                        )
                     else:
                         st.json(model_info)
                 except Exception:
@@ -2553,7 +2949,9 @@ if st.session_state.get("details"):
                 )
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
-                    fig, width="stretch", key=f"bottom_eval_chart_{selected}"
+                    fig,
+                    use_container_width=True,
+                    key=f"bottom_eval_chart_{selected}",
                 )
             if model_info is None and eval_art is None and eval_graph is None:
                 st.info("No model or evaluation artifacts.")
@@ -2605,7 +3003,7 @@ if st.session_state.get("details"):
                             ]
                             st.dataframe(
                                 df[preferred_cols] if preferred_cols else df,
-                                width="stretch",
+                                use_container_width=True,
                             )
                             if any(
                                 c in df.columns
@@ -2637,11 +3035,11 @@ if st.session_state.get("details"):
                             ]
                             st.dataframe(
                                 df[preferred_cols] if preferred_cols else df,
-                                width="stretch",
+                                use_container_width=True,
                             )
                             return
                         if isinstance(obj, list):
-                            st.dataframe(pd.DataFrame(obj), width="stretch")
+                            st.dataframe(pd.DataFrame(obj), use_container_width=True)
                             return
                     except Exception:
                         pass
