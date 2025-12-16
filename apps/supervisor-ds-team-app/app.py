@@ -789,6 +789,12 @@ with st.sidebar:
         key="show_progress",
         help="Shows which agent is running while the team works (best effort).",
     )
+    st.checkbox(
+        "Show live logs while running",
+        value=bool(st.session_state.get("show_live_logs", True)),
+        key="show_live_logs",
+        help="Streams console output into the app during execution (clears after the run finishes).",
+    )
 
     if st.button("Clear chat"):
         st.session_state.chat_history = []
@@ -962,8 +968,8 @@ def render_history(history: list[BaseMessage]):
         tabs = st.tabs(
             [
                 "AI Reasoning",
-                "Data (raw/sql/wrangle/clean/features)",
                 "Pipeline",
+                "Data (raw/sql/wrangle/clean/features)",
                 "SQL",
                 "Charts",
                 "EDA Reports",
@@ -988,38 +994,8 @@ def render_history(history: list[BaseMessage]):
                     st.write(txt)
                 else:
                     st.info("No reasoning available.")
-        # Data
-        with tabs[1]:
-            raw_df = detail.get("data_raw_df")
-            sql_df = detail.get("data_sql_df")
-            wrangled_df = detail.get("data_wrangled_df")
-            cleaned_df = detail.get("data_cleaned_df")
-            feature_df = detail.get("feature_data_df")
-            if raw_df is not None:
-                st.markdown("**Raw Preview**")
-                st.dataframe(raw_df)
-            if sql_df is not None:
-                st.markdown("**SQL Preview**")
-                st.dataframe(sql_df)
-            if wrangled_df is not None:
-                st.markdown("**Wrangled Preview**")
-                st.dataframe(wrangled_df)
-            if cleaned_df is not None:
-                st.markdown("**Cleaned Preview**")
-                st.dataframe(cleaned_df)
-            if feature_df is not None:
-                st.markdown("**Feature-engineered Preview**")
-                st.dataframe(feature_df)
-            if (
-                raw_df is None
-                and sql_df is None
-                and wrangled_df is None
-                and cleaned_df is None
-                and feature_df is None
-            ):
-                st.info("No data frames returned.")
         # Pipeline
-        with tabs[2]:
+        with tabs[1]:
             pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
             if not isinstance(pipelines, dict):
                 pipelines = {}
@@ -1084,10 +1060,63 @@ def render_history(history: list[BaseMessage]):
                         key=f"download_pipeline_{key_suffix}",
                     )
                     st.code(script, language="python")
+
+                # ML & prediction code steps (best effort)
+                fe_code = detail.get("feature_engineering_code")
+                train_code = detail.get("model_training_code")
+                pred_code = detail.get("prediction_code")
+                if any(
+                    isinstance(x, str) and x.strip()
+                    for x in (fe_code, train_code, pred_code)
+                ):
+                    st.markdown("---")
+                    st.markdown("**ML / Prediction Steps (best effort)**")
+                    if isinstance(fe_code, str) and fe_code.strip():
+                        with st.expander("Feature engineering code", expanded=False):
+                            st.code(fe_code, language="python")
+                    if isinstance(train_code, str) and train_code.strip():
+                        with st.expander(
+                            "Model training code (H2O AutoML)", expanded=False
+                        ):
+                            st.code(train_code, language="python")
+                    if isinstance(pred_code, str) and pred_code.strip():
+                        with st.expander("Prediction code", expanded=False):
+                            st.code(pred_code, language="python")
             else:
                 st.info(
                     "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
                 )
+
+        # Data
+        with tabs[2]:
+            raw_df = detail.get("data_raw_df")
+            sql_df = detail.get("data_sql_df")
+            wrangled_df = detail.get("data_wrangled_df")
+            cleaned_df = detail.get("data_cleaned_df")
+            feature_df = detail.get("feature_data_df")
+            if raw_df is not None:
+                st.markdown("**Raw Preview**")
+                st.dataframe(raw_df)
+            if sql_df is not None:
+                st.markdown("**SQL Preview**")
+                st.dataframe(sql_df)
+            if wrangled_df is not None:
+                st.markdown("**Wrangled Preview**")
+                st.dataframe(wrangled_df)
+            if cleaned_df is not None:
+                st.markdown("**Cleaned Preview**")
+                st.dataframe(cleaned_df)
+            if feature_df is not None:
+                st.markdown("**Feature-engineered Preview**")
+                st.dataframe(feature_df)
+            if (
+                raw_df is None
+                and sql_df is None
+                and wrangled_df is None
+                and cleaned_df is None
+                and feature_df is None
+            ):
+                st.info("No data frames returned.")
         # SQL
         with tabs[3]:
             sql_query = detail.get("sql_query_code")
@@ -1506,42 +1535,202 @@ if prompt:
             if progress_box is not None:
                 progress_box.info("Working…")
 
-            if show_progress and hasattr(team, "stream"):
+            show_live_logs = bool(st.session_state.get("show_live_logs", False))
+            log_container = st.empty() if show_live_logs else None
+            log_placeholder = None
+
+            import sys
+            import io
+            from collections import deque
+            from contextlib import redirect_stdout, redirect_stderr
+            import threading
+            import time
+
+            class _TeeCapture(io.TextIOBase):
+                def __init__(self, passthrough, max_chars: int = 50_000):
+                    super().__init__()
+                    self._passthrough = passthrough
+                    self._buf = deque()
+                    self._n_chars = 0
+                    self._max_chars = int(max_chars)
+                    self._lock = threading.Lock()
+
+                def write(self, s: str) -> int:
+                    if not s:
+                        return 0
+                    try:
+                        self._passthrough.write(s)
+                    except Exception:
+                        pass
+                    with self._lock:
+                        self._buf.append(s)
+                        self._n_chars += len(s)
+                        while self._n_chars > self._max_chars and self._buf:
+                            removed = self._buf.popleft()
+                            self._n_chars -= len(removed)
+                    return len(s)
+
+                def flush(self) -> None:
+                    try:
+                        self._passthrough.flush()
+                    except Exception:
+                        pass
+
+                def get_text(self) -> str:
+                    with self._lock:
+                        return "".join(self._buf)
+
+            stdout_cap = _TeeCapture(sys.stdout)
+            stderr_cap = _TeeCapture(sys.stderr)
+
+            if log_container is not None:
+                with log_container.container():
+                    st.markdown("**Live logs**")
+                    st.caption("Showing the most recent output (tail).")
+                    log_status_placeholder = st.empty()
+                    log_placeholder = st.empty()
+                    log_placeholder.code("", language="text")
+            else:
+                log_status_placeholder = None
+
+            def _run_with_stream() -> dict | None:
                 last_event = None
                 for event in team.stream(
                     invoke_payload, config=run_config, stream_mode="values"
                 ):
-                    if isinstance(event, dict):
-                        last_event = event
-                        label = None
-                        nxt = event.get("next")
-                        if (
-                            isinstance(nxt, str)
-                            and nxt.strip()
-                            and nxt.strip().upper() != "FINISH"
-                        ):
-                            label = f"Routing → {nxt.strip()}"
-                        elif (
-                            isinstance(event.get("last_worker"), str)
-                            and event.get("last_worker").strip()
-                        ):
-                            label = event.get("last_worker").strip()
-                        if (
-                            progress_box is not None
-                            and isinstance(label, str)
-                            and label.strip()
-                        ):
-                            progress_box.info(f"Working: `{label}`")
-                result = last_event
+                    if not isinstance(event, dict):
+                        continue
+                    last_event = event
+                    label = None
+                    nxt = event.get("next")
+                    if (
+                        isinstance(nxt, str)
+                        and nxt.strip()
+                        and nxt.strip().upper() != "FINISH"
+                    ):
+                        label = f"Routing → {nxt.strip()}"
+                    elif (
+                        isinstance(event.get("last_worker"), str)
+                        and event.get("last_worker").strip()
+                    ):
+                        label = event.get("last_worker").strip()
+                    shared["label"] = label
+                return last_event
+
+            def _run_with_invoke():
+                return team.invoke(invoke_payload, config=run_config)
+
+            if show_live_logs:
+                shared = {"done": False, "label": None, "result": None, "error": None}
+                start_ts = time.time()
+                last_output_ts = start_ts
+                last_status_ts = 0.0
+
+                def _worker():
+                    try:
+                        with redirect_stdout(stdout_cap), redirect_stderr(stderr_cap):
+                            if show_progress and hasattr(team, "stream"):
+                                shared["result"] = _run_with_stream()
+                            else:
+                                shared["result"] = _run_with_invoke()
+                    except Exception as e:
+                        shared["error"] = e
+                    finally:
+                        shared["done"] = True
+
+                t = threading.Thread(target=_worker, daemon=True)
+                t.start()
+
+                last_rendered = None
+                while not shared.get("done"):
+                    if (
+                        progress_box is not None
+                        and isinstance(shared.get("label"), str)
+                        and shared["label"]
+                    ):
+                        progress_box.info(f"Working: `{shared['label']}`")
+                    if log_placeholder is not None:
+                        text = (stdout_cap.get_text() + stderr_cap.get_text()).strip()
+                        if text:
+                            tail = "\n".join(text.splitlines()[-250:])
+                            if tail and tail != last_rendered:
+                                log_placeholder.code(tail, language="text")
+                                last_rendered = tail
+                                last_output_ts = time.time()
+                    if log_status_placeholder is not None:
+                        now = time.time()
+                        if (now - last_status_ts) >= 0.5:
+                            elapsed = now - start_ts
+                            since_out = now - last_output_ts
+                            log_status_placeholder.caption(
+                                f"Elapsed: {elapsed:0.1f}s • Last output: {since_out:0.1f}s ago"
+                            )
+                            last_status_ts = now
+                    time.sleep(0.15)
+
+                t.join(timeout=0.1)
+                if log_placeholder is not None:
+                    text = (stdout_cap.get_text() + stderr_cap.get_text()).strip()
+                    if text:
+                        tail = "\n".join(text.splitlines()[-250:])
+                        if tail and tail != last_rendered:
+                            log_placeholder.code(tail, language="text")
+                            last_output_ts = time.time()
+                if log_status_placeholder is not None:
+                    now = time.time()
+                    elapsed = now - start_ts
+                    since_out = now - last_output_ts
+                    log_status_placeholder.caption(
+                        f"Elapsed: {elapsed:0.1f}s • Last output: {since_out:0.1f}s ago"
+                    )
+                if shared.get("error") is not None:
+                    raise shared["error"]
+                result = shared.get("result")
+            elif show_progress and hasattr(team, "stream"):
+                last_event = None
+                with redirect_stdout(stdout_cap), redirect_stderr(stderr_cap):
+                    for event in team.stream(
+                        invoke_payload, config=run_config, stream_mode="values"
+                    ):
+                        if isinstance(event, dict):
+                            last_event = event
+                            label = None
+                            nxt = event.get("next")
+                            if (
+                                isinstance(nxt, str)
+                                and nxt.strip()
+                                and nxt.strip().upper() != "FINISH"
+                            ):
+                                label = f"Routing → {nxt.strip()}"
+                            elif (
+                                isinstance(event.get("last_worker"), str)
+                                and event.get("last_worker").strip()
+                            ):
+                                label = event.get("last_worker").strip()
+                            if (
+                                progress_box is not None
+                                and isinstance(label, str)
+                                and label.strip()
+                            ):
+                                progress_box.info(f"Working: `{label}`")
+                    result = last_event
             else:
-                result = team.invoke(invoke_payload, config=run_config)
+                with redirect_stdout(stdout_cap), redirect_stderr(stderr_cap):
+                    result = team.invoke(invoke_payload, config=run_config)
 
             if progress_box is not None:
                 progress_box.empty()
+            if log_container is not None:
+                log_container.empty()
         except Exception as e:
             try:
                 if "progress_box" in locals() and progress_box is not None:
                     progress_box.empty()
+            except Exception:
+                pass
+            try:
+                if "log_container" in locals() and log_container is not None:
+                    log_container.empty()
             except Exception:
                 pass
             msg = str(e)
@@ -1737,6 +1926,120 @@ if prompt:
                     )
             return summary
 
+        def _truncate_code(text: object, limit: int = 12000) -> str | None:
+            if not isinstance(text, str):
+                return None
+            t = text.strip()
+            if not t:
+                return None
+            if len(t) <= limit:
+                return t
+            return t[:limit].rstrip() + "\n\n# ... truncated ..."
+
+        datasets_dict = (
+            result.get("datasets")
+            if isinstance(result, dict) and isinstance(result.get("datasets"), dict)
+            else {}
+        )
+        active_dataset_id = (
+            result.get("active_dataset_id") if isinstance(result, dict) else None
+        )
+
+        pipeline_model = (
+            build_pipeline_snapshot(datasets_dict, active_dataset_id=active_dataset_id)
+            if isinstance(datasets_dict, dict) and datasets_dict
+            else None
+        )
+        pipelines = (
+            {
+                "model": pipeline_model,
+                "active": build_pipeline_snapshot(
+                    datasets_dict, active_dataset_id=active_dataset_id, target="active"
+                ),
+                "latest": build_pipeline_snapshot(
+                    datasets_dict, active_dataset_id=active_dataset_id, target="latest"
+                ),
+            }
+            if isinstance(datasets_dict, dict) and datasets_dict
+            else None
+        )
+
+        def _extract_feature_engineering_code() -> str | None:
+            if not isinstance(pipeline_model, dict):
+                return None
+            did = pipeline_model.get("model_dataset_id")
+            if not isinstance(did, str) or not did:
+                return None
+            entry = datasets_dict.get(did)
+            if not isinstance(entry, dict):
+                return None
+            prov = (
+                entry.get("provenance")
+                if isinstance(entry.get("provenance"), dict)
+                else {}
+            )
+            transform = (
+                prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
+            )
+            if str(transform.get("kind") or "") != "python_function":
+                return None
+            return _truncate_code(transform.get("function_code"))
+
+        def _extract_prediction_code() -> str | None:
+            if not isinstance(artifacts, dict):
+                return None
+            mp = artifacts.get("mlflow_predictions")
+            if (
+                isinstance(mp, dict)
+                and isinstance(mp.get("run_id"), str)
+                and mp.get("run_id").strip()
+            ):
+                run_id = mp["run_id"].strip()
+                return _truncate_code(
+                    "\n".join(
+                        [
+                            "import pandas as pd",
+                            "import mlflow",
+                            "",
+                            f"model_uri = 'runs:/{run_id}/model'",
+                            "model = mlflow.pyfunc.load_model(model_uri)",
+                            "preds = model.predict(df)",
+                            "df = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)",
+                        ]
+                    ),
+                    limit=6000,
+                )
+            hp = artifacts.get("h2o_predictions")
+            if (
+                isinstance(hp, dict)
+                and isinstance(hp.get("model_id"), str)
+                and hp.get("model_id").strip()
+            ):
+                model_id = hp["model_id"].strip()
+                return _truncate_code(
+                    "\n".join(
+                        [
+                            "import h2o",
+                            "",
+                            "h2o.init()",
+                            f"model = h2o.get_model('{model_id}')",
+                            "frame = h2o.H2OFrame(df)",
+                            "preds = model.predict(frame)",
+                            "df = preds.as_data_frame(use_pandas=True)",
+                        ]
+                    ),
+                    limit=6000,
+                )
+            return None
+
+        feature_engineering_code = _extract_feature_engineering_code()
+        model_training_code = _truncate_code(
+            artifacts.get("h2o", {}).get("h2o_train_function")
+            if isinstance(artifacts.get("h2o"), dict)
+            else None
+        )
+        prediction_code = _extract_prediction_code()
+
         detail = {
             "ai_reply": getattr(last_ai, "content", "") if last_ai else "",
             "reasoning": reasoning or getattr(last_ai, "content", ""),
@@ -1775,6 +2078,9 @@ if prompt:
                 and isinstance(artifacts.get("eval"), dict)
                 else None
             ),
+            "feature_engineering_code": feature_engineering_code,
+            "model_training_code": model_training_code,
+            "prediction_code": prediction_code,
             "mlflow_artifacts": (
                 (
                     result.get("mlflow_artifacts")
@@ -1789,43 +2095,8 @@ if prompt:
             ),
             # Store only a summarized version to avoid rendering huge payloads
             "artifacts": _summarize_artifacts(artifacts),
-            "pipeline": (
-                build_pipeline_snapshot(
-                    result.get("datasets")
-                    if isinstance(result.get("datasets"), dict)
-                    else {},
-                    active_dataset_id=result.get("active_dataset_id"),
-                )
-                if isinstance(result, dict)
-                else None
-            ),
-            "pipelines": (
-                {
-                    "model": build_pipeline_snapshot(
-                        result.get("datasets")
-                        if isinstance(result.get("datasets"), dict)
-                        else {},
-                        active_dataset_id=result.get("active_dataset_id"),
-                        target="model",
-                    ),
-                    "active": build_pipeline_snapshot(
-                        result.get("datasets")
-                        if isinstance(result.get("datasets"), dict)
-                        else {},
-                        active_dataset_id=result.get("active_dataset_id"),
-                        target="active",
-                    ),
-                    "latest": build_pipeline_snapshot(
-                        result.get("datasets")
-                        if isinstance(result.get("datasets"), dict)
-                        else {},
-                        active_dataset_id=result.get("active_dataset_id"),
-                        target="latest",
-                    ),
-                }
-                if isinstance(result, dict) and isinstance(result.get("datasets"), dict)
-                else None
-            ),
+            "pipeline": pipeline_model,
+            "pipelines": pipelines,
             "sql_query_code": (
                 sql_payload.get("sql_query_code")
                 if sql_payload and "sql_database_agent" in ran_agents
@@ -1916,8 +2187,8 @@ if st.session_state.get("details"):
             tabs = st.tabs(
                 [
                     "AI Reasoning",
-                    "Data (raw/sql/wrangle/clean/features)",
                     "Pipeline",
+                    "Data (raw/sql/wrangle/clean/features)",
                     "SQL",
                     "Charts",
                     "EDA Reports",
@@ -1938,36 +2209,8 @@ if st.session_state.get("details"):
                 else:
                     txt = detail.get("reasoning", detail.get("ai_reply", ""))
                     st.write(txt if txt else "No reasoning available.")
+
             with tabs[1]:
-                raw_df = detail.get("data_raw_df")
-                sql_df = detail.get("data_sql_df")
-                wrangled_df = detail.get("data_wrangled_df")
-                cleaned_df = detail.get("data_cleaned_df")
-                feature_df = detail.get("feature_data_df")
-                if raw_df is not None:
-                    st.markdown("**Raw Preview**")
-                    st.dataframe(raw_df)
-                if sql_df is not None:
-                    st.markdown("**SQL Preview**")
-                    st.dataframe(sql_df)
-                if wrangled_df is not None:
-                    st.markdown("**Wrangled Preview**")
-                    st.dataframe(wrangled_df)
-                if cleaned_df is not None:
-                    st.markdown("**Cleaned Preview**")
-                    st.dataframe(cleaned_df)
-                if feature_df is not None:
-                    st.markdown("**Feature-engineered Preview**")
-                    st.dataframe(feature_df)
-                if (
-                    raw_df is None
-                    and sql_df is None
-                    and wrangled_df is None
-                    and cleaned_df is None
-                    and feature_df is None
-                ):
-                    st.info("No data frames returned.")
-            with tabs[2]:
                 pipelines = (
                     detail.get("pipelines") if isinstance(detail, dict) else None
                 )
@@ -1992,6 +2235,7 @@ if st.session_state.get("details"):
                         pipe = detail.get("pipeline") or pipelines.get("model") or pipe
                     else:
                         pipe = pipelines.get(target_key) or pipe
+
                 if isinstance(pipe, dict) and pipe.get("lineage"):
                     inputs = pipe.get("inputs") or []
                     inputs_txt = ""
@@ -2032,243 +2276,289 @@ if st.session_state.get("details"):
                             key=f"bottom_download_pipeline_{selected}",
                         )
                         st.code(script, language="python")
+
+                    fe_code = detail.get("feature_engineering_code")
+                    train_code = detail.get("model_training_code")
+                    pred_code = detail.get("prediction_code")
+                    if any(
+                        isinstance(x, str) and x.strip()
+                        for x in (fe_code, train_code, pred_code)
+                    ):
+                        st.markdown("---")
+                        st.markdown("**ML / Prediction Steps (best effort)**")
+                        if isinstance(fe_code, str) and fe_code.strip():
+                            with st.expander(
+                                "Feature engineering code", expanded=False
+                            ):
+                                st.code(fe_code, language="python")
+                        if isinstance(train_code, str) and train_code.strip():
+                            with st.expander(
+                                "Model training code (H2O AutoML)", expanded=False
+                            ):
+                                st.code(train_code, language="python")
+                        if isinstance(pred_code, str) and pred_code.strip():
+                            with st.expander("Prediction code", expanded=False):
+                                st.code(pred_code, language="python")
                 else:
                     st.info(
                         "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
                     )
-            with tabs[3]:
-                sql_query = detail.get("sql_query_code")
-                sql_fn = detail.get("sql_database_function")
-                sql_fn_name = detail.get("sql_database_function_name")
-                sql_fn_path = detail.get("sql_database_function_path")
 
-                if sql_query:
-                    st.markdown("**SQL Query**")
-                    st.code(sql_query, language="sql")
-                    try:
-                        st.download_button(
-                            "Download query (.sql)",
-                            data=str(sql_query).encode("utf-8"),
-                            file_name="query.sql",
-                            mime="application/sql",
-                            key=f"bottom_download_sql_query_{selected}",
-                        )
-                    except Exception:
-                        pass
-                else:
-                    st.info("No SQL query generated for this turn.")
+            with tabs[2]:
+                raw_df = detail.get("data_raw_df")
+                sql_df = detail.get("data_sql_df")
+                wrangled_df = detail.get("data_wrangled_df")
+                cleaned_df = detail.get("data_cleaned_df")
+                feature_df = detail.get("feature_data_df")
+                if raw_df is not None:
+                    st.markdown("**Raw Preview**")
+                    st.dataframe(raw_df)
+                if sql_df is not None:
+                    st.markdown("**SQL Preview**")
+                    st.dataframe(sql_df)
+                if wrangled_df is not None:
+                    st.markdown("**Wrangled Preview**")
+                    st.dataframe(wrangled_df)
+                if cleaned_df is not None:
+                    st.markdown("**Cleaned Preview**")
+                    st.dataframe(cleaned_df)
+                if feature_df is not None:
+                    st.markdown("**Feature-engineered Preview**")
+                    st.dataframe(feature_df)
+                if (
+                    raw_df is None
+                    and sql_df is None
+                    and wrangled_df is None
+                    and cleaned_df is None
+                    and feature_df is None
+                ):
+                    st.info("No data frames returned.")
+        with tabs[3]:
+            sql_query = detail.get("sql_query_code")
+            sql_fn = detail.get("sql_database_function")
+            sql_fn_name = detail.get("sql_database_function_name")
+            sql_fn_path = detail.get("sql_database_function_path")
 
-                if sql_fn:
-                    st.markdown("**SQL Executor (Python)**")
-                    if sql_fn_name or sql_fn_path:
-                        st.caption(
-                            "  ".join(
-                                [
-                                    f"name={sql_fn_name}" if sql_fn_name else "",
-                                    f"path={sql_fn_path}" if sql_fn_path else "",
-                                ]
-                            ).strip()
-                        )
-                    st.code(sql_fn, language="python")
-                    try:
-                        st.download_button(
-                            "Download executor (.py)",
-                            data=str(sql_fn).encode("utf-8"),
-                            file_name="sql_executor.py",
-                            mime="text/x-python",
-                            key=f"bottom_download_sql_executor_{selected}",
-                        )
-                    except Exception:
-                        pass
-            with tabs[4]:
-                graph_json = detail.get("plotly_graph")
-                if graph_json:
-                    payload = (
-                        json.dumps(graph_json)
-                        if isinstance(graph_json, dict)
-                        else graph_json
+            if sql_query:
+                st.markdown("**SQL Query**")
+                st.code(sql_query, language="sql")
+                try:
+                    st.download_button(
+                        "Download query (.sql)",
+                        data=str(sql_query).encode("utf-8"),
+                        file_name="query.sql",
+                        mime="application/sql",
+                        key=f"bottom_download_sql_query_{selected}",
                     )
-                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                    st.plotly_chart(
-                        fig, width="stretch", key=f"bottom_detail_chart_{selected}"
+                except Exception:
+                    pass
+            else:
+                st.info("No SQL query generated for this turn.")
+
+            if sql_fn:
+                st.markdown("**SQL Executor (Python)**")
+                if sql_fn_name or sql_fn_path:
+                    st.caption(
+                        "  ".join(
+                            [
+                                f"name={sql_fn_name}" if sql_fn_name else "",
+                                f"path={sql_fn_path}" if sql_fn_path else "",
+                            ]
+                        ).strip()
                     )
-                else:
-                    st.info("No charts returned.")
-            with tabs[5]:
-                reports = (
-                    detail.get("eda_reports") if isinstance(detail, dict) else None
+                st.code(sql_fn, language="python")
+                try:
+                    st.download_button(
+                        "Download executor (.py)",
+                        data=str(sql_fn).encode("utf-8"),
+                        file_name="sql_executor.py",
+                        mime="text/x-python",
+                        key=f"bottom_download_sql_executor_{selected}",
+                    )
+                except Exception:
+                    pass
+        with tabs[4]:
+            graph_json = detail.get("plotly_graph")
+            if graph_json:
+                payload = (
+                    json.dumps(graph_json)
+                    if isinstance(graph_json, dict)
+                    else graph_json
                 )
-                sweetviz_file = (
-                    reports.get("sweetviz_report_file")
-                    if isinstance(reports, dict)
-                    else None
+                fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                st.plotly_chart(
+                    fig, width="stretch", key=f"bottom_detail_chart_{selected}"
                 )
-                dtale_url = (
-                    reports.get("dtale_url") if isinstance(reports, dict) else None
-                )
+            else:
+                st.info("No charts returned.")
+        with tabs[5]:
+            reports = detail.get("eda_reports") if isinstance(detail, dict) else None
+            sweetviz_file = (
+                reports.get("sweetviz_report_file")
+                if isinstance(reports, dict)
+                else None
+            )
+            dtale_url = reports.get("dtale_url") if isinstance(reports, dict) else None
 
-                if sweetviz_file:
-                    st.markdown("**Sweetviz report**")
-                    st.write(sweetviz_file)
-                    try:
-                        with open(sweetviz_file, "r", encoding="utf-8") as f:
-                            html = f.read()
-                        components.html(html, height=800, scrolling=True)
-                        st.download_button(
-                            "Download Sweetviz HTML",
-                            data=html.encode("utf-8"),
-                            file_name=os.path.basename(sweetviz_file),
-                            mime="text/html",
-                            key=f"bottom_download_sweetviz_{selected}",
-                        )
-                    except Exception as e:
-                        st.warning(f"Could not render Sweetviz report: {e}")
-
-                if dtale_url:
-                    st.markdown("**D-Tale**")
-                    st.markdown(f"[Open D-Tale]({dtale_url})")
-
-                if not sweetviz_file and not dtale_url:
-                    st.info("No EDA reports returned.")
-
-            with tabs[6]:
-                model_info = detail.get("model_info")
-                eval_art = detail.get("eval_artifacts")
-                eval_graph = detail.get("eval_plotly_graph")
-                if model_info is not None:
-                    st.markdown("**Model Info**")
-                    try:
-                        if isinstance(model_info, dict):
-                            st.dataframe(pd.DataFrame(model_info), width="stretch")
-                        elif isinstance(model_info, list):
-                            st.dataframe(pd.DataFrame(model_info), width="stretch")
-                        else:
-                            st.json(model_info)
-                    except Exception:
-                        st.json(model_info)
-                if eval_art is not None:
-                    st.markdown("**Evaluation**")
-                    st.json(eval_art)
-                if eval_graph:
-                    payload = (
-                        json.dumps(eval_graph)
-                        if isinstance(eval_graph, dict)
-                        else eval_graph
+            if sweetviz_file:
+                st.markdown("**Sweetviz report**")
+                st.write(sweetviz_file)
+                try:
+                    with open(sweetviz_file, "r", encoding="utf-8") as f:
+                        html = f.read()
+                    components.html(html, height=800, scrolling=True)
+                    st.download_button(
+                        "Download Sweetviz HTML",
+                        data=html.encode("utf-8"),
+                        file_name=os.path.basename(sweetviz_file),
+                        mime="text/html",
+                        key=f"bottom_download_sweetviz_{selected}",
                     )
-                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                    st.plotly_chart(
-                        fig, width="stretch", key=f"bottom_eval_chart_{selected}"
-                    )
-                if model_info is None and eval_art is None and eval_graph is None:
-                    st.info("No model or evaluation artifacts.")
+                except Exception as e:
+                    st.warning(f"Could not render Sweetviz report: {e}")
 
-            with tabs[7]:
-                preds_df = detail.get("data_wrangled_df")
-                if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
-                    lower_cols = {str(c).lower() for c in preds_df.columns}
-                    looks_like_preds = (
-                        "predict" in lower_cols
-                        or any(str(c).lower().startswith("p") for c in preds_df.columns)
-                        or any(
-                            str(c).lower().startswith("actual_")
-                            for c in preds_df.columns
-                        )
-                    )
-                    if looks_like_preds:
-                        st.markdown("**Predictions Preview**")
-                        st.dataframe(preds_df)
+            if dtale_url:
+                st.markdown("**D-Tale**")
+                st.markdown(f"[Open D-Tale]({dtale_url})")
+
+            if not sweetviz_file and not dtale_url:
+                st.info("No EDA reports returned.")
+
+        with tabs[6]:
+            model_info = detail.get("model_info")
+            eval_art = detail.get("eval_artifacts")
+            eval_graph = detail.get("eval_plotly_graph")
+            if model_info is not None:
+                st.markdown("**Model Info**")
+                try:
+                    if isinstance(model_info, dict):
+                        st.dataframe(pd.DataFrame(model_info), width="stretch")
+                    elif isinstance(model_info, list):
+                        st.dataframe(pd.DataFrame(model_info), width="stretch")
                     else:
-                        st.info("No predictions detected for this turn.")
+                        st.json(model_info)
+                except Exception:
+                    st.json(model_info)
+            if eval_art is not None:
+                st.markdown("**Evaluation**")
+                st.json(eval_art)
+            if eval_graph:
+                payload = (
+                    json.dumps(eval_graph)
+                    if isinstance(eval_graph, dict)
+                    else eval_graph
+                )
+                fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                st.plotly_chart(
+                    fig, width="stretch", key=f"bottom_eval_chart_{selected}"
+                )
+            if model_info is None and eval_art is None and eval_graph is None:
+                st.info("No model or evaluation artifacts.")
+
+        with tabs[7]:
+            preds_df = detail.get("data_wrangled_df")
+            if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
+                lower_cols = {str(c).lower() for c in preds_df.columns}
+                looks_like_preds = (
+                    "predict" in lower_cols
+                    or any(str(c).lower().startswith("p") for c in preds_df.columns)
+                    or any(
+                        str(c).lower().startswith("actual_") for c in preds_df.columns
+                    )
+                )
+                if looks_like_preds:
+                    st.markdown("**Predictions Preview**")
+                    st.dataframe(preds_df)
                 else:
-                    st.info("No predictions returned.")
+                    st.info("No predictions detected for this turn.")
+            else:
+                st.info("No predictions returned.")
 
-            with tabs[8]:
-                mlflow_art = detail.get("mlflow_artifacts")
-                if mlflow_art is None:
-                    st.info("No MLflow artifacts.")
-                else:
-                    st.markdown("**MLflow Artifacts**")
+        with tabs[8]:
+            mlflow_art = detail.get("mlflow_artifacts")
+            if mlflow_art is None:
+                st.info("No MLflow artifacts.")
+            else:
+                st.markdown("**MLflow Artifacts**")
 
-                    def _render_mlflow_artifact(obj):
-                        try:
-                            if isinstance(obj, dict) and isinstance(
-                                obj.get("runs"), list
-                            ):
-                                df = pd.DataFrame(obj["runs"])
-                                preferred_cols = [
-                                    c
-                                    for c in [
-                                        "run_id",
-                                        "run_name",
-                                        "status",
-                                        "start_time",
-                                        "duration_seconds",
-                                        "has_model",
-                                        "model_uri",
-                                        "params_preview",
-                                        "metrics_preview",
-                                    ]
-                                    if c in df.columns
+                def _render_mlflow_artifact(obj):
+                    try:
+                        if isinstance(obj, dict) and isinstance(obj.get("runs"), list):
+                            df = pd.DataFrame(obj["runs"])
+                            preferred_cols = [
+                                c
+                                for c in [
+                                    "run_id",
+                                    "run_name",
+                                    "status",
+                                    "start_time",
+                                    "duration_seconds",
+                                    "has_model",
+                                    "model_uri",
+                                    "params_preview",
+                                    "metrics_preview",
                                 ]
-                                st.dataframe(
-                                    df[preferred_cols] if preferred_cols else df,
-                                    width="stretch",
+                                if c in df.columns
+                            ]
+                            st.dataframe(
+                                df[preferred_cols] if preferred_cols else df,
+                                width="stretch",
+                            )
+                            if any(
+                                c in df.columns
+                                for c in (
+                                    "params",
+                                    "metrics",
+                                    "tags",
+                                    "artifact_uri",
                                 )
-                                if any(
-                                    c in df.columns
-                                    for c in (
-                                        "params",
-                                        "metrics",
-                                        "tags",
-                                        "artifact_uri",
-                                    )
-                                ):
-                                    with st.expander("Raw run details", expanded=False):
-                                        st.json(obj)
-                                return
-                            if isinstance(obj, dict) and isinstance(
-                                obj.get("experiments"), list
                             ):
-                                df = pd.DataFrame(obj["experiments"])
-                                preferred_cols = [
-                                    c
-                                    for c in [
-                                        "experiment_id",
-                                        "name",
-                                        "lifecycle_stage",
-                                        "creation_time",
-                                        "last_update_time",
-                                        "artifact_location",
-                                    ]
-                                    if c in df.columns
+                                with st.expander("Raw run details", expanded=False):
+                                    st.json(obj)
+                            return
+                        if isinstance(obj, dict) and isinstance(
+                            obj.get("experiments"), list
+                        ):
+                            df = pd.DataFrame(obj["experiments"])
+                            preferred_cols = [
+                                c
+                                for c in [
+                                    "experiment_id",
+                                    "name",
+                                    "lifecycle_stage",
+                                    "creation_time",
+                                    "last_update_time",
+                                    "artifact_location",
                                 ]
-                                st.dataframe(
-                                    df[preferred_cols] if preferred_cols else df,
-                                    width="stretch",
-                                )
-                                return
-                            if isinstance(obj, list):
-                                st.dataframe(pd.DataFrame(obj), width="stretch")
-                                return
-                        except Exception:
-                            pass
-                        st.json(obj)
+                                if c in df.columns
+                            ]
+                            st.dataframe(
+                                df[preferred_cols] if preferred_cols else df,
+                                width="stretch",
+                            )
+                            return
+                        if isinstance(obj, list):
+                            st.dataframe(pd.DataFrame(obj), width="stretch")
+                            return
+                    except Exception:
+                        pass
+                    st.json(obj)
 
-                    if isinstance(mlflow_art, dict) and not any(
-                        k in mlflow_art for k in ("runs", "experiments")
-                    ):
-                        is_tool_map = all(
-                            isinstance(k, str) and k.startswith("mlflow_")
-                            for k in mlflow_art.keys()
-                        )
-                        if is_tool_map:
-                            for tool_name, tool_art in mlflow_art.items():
-                                st.markdown(f"`{tool_name}`")
-                                _render_mlflow_artifact(tool_art)
-                        else:
-                            _render_mlflow_artifact(mlflow_art)
+                if isinstance(mlflow_art, dict) and not any(
+                    k in mlflow_art for k in ("runs", "experiments")
+                ):
+                    is_tool_map = all(
+                        isinstance(k, str) and k.startswith("mlflow_")
+                        for k in mlflow_art.keys()
+                    )
+                    if is_tool_map:
+                        for tool_name, tool_art in mlflow_art.items():
+                            st.markdown(f"`{tool_name}`")
+                            _render_mlflow_artifact(tool_art)
                     else:
                         _render_mlflow_artifact(mlflow_art)
+                else:
+                    _render_mlflow_artifact(mlflow_art)
     except Exception as e:
         st.error(f"Could not render analysis details: {e}")
 else:

@@ -331,6 +331,31 @@ def build_reproducible_pipeline_script(
                         out.append("engine = sql.create_engine('YOUR_SQLALCHEMY_URL')")
                         out.append(f"sql_query = {sql_query!r}")
                         out.append(f"{df_var} = pd.read_sql_query(sql_query, engine)")
+                    elif kind == "mlflow_predict":
+                        run_id = transform.get("run_id")
+                        run_id = run_id.strip() if isinstance(run_id, str) else ""
+                        model_uri = transform.get("model_uri")
+                        model_uri = (
+                            model_uri.strip()
+                            if isinstance(model_uri, str) and model_uri.strip()
+                            else (f"runs:/{run_id}/model" if run_id else "")
+                        )
+                        out.append("import mlflow")
+                        out.append(f"model_uri = {model_uri!r}")
+                        out.append("model = mlflow.pyfunc.load_model(model_uri)")
+                        out.append(f"preds = model.predict({df_var})")
+                        out.append(
+                            f"{df_var} = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)"
+                        )
+                    elif kind == "h2o_predict":
+                        model_id = transform.get("model_id")
+                        model_id = model_id.strip() if isinstance(model_id, str) else ""
+                        out.append("import h2o")
+                        out.append("h2o.init()")
+                        out.append(f"model = h2o.get_model({model_id!r})")
+                        out.append(f"frame = h2o.H2OFrame({df_var})")
+                        out.append("preds = model.predict(frame)")
+                        out.append(f"{df_var} = preds.as_data_frame(use_pandas=True)")
                     else:
                         out.append("# TODO: transform not recorded in a runnable form; see datasets provenance.")
 
@@ -469,6 +494,29 @@ def build_reproducible_pipeline_script(
                 lines.append("engine = sql.create_engine('YOUR_SQLALCHEMY_URL')")
                 lines.append(f"sql_query = {sql_query!r}")
                 lines.append("df = pd.read_sql_query(sql_query, engine)")
+            elif kind == "mlflow_predict":
+                run_id = transform.get("run_id")
+                run_id = run_id.strip() if isinstance(run_id, str) else ""
+                model_uri = transform.get("model_uri")
+                model_uri = (
+                    model_uri.strip()
+                    if isinstance(model_uri, str) and model_uri.strip()
+                    else (f"runs:/{run_id}/model" if run_id else "")
+                )
+                lines.append("import mlflow")
+                lines.append(f"model_uri = {model_uri!r}")
+                lines.append("model = mlflow.pyfunc.load_model(model_uri)")
+                lines.append("preds = model.predict(df)")
+                lines.append("df = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)")
+            elif kind == "h2o_predict":
+                model_id = transform.get("model_id")
+                model_id = model_id.strip() if isinstance(model_id, str) else ""
+                lines.append("import h2o")
+                lines.append("h2o.init()")
+                lines.append(f"model = h2o.get_model({model_id!r})")
+                lines.append("frame = h2o.H2OFrame(df)")
+                lines.append("preds = model.predict(frame)")
+                lines.append("df = preds.as_data_frame(use_pandas=True)")
             else:
                 lines.append(
                     "# TODO: transform not recorded in a runnable form; see datasets provenance."
