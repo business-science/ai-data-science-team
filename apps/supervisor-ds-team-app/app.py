@@ -2269,8 +2269,6 @@ if prompt:
 
         idx = len(st.session_state.details)
 
-        # Phase 2 plumbing (lightweight): keep a per-dataset artifact index so Pipeline Studio
-        # can render node artifacts deterministically without scanning prior turns.
         try:
             import time
 
@@ -2316,6 +2314,18 @@ if prompt:
                         "turn_idx": idx,
                         "created_ts": ts,
                     }
+                if detail.get("eval_artifacts") is not None:
+                    cur["eval_artifacts"] = {
+                        "artifacts": _safe_json(detail.get("eval_artifacts")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("eval_plotly_graph") is not None:
+                    cur["eval_plotly_graph"] = {
+                        "json": _safe_json(detail.get("eval_plotly_graph")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
                 if detail.get("mlflow_artifacts") is not None:
                     cur["mlflow_artifacts"] = {
                         "artifacts": _safe_json(detail.get("mlflow_artifacts")),
@@ -2335,11 +2345,11 @@ if prompt:
         # Rerun once after saving results so the sidebar reflects the latest active dataset immediately.
         st.rerun()
 
-# ---------------- Pipeline Studio ----------------
+# ---------------- Pipeline Studio / Analysis Details ----------------
 st.markdown("---")
-st.subheader("Pipeline Studio")
+tab_analysis_details, tab_pipeline_studio = st.tabs(["Analysis Details", "Pipeline Studio"])
 
-try:
+def _render_pipeline_studio() -> None:
     studio_state = st.session_state.get("team_state", {})
     studio_state = studio_state if isinstance(studio_state, dict) else {}
     studio_datasets = studio_state.get("datasets")
@@ -2366,7 +2376,7 @@ try:
         return None
 
     def _latest_detail_for_dataset_id(
-        dataset_id: str, *, require_chart: bool = False
+        dataset_id: str, *, require_key: str | None = None
     ) -> dict | None:
         details = st.session_state.get("details") or []
         if not isinstance(details, list):
@@ -2382,7 +2392,7 @@ try:
                 else None
             )
             if active_target_id == dataset_id:
-                if require_chart and not d.get("plotly_graph"):
+                if require_key and not d.get(require_key):
                     continue
                 return d
         return None
@@ -2484,10 +2494,146 @@ try:
                 with st.expander("Selected step details", expanded=False):
                     st.json(m)
 
+                compare_node_id = None
+                compare_mode = st.checkbox(
+                    "Compare mode",
+                    value=bool(st.session_state.get("pipeline_studio_compare_mode", False)),
+                    key="pipeline_studio_compare_mode",
+                    help="Compare two pipeline steps side-by-side (schema + table preview).",
+                )
+                if compare_mode:
+                    compare_options = [did for did in node_ids if did != selected_node_id]
+                    compare_options = compare_options or node_ids
+                    default_compare = compare_options[-1] if compare_options else selected_node_id
+                    current_compare = st.session_state.get("pipeline_studio_compare_node_id")
+                    if (
+                        not isinstance(current_compare, str)
+                        or current_compare not in compare_options
+                    ):
+                        st.session_state["pipeline_studio_compare_node_id"] = default_compare
+
+                    compare_node_id = st.selectbox(
+                        "Compare with",
+                        options=compare_options,
+                        format_func=_node_label,
+                        key="pipeline_studio_compare_node_id",
+                    )
+
             with right:
+                if compare_mode and isinstance(compare_node_id, str) and compare_node_id:
+                    a_id = selected_node_id
+                    b_id = compare_node_id
+
+                    a_entry = (
+                        studio_datasets.get(a_id)
+                        if isinstance(studio_datasets, dict)
+                        else None
+                    )
+                    b_entry = (
+                        studio_datasets.get(b_id)
+                        if isinstance(studio_datasets, dict)
+                        else None
+                    )
+                    a_entry = a_entry if isinstance(a_entry, dict) else {}
+                    b_entry = b_entry if isinstance(b_entry, dict) else {}
+                    df_a = _dataset_entry_to_df(a_entry)
+                    df_b = _dataset_entry_to_df(b_entry)
+
+                    st.caption(f"Comparing `{a_id}` vs `{b_id}`")
+
+                    cmp_tabs = st.tabs(["Schema diff", "Table preview"])
+                    with cmp_tabs[0]:
+                        cols_a = (
+                            [str(c) for c in list(df_a.columns)]
+                            if df_a is not None
+                            else (
+                                [str(c) for c in a_entry.get("columns")]
+                                if isinstance(a_entry.get("columns"), list)
+                                else []
+                            )
+                        )
+                        cols_b = (
+                            [str(c) for c in list(df_b.columns)]
+                            if df_b is not None
+                            else (
+                                [str(c) for c in b_entry.get("columns")]
+                                if isinstance(b_entry.get("columns"), list)
+                                else []
+                            )
+                        )
+
+                        if not cols_a or not cols_b:
+                            st.info(
+                                "Could not compute schema diff (missing column metadata). "
+                                "Try selecting steps with tabular data."
+                            )
+                        else:
+                            set_a = set(cols_a)
+                            set_b = set(cols_b)
+                            removed = sorted(set_a - set_b)
+                            added = sorted(set_b - set_a)
+                            shared = sorted(set_a.intersection(set_b))
+
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.markdown(f"**Removed columns ({len(removed)})**")
+                                st.code("\n".join(removed) if removed else "—", language="text")
+                            with c2:
+                                st.markdown(f"**Added columns ({len(added)})**")
+                                st.code("\n".join(added) if added else "—", language="text")
+
+                            if df_a is not None and df_b is not None and shared:
+                                changes = []
+                                try:
+                                    for col in shared:
+                                        dt_a = str(df_a[col].dtype) if col in df_a.columns else ""
+                                        dt_b = str(df_b[col].dtype) if col in df_b.columns else ""
+                                        if dt_a != dt_b:
+                                            changes.append(
+                                                {"column": col, "dtype_a": dt_a, "dtype_b": dt_b}
+                                            )
+                                except Exception:
+                                    changes = []
+                                if changes:
+                                    st.markdown("**Dtype changes**")
+                                    st.dataframe(
+                                        pd.DataFrame(changes),
+                                        use_container_width=True,
+                                    )
+                                else:
+                                    st.caption("No dtype changes detected (pandas dtypes).")
+
+                    with cmp_tabs[1]:
+                        rows = st.slider(
+                            "Preview rows",
+                            min_value=5,
+                            max_value=200,
+                            value=25,
+                            step=5,
+                            key="pipeline_studio_compare_preview_rows",
+                        )
+                        ca, cb = st.columns(2, gap="large")
+                        with ca:
+                            st.markdown(f"**A: {_node_label(a_id)}**")
+                            if df_a is None:
+                                st.info("No tabular data available for A.")
+                            else:
+                                st.caption(f"Shape: {df_a.shape[0]} × {df_a.shape[1]}")
+                                st.dataframe(
+                                    df_a.head(int(rows)), use_container_width=True
+                                )
+                        with cb:
+                            st.markdown(f"**B: {_node_label(b_id)}**")
+                            if df_b is None:
+                                st.info("No tabular data available for B.")
+                            else:
+                                st.caption(f"Shape: {df_b.shape[0]} × {df_b.shape[1]}")
+                                st.dataframe(
+                                    df_b.head(int(rows)), use_container_width=True
+                                )
                 view = st.radio(
                     "Workspace",
-                    ["Table", "Chart", "Code", "Predictions"],
+                    ["Table", "Chart", "EDA", "Code", "Model", "Predictions", "MLflow"],
                     horizontal=True,
                     key="pipeline_studio_view",
                 )
@@ -2518,6 +2664,72 @@ try:
                         st.dataframe(
                             df_sel.head(int(rows)), use_container_width=True
                         )
+                        try:
+                            cols = (
+                                entry.get("columns")
+                                if isinstance(entry.get("columns"), list)
+                                else [str(c) for c in list(df_sel.columns)]
+                            )
+                            schema_hash = (
+                                entry.get("schema_hash")
+                                if isinstance(entry.get("schema_hash"), str)
+                                else None
+                            )
+                            fingerprint = (
+                                entry.get("fingerprint")
+                                if isinstance(entry.get("fingerprint"), str)
+                                else None
+                            )
+                            with st.expander("Schema summary", expanded=False):
+                                if schema_hash or fingerprint:
+                                    st.json(
+                                        {
+                                            "schema_hash": schema_hash,
+                                            "fingerprint": fingerprint,
+                                        }
+                                    )
+                                if cols:
+                                    max_cols = 200
+                                    shown = [str(c) for c in cols[:max_cols]]
+                                    st.markdown(f"**Columns ({len(cols)})**")
+                                    st.code("\n".join(shown), language="text")
+                                    if len(cols) > max_cols:
+                                        st.caption(
+                                            f"Showing first {max_cols} columns."
+                                        )
+                                else:
+                                    st.info("No column metadata available.")
+
+                                max_rows = 5000
+                                sample = df_sel.head(max_rows)
+                                missing = None
+                                try:
+                                    missing = sample.isna().sum()
+                                except Exception:
+                                    missing = None
+                                if missing is not None:
+                                    try:
+                                        missing = missing[missing > 0].sort_values(
+                                            ascending=False
+                                        )
+                                    except Exception:
+                                        missing = None
+                                if missing is not None and len(missing) > 0:
+                                    miss_df = missing.head(25).reset_index()
+                                    miss_df.columns = [
+                                        "column",
+                                        f"missing_count (first {len(sample)} rows)",
+                                    ]
+                                    st.markdown("**Missingness (sampled)**")
+                                    st.dataframe(
+                                        miss_df, use_container_width=True
+                                    )
+                                else:
+                                    st.caption(
+                                        f"No missing values detected in first {len(sample)} rows (sampled)."
+                                    )
+                        except Exception:
+                            pass
 
                 elif view == "Chart":
                     graph_json = None
@@ -2530,7 +2742,7 @@ try:
                         graph_json = pg.get("json")
                     if not graph_json:
                         detail = _latest_detail_for_dataset_id(
-                            selected_node_id, require_chart=True
+                            selected_node_id, require_key="plotly_graph"
                         )
                         graph_json = (
                             detail.get("plotly_graph") if isinstance(detail, dict) else None
@@ -2550,6 +2762,57 @@ try:
                             fig,
                             use_container_width=True,
                             key=f"pipeline_studio_chart_{selected_node_id}",
+                        )
+
+                elif view == "EDA":
+                    reports = None
+                    idx_map = st.session_state.get("pipeline_studio_artifacts")
+                    if isinstance(idx_map, dict):
+                        entry_art = idx_map.get(selected_node_id)
+                        entry_art = entry_art if isinstance(entry_art, dict) else {}
+                        er = entry_art.get("eda_reports")
+                        er = er if isinstance(er, dict) else {}
+                        reports = er.get("reports")
+                    if not reports:
+                        detail = _latest_detail_for_dataset_id(
+                            selected_node_id, require_key="eda_reports"
+                        )
+                        reports = (
+                            detail.get("eda_reports") if isinstance(detail, dict) else None
+                        )
+                    reports = reports if isinstance(reports, dict) else {}
+                    sweetviz_file = (
+                        reports.get("sweetviz_report_file")
+                        if isinstance(reports.get("sweetviz_report_file"), str)
+                        else None
+                    )
+                    dtale_url = (
+                        reports.get("dtale_url")
+                        if isinstance(reports.get("dtale_url"), str)
+                        else None
+                    )
+                    if sweetviz_file:
+                        st.markdown("**Sweetviz report**")
+                        st.write(sweetviz_file)
+                        try:
+                            with open(sweetviz_file, "r", encoding="utf-8") as f:
+                                html = f.read()
+                            components.html(html, height=800, scrolling=True)
+                            st.download_button(
+                                "Download Sweetviz HTML",
+                                data=html.encode("utf-8"),
+                                file_name=os.path.basename(sweetviz_file),
+                                mime="text/html",
+                                key=f"pipeline_studio_download_sweetviz_{selected_node_id}",
+                            )
+                        except Exception as e:
+                            st.warning(f"Could not render Sweetviz report: {e}")
+                    if dtale_url:
+                        st.markdown("**D-Tale**")
+                        st.markdown(f"[Open D-Tale]({dtale_url})")
+                    if not sweetviz_file and not dtale_url:
+                        st.info(
+                            "No EDA reports found for this dataset yet. Try: `generate a Sweetviz report` while this dataset is active."
                         )
 
                 elif view == "Code":
@@ -2628,6 +2891,74 @@ try:
                         with st.expander("Full pipeline repro script", expanded=False):
                             st.code(script, language="python")
 
+                elif view == "Model":
+                    model_info = None
+                    eval_art = None
+                    eval_graph = None
+                    idx_map = st.session_state.get("pipeline_studio_artifacts")
+                    if isinstance(idx_map, dict):
+                        entry_art = idx_map.get(selected_node_id)
+                        entry_art = entry_art if isinstance(entry_art, dict) else {}
+                        mi = entry_art.get("model_info")
+                        mi = mi if isinstance(mi, dict) else {}
+                        model_info = mi.get("info")
+                        ea = entry_art.get("eval_artifacts")
+                        ea = ea if isinstance(ea, dict) else {}
+                        eval_art = ea.get("artifacts")
+                        eg = entry_art.get("eval_plotly_graph")
+                        eg = eg if isinstance(eg, dict) else {}
+                        eval_graph = eg.get("json")
+                    if model_info is None and eval_art is None and eval_graph is None:
+                        detail = _latest_detail_for_dataset_id(
+                            selected_node_id, require_key="model_info"
+                        )
+                        if isinstance(detail, dict):
+                            model_info = detail.get("model_info")
+                            eval_art = detail.get("eval_artifacts")
+                            eval_graph = detail.get("eval_plotly_graph")
+
+                    if model_info is not None:
+                        st.markdown("**Model Info**")
+                        try:
+                            if isinstance(model_info, dict):
+                                st.dataframe(
+                                    pd.DataFrame(model_info),
+                                    use_container_width=True,
+                                )
+                            elif isinstance(model_info, list):
+                                st.dataframe(
+                                    pd.DataFrame(model_info),
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.json(model_info)
+                        except Exception:
+                            st.json(model_info)
+                    if eval_art is not None:
+                        st.markdown("**Evaluation**")
+                        st.json(eval_art)
+                    if eval_graph:
+                        try:
+                            payload = (
+                                json.dumps(eval_graph)
+                                if isinstance(eval_graph, dict)
+                                else eval_graph
+                            )
+                            fig = _apply_streamlit_plot_style(
+                                pio.from_json(payload)
+                            )
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                key=f"pipeline_studio_eval_chart_{selected_node_id}",
+                            )
+                        except Exception as e:
+                            st.error(f"Error rendering evaluation chart: {e}")
+                    if model_info is None and eval_art is None and eval_graph is None:
+                        st.info(
+                            "No model artifacts found for this dataset yet. Try: `train a model` while this dataset is active."
+                        )
+
                 elif view == "Predictions":
                     prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
                     transform = prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
@@ -2656,24 +2987,141 @@ try:
                         }
                         st.json({k: v for k, v in meta.items() if v})
                         st.dataframe(df_sel.head(50), use_container_width=True)
-except Exception as e:
-    st.error(f"Could not render Pipeline Studio: {e}")
 
-# ---------------- Always-on analysis panel (bottom) ----------------
-st.markdown("---")
-st.subheader("Analysis Details")
-if st.session_state.get("details"):
-    details = st.session_state.details
-    default_idx = len(details) - 1
-    selected = st.selectbox(
-        "Inspect a prior turn",
-        options=list(range(len(details))),
-        index=default_idx,
-        format_func=lambda i: f"Turn {i + 1}",
-        key="analysis_details_turn_select",
-    )
+                elif view == "MLflow":
+                    mlflow_art = None
+                    idx_map = st.session_state.get("pipeline_studio_artifacts")
+                    if isinstance(idx_map, dict):
+                        entry_art = idx_map.get(selected_node_id)
+                        entry_art = entry_art if isinstance(entry_art, dict) else {}
+                        ma = entry_art.get("mlflow_artifacts")
+                        ma = ma if isinstance(ma, dict) else {}
+                        mlflow_art = ma.get("artifacts")
+                    if mlflow_art is None:
+                        detail = _latest_detail_for_dataset_id(
+                            selected_node_id, require_key="mlflow_artifacts"
+                        )
+                        if isinstance(detail, dict):
+                            mlflow_art = detail.get("mlflow_artifacts")
+
+                    if mlflow_art is None:
+                        st.info(
+                            "No MLflow artifacts found for this dataset yet. Try: `what runs are available?`"
+                        )
+                    else:
+                        st.markdown("**MLflow Artifacts**")
+
+                        def _render_mlflow_artifact(obj):
+                            try:
+                                if isinstance(obj, dict) and isinstance(
+                                    obj.get("runs"), list
+                                ):
+                                    df = pd.DataFrame(obj["runs"])
+                                    preferred_cols = [
+                                        c
+                                        for c in [
+                                            "run_id",
+                                            "run_name",
+                                            "status",
+                                            "start_time",
+                                            "duration_seconds",
+                                            "has_model",
+                                            "model_uri",
+                                            "params_preview",
+                                            "metrics_preview",
+                                        ]
+                                        if c in df.columns
+                                    ]
+                                    st.dataframe(
+                                        df[preferred_cols]
+                                        if preferred_cols
+                                        else df,
+                                        use_container_width=True,
+                                    )
+                                    if any(
+                                        c in df.columns
+                                        for c in (
+                                            "params",
+                                            "metrics",
+                                            "tags",
+                                            "artifact_uri",
+                                        )
+                                    ):
+                                        with st.expander(
+                                            "Raw run details", expanded=False
+                                        ):
+                                            st.json(obj)
+                                    return
+                                if isinstance(obj, dict) and isinstance(
+                                    obj.get("experiments"), list
+                                ):
+                                    df = pd.DataFrame(obj["experiments"])
+                                    preferred_cols = [
+                                        c
+                                        for c in [
+                                            "experiment_id",
+                                            "name",
+                                            "lifecycle_stage",
+                                            "creation_time",
+                                            "last_update_time",
+                                            "artifact_location",
+                                        ]
+                                        if c in df.columns
+                                    ]
+                                    st.dataframe(
+                                        df[preferred_cols]
+                                        if preferred_cols
+                                        else df,
+                                        use_container_width=True,
+                                    )
+                                    return
+                                if isinstance(obj, list):
+                                    st.dataframe(
+                                        pd.DataFrame(obj),
+                                        use_container_width=True,
+                                    )
+                                    return
+                            except Exception:
+                                pass
+                            st.json(obj)
+
+                        if isinstance(mlflow_art, dict) and not any(
+                            k in mlflow_art for k in ("runs", "experiments")
+                        ):
+                            is_tool_map = all(
+                                isinstance(k, str) and k.startswith("mlflow_")
+                                for k in mlflow_art.keys()
+                            )
+                            if is_tool_map:
+                                for tool_name, tool_art in mlflow_art.items():
+                                    st.markdown(f"`{tool_name}`")
+                                    _render_mlflow_artifact(tool_art)
+                            else:
+                                _render_mlflow_artifact(mlflow_art)
+                        else:
+                            _render_mlflow_artifact(mlflow_art)
+
+
+with tab_pipeline_studio:
+    st.subheader("Pipeline Studio")
     try:
-        with st.expander("Open analysis details", expanded=True):
+        _render_pipeline_studio()
+    except Exception as e:
+        st.error(f"Could not render Pipeline Studio: {e}")
+
+with tab_analysis_details:
+    st.subheader("Analysis Details")
+    if st.session_state.get("details"):
+        details = st.session_state.details
+        default_idx = len(details) - 1
+        selected = st.selectbox(
+            "Inspect a prior turn",
+            options=list(range(len(details))),
+            index=default_idx,
+            format_func=lambda i: f"Turn {i + 1}",
+            key="analysis_details_turn_select",
+        )
+        try:
             # Reuse the same rendering logic as chat history by calling render_history's helper pattern.
             # Minimal duplication: render via a small inline function to avoid leaking outer scope.
             detail = details[int(selected)]
@@ -2826,6 +3274,8 @@ if st.session_state.get("details"):
                     and feature_df is None
                 ):
                     st.info("No data frames returned.")
+        finally:
+            pass
         with tabs[3]:
             sql_query = detail.get("sql_query_code")
             sql_fn = detail.get("sql_database_function")
@@ -3060,7 +3510,4 @@ if st.session_state.get("details"):
                         _render_mlflow_artifact(mlflow_art)
                 else:
                     _render_mlflow_artifact(mlflow_art)
-    except Exception as e:
-        st.error(f"Could not render analysis details: {e}")
-else:
-    st.info("No analysis details yet. Run a request to generate them.")
+    # Note: analysis details rendering is best-effort; errors should not break the app.

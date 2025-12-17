@@ -17,7 +17,7 @@ This plan proposes a **Pipeline Studio** experience that:
 
 ## Non-Goals (for the first iteration)
 - Real-time streaming of intermediate DataFrame rows while a transform is running (Streamlit + sandbox/LLM calls make this non-trivial).
-- Full DAG editor / drag-and-drop pipeline editing.
+- Full DAG editor / drag-and-drop pipeline editing. (Planned as a later phase.)
 - Remote model serving or production-grade model registry flows (beyond existing MLflow/H2O integration).
 
 ## Current Building Blocks (Already Present)
@@ -32,23 +32,48 @@ This plan proposes a **Pipeline Studio** experience that:
 ✅ A working MVP Pipeline Studio UI exists in `apps/supervisor-ds-team-app/app.py`:
 - Pipeline target selector: Model / Active / Latest
 - Pipeline step selector (lineage nodes)
-- Workspace toggles: Table / Chart / Code / Predictions
+- Workspace toggles: Table / Chart / EDA / Code / Model / Predictions / MLflow
 - “Auto-follow latest step” behavior after each run
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
-- Chart pane performs best-effort linking by scanning recent turn details for a matching dataset id
+- Table pane includes a schema summary (columns + sampled missingness)
+- Compare mode: pick two nodes to view schema diff + side-by-side preview tables
+- Deterministic artifact linking (lightweight): maintains a per-dataset artifact index in `st.session_state` and uses it first (with history scan as fallback)
 
 🔄 Still planned / incomplete:
 - Promote Pipeline Studio into a true top-level tab (vs always-on section) or a split-pane layout
-- Deterministic node→artifact linking (avoid scanning history; persist lightweight per-dataset artifact pointers)
-- Add EDA / Model / MLflow panes inside Studio (not just in per-turn “Analysis Details”)
-- Compare mode (two nodes side-by-side) with schema/stat diffs
+- Persist artifact pointers beyond the Streamlit session (optional; file-backed index)
+- Expand compare mode (missingness delta, chart/code compare, row-level diff for key columns)
 
 ## Proposed UX
 
 ### A) Where Pipeline Studio “lives”
 **v1 (implemented):** Pipeline Studio is an always-available section beneath the chat/turn history so users can immediately toggle between pipeline steps and artifacts.
 
-**v2 (optional):** Promote Pipeline Studio into a top-level tab (or split-pane) to reduce scroll and make it the primary workspace for analysis.
+**v2 (next):** Reduce clutter by hiding Studio behind a tab or modal.
+
+**v3 (future):** Promote Pipeline Studio into a top-level workspace with a visual pipeline editor (graph/canvas) and a right-side inspector.
+
+### B) Declutter: Modal vs Tab (next)
+The Studio is starting to get cluttered at the bottom of the chat app. Options:
+
+**Option 1 — Collapsible expander (quick win)**
+- Keep Studio in the chat page but move it into `st.expander("Pipeline Studio", expanded=False)`.
+- Lowest-risk; doesn’t change navigation; still keeps “one page” mental model.
+
+**Option 2 — Modal inspector (`st.dialog`)**
+- Add an “Open Pipeline Studio” button that opens Studio in a modal.
+- Good for occasional use; can feel cramped for heavy workflows (tables + charts + reports).
+
+**Option 3 — Top-level tabs (`st.tabs`)**
+- Tabs: `Chat | Pipeline Studio` (optional: `Settings`).
+- Best “near-term” UX: removes scroll/clutter while keeping everything in one app file.
+
+**Option 4 — Multi-page app (Streamlit Pages)**
+- Separate `Chat` page and `Pipeline Studio` page.
+- Best “long-term” maintainability; introduces page-level state/navigation considerations.
+
+**Recommendation**
+- Implement Option 3 next (tabs) and keep Option 1 as a fallback UX (expander inside the Studio tab for dense panels).
 
 **Left rail (Navigator)**
 - Pipeline target selector: Model / Active / Latest (existing behavior)
@@ -58,8 +83,7 @@ This plan proposes a **Pipeline Studio** experience that:
 - Node selection changes the workspace context.
 
 **Main workspace (Toggle)**
-**v1 (implemented):** `Table | Chart | Code | Predictions`  
-**v2 (planned):** `Table | Chart | EDA | Code | Model | Predictions | MLflow`
+**v1 (implemented):** `Table | Chart | EDA | Code | Model | Predictions | MLflow`
 - Table: dataframe preview (with row count and column summary)
 - Chart: if a plotly artifact exists for this node/turn, render it; otherwise show a helpful empty state
 - EDA: link or embed Sweetviz / D-Tale if present for that node/turn
@@ -85,6 +109,12 @@ Enable selecting two nodes:
 ### C) “Auto-follow latest” (phase 1)
 When a run completes, auto-select the newest pipeline node (or newest node within the selected target pipeline).
 
+### D) Visual Pipeline Editor (phase 5)
+Eventually replace the “nodes list” with an interactive, draggable graph editor:
+- Drag nodes, pan/zoom, select nodes/edges
+- Node inspector (edit metadata/code, view artifacts, run/fork, delete/hide)
+- Optional edge edits (rewire downstream to a new node)
+
 ## Data Model / Plumbing Changes
 
 ### 1) Pipeline snapshot should optionally include “node artifacts”
@@ -102,7 +132,7 @@ This will likely require:
 - Tracking a per-dataset “last artifacts” index in supervisor state (or in Streamlit session_state) so we can associate artifacts to dataset ids deterministically.
 - Ensuring all artifacts stored remain msgpack/json serializable (no DataFrames).
 
-**Note (current implementation):** Studio currently performs chart linking by scanning recent turn details to find the latest chart generated while a given dataset id was active. This works as a fallback, but should be replaced with an explicit `dataset_id → artifacts` index for determinism and speed.
+**Note (current implementation):** Studio uses an explicit `dataset_id → artifacts` index in `st.session_state` first, and falls back to scanning recent turn details only when the index is missing an artifact.
 
 ### 2) Consistent provenance for all steps
 Ensure every node in lineage can provide:
@@ -125,15 +155,17 @@ Ensure every node in lineage can provide:
 {
   "<dataset_id>": {
     "plotly_graph": {"json": {...}, "created_ts": 0, "turn_idx": 0},
-    "eda_reports": [{"kind": "sweetviz", "path": "...", "created_ts": 0, "turn_idx": 0}],
-    "model_info": {"created_ts": 0, "turn_idx": 0, "...": "..."},
-    "mlflow": {"run_id": "...", "model_uri": "...", "created_ts": 0, "turn_idx": 0}
+    "eda_reports": {"reports": [...], "created_ts": 0, "turn_idx": 0},
+    "model_info": {"info": {...}, "created_ts": 0, "turn_idx": 0},
+    "eval_artifacts": {"artifacts": {...}, "created_ts": 0, "turn_idx": 0},
+    "eval_plotly_graph": {"json": {...}, "created_ts": 0, "turn_idx": 0},
+    "mlflow_artifacts": {"artifacts": {...}, "created_ts": 0, "turn_idx": 0}
   }
 }
 ```
 
 **Write path (when to update):**
-- After each supervisor run completes, compute the “artifact context dataset id” (typically the run’s `active_dataset_id`) and, if the turn produced `plotly_graph` / `eda_reports` / `model_info` / `mlflow_artifacts`, update the index for that dataset id.
+- After each supervisor run completes, compute the “artifact context dataset id” (typically the run’s `active_dataset_id`) and, if the turn produced `plotly_graph` / `eda_reports` / `model_info` / `eval_artifacts` / `eval_plotly_graph` / `mlflow_artifacts`, update the index for that dataset id.
 - For prediction steps: also index artifacts under the predictions dataset id returned by `_register_dataset` so the Predictions pane can render deterministically.
 
 **Read path (how Studio uses it):**
@@ -156,7 +188,55 @@ Ensure every node in lineage can provide:
 - optional missingness delta for intersecting columns (sample-based)
 - side-by-side `head(n)` previews (small `n`, user-controlled)
 
-**UX:** a “Compare” toggle that switches the right pane into a 2-column layout.
+**UX (ideal):** a “Compare” toggle that switches the right pane into a compare view (2-column layout).
+
+**UX (current implementation note):** the compare panel renders *above* the normal workspace (Table/Chart/...) to avoid using `st.stop()` (which would also hide the always-on Analysis Details section). Phase 4 can refactor this into a clean `if/else` so compare mode fully replaces the workspace.
+
+## Technical Design Notes (Visual Pipeline Editor)
+
+### A) Candidate UI components
+Based on the desired UX (drag, pan/zoom, right-click edit/delete, returns state to Python), a React Flow wrapper is a strong fit:
+- Canvas: `streamlit-flow-component` (React Flow wrapper) for nodes/edges editing and layout persistence.
+- Code editing: `streamlit-code-editor` or `streamlit-ace` inside a modal (`st.dialog`) or a right-side inspector panel.
+  - Note: built-in context menus typically cover edit/delete; custom actions like “Run node” may need to live in the Inspector (click node → Inspector shows Run/Delete/Edit code).
+
+### B) Graph representation (separate UI state from semantics)
+Keep **two** distinct pieces of state:
+
+1) **Flow UI state** (layout + selection; owned by the canvas component)
+- Node positions, viewport, edge geometry
+- Stored in `st.session_state.flow_state`
+
+2) **Pipeline registry** (the “truth”; owned by the app)
+- Nodes/edges with stable ids, provenance, parameters, and artifact pointers
+- Stored in `st.session_state.pipeline_registry` (and later persisted to JSON/SQLite)
+
+### C) Node types (progressive complexity)
+**v1 graph (fastest):** dataset-only nodes
+- Nodes are dataset ids; edges are parent→child (from dataset registry `parent_id`/`parent_ids`)
+- Node badge shows transform kind + artifact availability
+
+**v2 graph (clearer semantics):** dataset + transform nodes
+- Dataset nodes represent data frames
+- Transform nodes represent operations (`sql_query`, `python_function`, `python_merge`, `*_predict`)
+- Edges: dataset_in → transform → dataset_out; artifacts hang off dataset_out
+
+### D) Inspector actions (delete / edit / rerun)
+Suggested behavior (safe + versionable):
+- **Delete**: soft-delete/hide a node in the registry (do not destroy data by default); optionally “delete subgraph” with confirmation.
+- **Edit code**: edits create a new “draft” version (fork) instead of mutating history. Store `code_sha256` and mark downstream as “stale”.
+- **Run node**:
+  - “Run node” executes this transform using its parent dataset(s) and produces a new dataset id.
+  - “Run downstream” executes the subgraph from this node to selected sinks.
+
+### E) Execution + caching/invalidation
+- Cache key: `(transform_code_hash, input_fingerprint(s), params_hash)`
+- If the user edits code or changes input wiring, invalidate downstream nodes by marking them “stale” (but keep previous outputs available).
+
+### F) Persistence
+Persist two files (or SQLite tables):
+- `pipeline_registry.json` (semantic graph + provenance + artifact pointers; no DataFrames)
+- `flow_layout.json` (node positions/viewport)
 
 ## Implementation Plan (Phased)
 
@@ -169,25 +249,39 @@ Ensure every node in lineage can provide:
 1) UI surface (section) with:
    - Pipeline selector (Model/Active/Latest)
    - Node list selector (lineage)
-   - Workspace toggles: Table / Chart / Code / Predictions
+   - Workspace toggles: Table / Chart / EDA / Code / Model / Predictions / MLflow
 2) Auto-follow latest node after run completion
 3) Map node selection → dataset id → preview dataframe
 4) Render empty states when artifacts don’t exist for a node
 
-### Phase 2 — Artifact linking + better previews (1–2 days)
-1) Implement “best-effort node artifacts” mapping via dataset ids
-2) Add schema summary panel:
-   - n_rows, n_cols
-   - column names (collapsible)
-   - missingness count (fast)
-3) Add “Compare mode” (two-node compare):
-   - schema diff + side-by-side head()
+### Phase 2 — Artifact linking + better previews ✅ (implemented)
+1) Deterministic node artifacts mapping (dataset id → artifacts index with history fallback)
+2) Schema summary panel (columns + sampled missingness)
+3) Compare mode (two-node compare): schema diff + side-by-side preview
 
 ### Phase 3 — Reproducibility center (1–2 days)
 1) Add “Repro script” section with:
    - download spec JSON + repro python script
    - include ML/predict steps in script (already partially supported; keep improving)
 2) Add “Copy snippet” buttons for node transform code (Streamlit UI convenience)
+
+### Phase 4 — Declutter UI (0.5–1 day)
+1) Move Studio out of the bottom of the chat page:
+   - preferred: top-level tabs (`Chat | Pipeline Studio`)
+   - optional: modal (`st.dialog`) for quick inspection
+2) Preserve Studio selection state across reruns (target, node id, view, compare selection)
+3) Keep the artifact index stable across navigation changes
+
+### Phase 5 — Visual Workflow Editor (3–7 days)
+1) Add a canvas page/panel using a React Flow wrapper (e.g., `streamlit-flow-component`)
+2) Build a `pipeline_registry` graph model from the dataset registry + artifact index
+3) Node inspector:
+   - show provenance + artifacts
+   - edit code (fork) + run
+   - delete/hide nodes
+4) Execution:
+   - implement `run_from(node_id)` and downstream invalidation
+   - persist outputs/artifacts by `(run_id, node_id)`
 
 ## Acceptance Criteria (MVP)
 ✅ Users can open Pipeline Studio and:
@@ -206,11 +300,14 @@ Ensure every node in lineage can provide:
 - **Streamlit reruns**: ensure selection state doesn’t reset unexpectedly; use stable widget keys and avoid session_state mutation after instantiation.
 - **Performance**: avoid rendering full tables; keep previews small and cache expensive computations (schema summaries).
 - **True “live”**: people may mean streaming incremental intermediate results. MVP focuses on “live toggling of latest outputs” rather than streaming intermediate DataFrame updates.
+- **Workflow editor complexity**: interactive canvas introduces heavy state management and requires a custom Streamlit component.
+- **Code execution safety**: “edit code + rerun” requires clear guardrails (local-only, confirmations, and a limited execution model).
 
-## Next Design Decisions (to unblock Phase 2)
-- **Where to keep the artifact index**: Streamlit-only `st.session_state` (UI concern) vs supervisor `team_state` (shareable across render surfaces).
-- **Pointer strategy**: store inline JSON for small artifacts (e.g., plotly JSON) vs file paths for larger reports (Sweetviz HTML).
-- **DAG UX**: current lineage is a topological list; decide whether to visualize merges explicitly (parents → child) or keep list-only in v2.
+## Next Design Decisions (to unblock Phase 4/5)
+- **Navigation**: tabs vs multi-page vs modal (decide what becomes the “default” workspace).
+- **Graph model**: dataset-only nodes vs dataset+transform nodes.
+- **Edit semantics**: mutate-in-place vs fork new nodes (recommend fork).
+- **Persistence**: JSON files vs SQLite tables; where artifact files live.
 
 ## Notes
 - The existing Pipeline snapshot feature is a strong foundation and likely what viewers are intuiting as the “toggle between steps” concept.
