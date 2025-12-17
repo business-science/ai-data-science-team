@@ -1479,24 +1479,29 @@ def render_history(history: list[BaseMessage]):
                 st.write(content)
 
 
-render_history(msgs.messages)
+tab_chat, tab_pipeline_studio = st.tabs(["Chat", "Pipeline Studio"])
 
-# Show data preview (if selected) and store for reuse on submit
-data_raw_dict, _, input_provenance = get_input_data()
-# If no new data selected, reuse previously loaded data_raw from session
-if data_raw_dict is None:
-    data_raw_dict = st.session_state.get("selected_data_raw")
-    input_provenance = st.session_state.get("selected_data_provenance")
-st.session_state.selected_data_raw = data_raw_dict
-st.session_state.selected_data_provenance = input_provenance
+with tab_chat:
+    render_history(msgs.messages)
+
+    # Show data preview (if selected) and store for reuse on submit
+    data_raw_dict, _, input_provenance = get_input_data()
+    # If no new data selected, reuse previously loaded data_raw from session
+    if data_raw_dict is None:
+        data_raw_dict = st.session_state.get("selected_data_raw")
+        input_provenance = st.session_state.get("selected_data_provenance")
+    st.session_state.selected_data_raw = data_raw_dict
+    st.session_state.selected_data_provenance = input_provenance
 
 # ---------------- User input ----------------
-prompt = st.chat_input("Ask the data science team...")
+prompt = tab_chat.chat_input("Ask the data science team...")
 if prompt:
     if llm_provider_selected == "OpenAI" and (
         not resolved_api_key or key_status == "bad"
     ):
-        st.error("OpenAI API key is required and must be valid. Enter it in the sidebar.")
+        tab_chat.error(
+            "OpenAI API key is required and must be valid. Enter it in the sidebar."
+        )
         st.stop()
 
     debug_mode = bool(st.session_state.get("debug_mode", False))
@@ -1514,7 +1519,7 @@ if prompt:
     else:
         team_prompt = display_prompt.strip()
 
-    st.chat_message("human").write(display_prompt)
+    tab_chat.chat_message("human").write(display_prompt)
     msgs.add_user_message(display_prompt)
 
     # Apply DB connect/disconnect updates before building the team.
@@ -1529,7 +1534,7 @@ if prompt:
                 )
         msg_text = db_cmd.get("message")
         if isinstance(msg_text, str) and msg_text.strip():
-            st.chat_message("assistant").write(msg_text)
+            tab_chat.chat_message("assistant").write(msg_text)
             msgs.add_ai_message(msg_text)
 
     data_raw_dict = st.session_state.get("selected_data_raw")
@@ -1640,12 +1645,12 @@ if prompt:
                 "configurable": {"thread_id": st.session_state.thread_id},
             }
             show_progress = bool(st.session_state.get("show_progress", True))
-            progress_box = st.empty() if show_progress else None
+            progress_box = tab_chat.empty() if show_progress else None
             if progress_box is not None:
                 progress_box.info("Working…")
 
             show_live_logs = bool(st.session_state.get("show_live_logs", False))
-            log_container = st.empty() if show_live_logs else None
+            log_container = tab_chat.empty() if show_live_logs else None
             log_placeholder = None
 
             import sys
@@ -1849,13 +1854,13 @@ if prompt:
                 or "tpm" in msg.lower()
                 or "request too large" in msg.lower()
             ):
-                st.error(f"Error running team (rate limit): {e}")
-                st.info(
+                tab_chat.error(f"Error running team (rate limit): {e}")
+                tab_chat.info(
                     "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
                     "or switching to a smaller model."
                 )
             else:
-                st.error(f"Error running team: {e}")
+                tab_chat.error(f"Error running team: {e}")
             result = None
 
     if result:
@@ -1924,7 +1929,7 @@ if prompt:
                 break
         if last_ai:
             msgs.add_ai_message(getattr(last_ai, "content", ""))
-            st.chat_message("assistant").write(getattr(last_ai, "content", ""))
+            tab_chat.chat_message("assistant").write(getattr(last_ai, "content", ""))
 
         # Collect reasoning from AI messages after latest human
         reasoning = ""
@@ -2345,9 +2350,7 @@ if prompt:
         # Rerun once after saving results so the sidebar reflects the latest active dataset immediately.
         st.rerun()
 
-# ---------------- Pipeline Studio / Analysis Details ----------------
-st.markdown("---")
-tab_analysis_details, tab_pipeline_studio = st.tabs(["Analysis Details", "Pipeline Studio"])
+# ---------------- Pipeline Studio ----------------
 
 def _render_pipeline_studio() -> None:
     studio_state = st.session_state.get("team_state", {})
@@ -2397,6 +2400,51 @@ def _render_pipeline_studio() -> None:
                 return d
         return None
 
+    def _render_copy_to_clipboard(text: str, *, label: str = "Copy") -> None:
+        if not isinstance(text, str) or not text:
+            st.info("Nothing to copy.")
+            return
+        try:
+            payload = json.dumps(text)
+        except Exception:
+            payload = "''"
+        components.html(
+            "\n".join(
+                [
+                    "<div style=\"display:flex; align-items:center; gap:0.5rem;\">",
+                    f"<button id=\"copy-btn\" style=\"padding:0.25rem 0.75rem; border-radius:0.5rem; border:1px solid rgba(49,51,63,0.2); background:rgba(255,255,255,0.0); cursor:pointer; font-size:0.875rem;\">{label}</button>",
+                    "<span id=\"copy-status\" style=\"font-size:0.85rem; color:rgba(49,51,63,0.65);\"></span>",
+                    "</div>",
+                    "<script>",
+                    f"const text = {payload};",
+                    "const btn = document.getElementById('copy-btn');",
+                    "const status = document.getElementById('copy-status');",
+                    "async function doCopy() {",
+                    "  try {",
+                    "    if (navigator.clipboard && navigator.clipboard.writeText) {",
+                    "      await navigator.clipboard.writeText(text);",
+                    "    } else {",
+                    "      const textarea = document.createElement('textarea');",
+                    "      textarea.value = text;",
+                    "      document.body.appendChild(textarea);",
+                    "      textarea.select();",
+                    "      document.execCommand('copy');",
+                    "      document.body.removeChild(textarea);",
+                    "    }",
+                    "    if (status) status.textContent = 'Copied';",
+                    "    setTimeout(() => { if (status) status.textContent = ''; }, 1500);",
+                    "  } catch (e) {",
+                    "    if (status) status.textContent = 'Copy failed';",
+                    "    setTimeout(() => { if (status) status.textContent = ''; }, 2000);",
+                    "  }",
+                    "}",
+                    "if (btn) btn.addEventListener('click', doCopy);",
+                    "</script>",
+                ]
+            ),
+            height=40,
+        )
+
     if not studio_datasets:
         st.info("No pipeline yet. Load data and run a transform to build one.")
     else:
@@ -2439,6 +2487,21 @@ def _render_pipeline_studio() -> None:
                 )
 
                 script = pipe.get("script") if isinstance(pipe, dict) else None
+                spec_bytes = None
+                try:
+                    spec = dict(pipe) if isinstance(pipe, dict) else {}
+                    spec.pop("script", None)
+                    spec_bytes = json.dumps(spec, indent=2, default=str).encode("utf-8")
+                except Exception:
+                    spec_bytes = None
+                if spec_bytes:
+                    st.download_button(
+                        "Download pipeline spec (JSON)",
+                        data=spec_bytes,
+                        file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
+                        mime="application/json",
+                        key="pipeline_studio_download_spec",
+                    )
                 if isinstance(script, str) and script.strip():
                     st.download_button(
                         "Download pipeline script",
@@ -2543,6 +2606,19 @@ def _render_pipeline_studio() -> None:
 
                     cmp_tabs = st.tabs(["Schema diff", "Table preview"])
                     with cmp_tabs[0]:
+                        st.caption(
+                            "Diff is shown as changes in the selected step relative to the compare step."
+                        )
+                        col_map_a = (
+                            {str(c): c for c in list(df_a.columns)}
+                            if df_a is not None
+                            else {}
+                        )
+                        col_map_b = (
+                            {str(c): c for c in list(df_b.columns)}
+                            if df_b is not None
+                            else {}
+                        )
                         cols_a = (
                             [str(c) for c in list(df_a.columns)]
                             if df_a is not None
@@ -2570,8 +2646,11 @@ def _render_pipeline_studio() -> None:
                         else:
                             set_a = set(cols_a)
                             set_b = set(cols_b)
-                            removed = sorted(set_a - set_b)
-                            added = sorted(set_b - set_a)
+                            # Interpret diff as changes in the selected step (A) relative to the compare step (B).
+                            # - Removed: present in B, missing in A
+                            # - Added: present in A, missing in B
+                            removed = sorted(set_b - set_a)
+                            added = sorted(set_a - set_b)
                             shared = sorted(set_a.intersection(set_b))
 
                             c1, c2 = st.columns(2)
@@ -2586,11 +2665,25 @@ def _render_pipeline_studio() -> None:
                                 changes = []
                                 try:
                                     for col in shared:
-                                        dt_a = str(df_a[col].dtype) if col in df_a.columns else ""
-                                        dt_b = str(df_b[col].dtype) if col in df_b.columns else ""
+                                        col_a = col_map_a.get(col)
+                                        col_b = col_map_b.get(col)
+                                        dt_a = (
+                                            str(df_a[col_a].dtype)
+                                            if col_a is not None
+                                            else ""
+                                        )
+                                        dt_b = (
+                                            str(df_b[col_b].dtype)
+                                            if col_b is not None
+                                            else ""
+                                        )
                                         if dt_a != dt_b:
                                             changes.append(
-                                                {"column": col, "dtype_a": dt_a, "dtype_b": dt_b}
+                                                {
+                                                    "column": col,
+                                                    "dtype_compare": dt_b,
+                                                    "dtype_selected": dt_a,
+                                                }
                                             )
                                 except Exception:
                                     changes = []
@@ -2602,6 +2695,69 @@ def _render_pipeline_studio() -> None:
                                     )
                                 else:
                                     st.caption("No dtype changes detected (pandas dtypes).")
+
+                                with st.expander(
+                                    "Missingness delta (sampled)", expanded=False
+                                ):
+                                    try:
+                                        max_rows = 5000
+                                        max_cols = 200
+                                        shared_sample = [
+                                            c
+                                            for c in shared[:max_cols]
+                                            if c in col_map_a and c in col_map_b
+                                        ]
+                                        if not shared_sample:
+                                            st.caption(
+                                                "No shared columns available for missingness comparison."
+                                            )
+                                        else:
+                                            cols_a_sel = [
+                                                col_map_a[c] for c in shared_sample
+                                            ]
+                                            cols_b_sel = [
+                                                col_map_b[c] for c in shared_sample
+                                            ]
+                                            sample_a = df_a[cols_a_sel].head(max_rows)
+                                            sample_b = df_b[cols_b_sel].head(max_rows)
+                                            sample_a.columns = shared_sample
+                                            sample_b.columns = shared_sample
+                                            miss_a = sample_a.isna().sum()
+                                            miss_b = sample_b.isna().sum()
+                                            miss_df = pd.DataFrame(
+                                                {
+                                                    "column": shared_sample,
+                                                    f"missing_compare (n={len(sample_b)})": miss_b.values,
+                                                    f"missing_selected (n={len(sample_a)})": miss_a.values,
+                                                    "delta (selected-compare)": (miss_a - miss_b).values,
+                                                }
+                                            )
+                                            miss_df = miss_df[
+                                                miss_df["delta (selected-compare)"] != 0
+                                            ]
+                                            if len(miss_df) == 0:
+                                                st.caption(
+                                                    "No missingness delta detected in sampled rows."
+                                                )
+                                            else:
+                                                miss_df["abs_delta"] = miss_df[
+                                                    "delta (selected-compare)"
+                                                ].abs()
+                                                miss_df = miss_df.sort_values(
+                                                    "abs_delta", ascending=False
+                                                ).drop(columns=["abs_delta"])
+                                                st.dataframe(
+                                                    miss_df.head(50),
+                                                    use_container_width=True,
+                                                )
+                                                if len(shared) > max_cols:
+                                                    st.caption(
+                                                        f"Missingness computed on first {max_cols} shared columns."
+                                                    )
+                                    except Exception as e:
+                                        st.caption(
+                                            f"Could not compute missingness delta: {e}"
+                                        )
 
                     with cmp_tabs[1]:
                         rows = st.slider(
@@ -2631,6 +2787,9 @@ def _render_pipeline_studio() -> None:
                                 st.dataframe(
                                     df_b.head(int(rows)), use_container_width=True
                                 )
+
+                    # Compare mode replaces the workspace when enabled.
+                    return
                 view = st.radio(
                     "Workspace",
                     ["Table", "Chart", "EDA", "Code", "Model", "Predictions", "MLflow"],
@@ -2884,11 +3043,32 @@ def _render_pipeline_studio() -> None:
                     if isinstance(code_text, str) and code_text.strip():
                         st.markdown(f"**{title or 'Code'}**")
                         st.code(code_text, language=code_lang)
+                        try:
+                            ext = "sql" if code_lang == "sql" else "py"
+                            mime = (
+                                "application/sql"
+                                if code_lang == "sql"
+                                else "text/x-python"
+                            )
+                            c_copy, c_download = st.columns([0.22, 0.26])
+                            with c_copy:
+                                _render_copy_to_clipboard(code_text, label="Copy snippet")
+                            with c_download:
+                                st.download_button(
+                                    "Download snippet",
+                                    data=code_text.encode("utf-8"),
+                                    file_name=f"{selected_node_id}_{kind or 'step'}.{ext}",
+                                    mime=mime,
+                                    key=f"pipeline_studio_download_snippet_{selected_node_id}",
+                                )
+                        except Exception:
+                            pass
                     else:
                         st.info("No runnable code recorded for this step.")
 
                     if isinstance(script, str) and script.strip():
                         with st.expander("Full pipeline repro script", expanded=False):
+                            _render_copy_to_clipboard(script, label="Copy script")
                             st.code(script, language="python")
 
                 elif view == "Model":
@@ -3109,7 +3289,8 @@ with tab_pipeline_studio:
     except Exception as e:
         st.error(f"Could not render Pipeline Studio: {e}")
 
-with tab_analysis_details:
+with tab_chat:
+    st.markdown("---")
     st.subheader("Analysis Details")
     if st.session_state.get("details"):
         details = st.session_state.details

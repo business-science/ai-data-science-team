@@ -30,31 +30,32 @@ This plan proposes a **Pipeline Studio** experience that:
 
 ## Status (What’s Implemented In-Repo)
 ✅ A working MVP Pipeline Studio UI exists in `apps/supervisor-ds-team-app/app.py`:
+- Studio navigation: top-level tabs (`Chat | Pipeline Studio`)
 - Pipeline target selector: Model / Active / Latest
 - Pipeline step selector (lineage nodes)
 - Workspace toggles: Table / Chart / EDA / Code / Model / Predictions / MLflow
 - “Auto-follow latest step” behavior after each run
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
+- Reproducibility: download pipeline spec (JSON) + pipeline script; copy/download buttons for per-node code snippets
 - Table pane includes a schema summary (columns + sampled missingness)
-- Compare mode: pick two nodes to view schema diff + side-by-side preview tables
+- Compare mode: pick two nodes to view schema diff + dtype changes + missingness delta + side-by-side preview tables
 - Deterministic artifact linking (lightweight): maintains a per-dataset artifact index in `st.session_state` and uses it first (with history scan as fallback)
 
 🔄 Still planned / incomplete:
-- Promote Pipeline Studio into a true top-level tab (vs always-on section) or a split-pane layout
 - Persist artifact pointers beyond the Streamlit session (optional; file-backed index)
-- Expand compare mode (missingness delta, chart/code compare, row-level diff for key columns)
+- Expand compare mode further (chart/code compare, row-level diff for key columns)
 
 ## Proposed UX
 
 ### A) Where Pipeline Studio “lives”
-**v1 (implemented):** Pipeline Studio is an always-available section beneath the chat/turn history so users can immediately toggle between pipeline steps and artifacts.
+**v1 (implemented):** Pipeline Studio lives in a top-level tab (`Chat | Pipeline Studio`) so it’s accessible without scrolling the chat history.
 
-**v2 (next):** Reduce clutter by hiding Studio behind a tab or modal.
+**v2 (next):** Consider a split-pane layout inside the Studio tab (navigator + workspace) and/or a modal inspector for dense artifact views.
 
 **v3 (future):** Promote Pipeline Studio into a top-level workspace with a visual pipeline editor (graph/canvas) and a right-side inspector.
 
-### B) Declutter: Modal vs Tab (next)
-The Studio is starting to get cluttered at the bottom of the chat app. Options:
+### B) Declutter: Modal vs Tab
+Implemented Option 3 (tabs). Other options remain useful depending on UX needs:
 
 **Option 1 — Collapsible expander (quick win)**
 - Keep Studio in the chat page but move it into `st.expander("Pipeline Studio", expanded=False)`.
@@ -73,7 +74,7 @@ The Studio is starting to get cluttered at the bottom of the chat app. Options:
 - Best “long-term” maintainability; introduces page-level state/navigation considerations.
 
 **Recommendation**
-- Implement Option 3 next (tabs) and keep Option 1 as a fallback UX (expander inside the Studio tab for dense panels).
+- Keep Option 3 (tabs) as the default navigation and use Option 1 (expander) selectively for dense sub-panels.
 
 **Left rail (Navigator)**
 - Pipeline target selector: Model / Active / Latest (existing behavior)
@@ -89,7 +90,8 @@ The Studio is starting to get cluttered at the bottom of the chat app. Options:
 - EDA: link or embed Sweetviz / D-Tale if present for that node/turn
 - Code:
   - Node transform code snippet (function code, SQL query, merge code)
-  - Reproducible pipeline script section (download + view)
+  - Download snippet button (per node)
+  - Reproducible pipeline script + spec download (view + download)
 - Model:
   - training summary + leaderboard (if available)
   - mlflow run id / model uri (if available)
@@ -259,15 +261,16 @@ Persist two files (or SQLite tables):
 2) Schema summary panel (columns + sampled missingness)
 3) Compare mode (two-node compare): schema diff + side-by-side preview
 
-### Phase 3 — Reproducibility center (1–2 days)
+### Phase 3 — Reproducibility center ✅ (implemented)
 1) Add “Repro script” section with:
-   - download spec JSON + repro python script
-   - include ML/predict steps in script (already partially supported; keep improving)
+   - ✅ download spec JSON + repro python script (Pipeline Studio)
+   - ✅ include `*_predict` steps in script generation (MLflow/H2O)
 2) Add “Copy snippet” buttons for node transform code (Streamlit UI convenience)
+   - ✅ copy + download snippet buttons (fallback: code block copy UI)
 
-### Phase 4 — Declutter UI (0.5–1 day)
+### Phase 4 — Declutter UI ✅ (implemented)
 1) Move Studio out of the bottom of the chat page:
-   - preferred: top-level tabs (`Chat | Pipeline Studio`)
+   - implemented: top-level tabs (`Chat | Pipeline Studio`)
    - optional: modal (`st.dialog`) for quick inspection
 2) Preserve Studio selection state across reruns (target, node id, view, compare selection)
 3) Keep the artifact index stable across navigation changes
