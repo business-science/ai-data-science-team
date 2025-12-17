@@ -56,6 +56,188 @@ DEFAULT_SQL_URL = "sqlite:///:memory:"
 SQL_URL_INPUT_KEY = "sql_url_input"
 SQL_URL_SYNC_FLAG = "_sync_sql_url_input"
 
+APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PIPELINE_STUDIO_ARTIFACT_STORE_VERSION = 1
+PIPELINE_STUDIO_ARTIFACT_STORE_PATH = os.path.join(
+    APP_ROOT, "pipeline_store", "pipeline_studio_artifact_store.json"
+)
+PIPELINE_STUDIO_ARTIFACT_STORE_LEGACY_PATH = os.path.join(
+    APP_ROOT, "temp", "pipeline_studio_artifact_store.json"
+)
+PIPELINE_STUDIO_ARTIFACT_STORE_MAX_ITEMS = 250
+
+
+def _load_pipeline_studio_artifact_store() -> dict:
+    """
+    Load a small, file-backed artifact index so Pipeline Studio can restore charts/EDA/model pointers
+    across Streamlit sessions (best effort).
+    """
+    loaded_flag = "_pipeline_studio_artifact_store_loaded"
+    if bool(st.session_state.get(loaded_flag)):
+        store = st.session_state.get("pipeline_studio_artifact_store")
+        return store if isinstance(store, dict) else {}
+
+    store: dict = {
+        "version": PIPELINE_STUDIO_ARTIFACT_STORE_VERSION,
+        "path": PIPELINE_STUDIO_ARTIFACT_STORE_PATH,
+        "by_fingerprint": {},
+    }
+    try:
+        # Ensure the folder exists even before the first write so it's discoverable on disk.
+        out_dir = os.path.dirname(PIPELINE_STUDIO_ARTIFACT_STORE_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+
+        source_path = None
+        if os.path.exists(PIPELINE_STUDIO_ARTIFACT_STORE_PATH):
+            source_path = PIPELINE_STUDIO_ARTIFACT_STORE_PATH
+        elif os.path.exists(PIPELINE_STUDIO_ARTIFACT_STORE_LEGACY_PATH):
+            source_path = PIPELINE_STUDIO_ARTIFACT_STORE_LEGACY_PATH
+        if source_path:
+            with open(source_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                # v1 format
+                if isinstance(data.get("by_fingerprint"), dict):
+                    store.update(
+                        {
+                            "version": int(
+                                data.get("version")
+                                or PIPELINE_STUDIO_ARTIFACT_STORE_VERSION
+                            ),
+                            "by_fingerprint": data.get("by_fingerprint") or {},
+                        }
+                    )
+                # legacy format: direct mapping {fingerprint: artifacts_record}
+                else:
+                    store["by_fingerprint"] = data
+            # If we loaded from legacy, migrate to the new location best-effort.
+            if (
+                source_path == PIPELINE_STUDIO_ARTIFACT_STORE_LEGACY_PATH
+                and not os.path.exists(PIPELINE_STUDIO_ARTIFACT_STORE_PATH)
+            ):
+                _save_pipeline_studio_artifact_store(store)
+    except Exception:
+        pass
+
+    st.session_state["pipeline_studio_artifact_store"] = store
+    st.session_state[loaded_flag] = True
+    return store
+
+
+def _save_pipeline_studio_artifact_store(store: dict) -> None:
+    try:
+        import tempfile
+        import time
+
+        if not isinstance(store, dict):
+            return
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+
+        # Enforce a small cap to avoid unbounded growth.
+        if len(by_fp) > int(PIPELINE_STUDIO_ARTIFACT_STORE_MAX_ITEMS):
+            items: list[tuple[float, str]] = []
+            for fp, rec in by_fp.items():
+                ts = 0.0
+                if isinstance(rec, dict):
+                    try:
+                        ts = float(rec.get("updated_ts") or rec.get("created_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                items.append((ts, fp))
+            items.sort(reverse=True)
+            keep = {fp for _ts, fp in items[: int(PIPELINE_STUDIO_ARTIFACT_STORE_MAX_ITEMS)]}
+            by_fp = {fp: by_fp[fp] for fp in keep if fp in by_fp}
+            store["by_fingerprint"] = by_fp
+
+        store["version"] = PIPELINE_STUDIO_ARTIFACT_STORE_VERSION
+        store["updated_ts"] = time.time()
+        store["path"] = PIPELINE_STUDIO_ARTIFACT_STORE_PATH
+
+        out_dir = os.path.dirname(PIPELINE_STUDIO_ARTIFACT_STORE_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="._pipeline_studio_artifacts_", suffix=".json", dir=out_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(store, f, indent=2, default=str)
+            os.replace(tmp_path, PIPELINE_STUDIO_ARTIFACT_STORE_PATH)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _update_pipeline_studio_artifact_store_for_dataset(dataset_id: str, artifacts: dict) -> None:
+    """
+    Merge artifacts for a dataset into the persisted store, keyed by dataset fingerprint when available.
+    """
+    try:
+        import time
+
+        if not isinstance(dataset_id, str) or not dataset_id:
+            return
+        if not isinstance(artifacts, dict) or not artifacts:
+            return
+
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+        entry = datasets.get(dataset_id)
+        entry = entry if isinstance(entry, dict) else {}
+
+        fingerprint = entry.get("fingerprint")
+        fingerprint = fingerprint if isinstance(fingerprint, str) and fingerprint else None
+        if not fingerprint:
+            return
+
+        store = _load_pipeline_studio_artifact_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        rec = by_fp.get(fingerprint) if isinstance(by_fp.get(fingerprint), dict) else {}
+        rec_art = rec.get("artifacts") if isinstance(rec.get("artifacts"), dict) else {}
+        rec_art.update(artifacts)
+        rec.update(
+            {
+                "fingerprint": fingerprint,
+                "schema_hash": entry.get("schema_hash")
+                if isinstance(entry.get("schema_hash"), str)
+                else rec.get("schema_hash"),
+                "stage": entry.get("stage") if isinstance(entry.get("stage"), str) else rec.get("stage"),
+                "label": entry.get("label") if isinstance(entry.get("label"), str) else rec.get("label"),
+                "last_dataset_id": dataset_id,
+                "updated_ts": time.time(),
+                "artifacts": rec_art,
+            }
+        )
+        by_fp[fingerprint] = rec
+        store["by_fingerprint"] = by_fp
+        st.session_state["pipeline_studio_artifact_store"] = store
+        _save_pipeline_studio_artifact_store(store)
+    except Exception:
+        pass
+
+
+def _get_persisted_pipeline_studio_artifacts(*, fingerprint: str) -> dict:
+    try:
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return {}
+        store = _load_pipeline_studio_artifact_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        rec = by_fp.get(fingerprint)
+        rec = rec if isinstance(rec, dict) else {}
+        artifacts = rec.get("artifacts")
+        return artifacts if isinstance(artifacts, dict) else {}
+    except Exception:
+        return {}
+
 
 def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     """
@@ -755,7 +937,7 @@ with st.sidebar:
         )
 
     st.markdown("**Pipeline options**")
-    default_pipeline_dir = os.path.abspath(os.path.join("reports", "pipelines"))
+    default_pipeline_dir = os.path.join(APP_ROOT, "pipeline_reports", "pipelines")
     st.text_input(
         "Persist pipeline directory (optional)",
         value=default_pipeline_dir,
@@ -998,6 +1180,8 @@ if add_memory and st.session_state.checkpointer is None:
     st.session_state.checkpointer = get_checkpointer()
 if not add_memory:
     st.session_state.checkpointer = None
+
+_load_pipeline_studio_artifact_store()
 
 msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
 if not msgs.messages:
@@ -2340,6 +2524,7 @@ if prompt:
                 if cur:
                     idx_map[dsid] = cur
                     st.session_state["pipeline_studio_artifacts"] = idx_map
+                    _update_pipeline_studio_artifact_store_for_dataset(dsid, cur)
         except Exception:
             pass
 
@@ -2604,62 +2789,186 @@ def _render_pipeline_studio() -> None:
 
                     st.caption(f"Comparing `{a_id}` vs `{b_id}`")
 
-                    cmp_tabs = st.tabs(["Schema diff", "Table preview"])
+                    col_map_a = (
+                        {str(c): c for c in list(df_a.columns)}
+                        if df_a is not None
+                        else {}
+                    )
+                    col_map_b = (
+                        {str(c): c for c in list(df_b.columns)}
+                        if df_b is not None
+                        else {}
+                    )
+                    cols_a = (
+                        [str(c) for c in list(df_a.columns)]
+                        if df_a is not None
+                        else (
+                            [str(c) for c in a_entry.get("columns")]
+                            if isinstance(a_entry.get("columns"), list)
+                            else []
+                        )
+                    )
+                    cols_b = (
+                        [str(c) for c in list(df_b.columns)]
+                        if df_b is not None
+                        else (
+                            [str(c) for c in b_entry.get("columns")]
+                            if isinstance(b_entry.get("columns"), list)
+                            else []
+                        )
+                    )
+                    removed: list[str] = []
+                    added: list[str] = []
+                    shared: list[str] = []
+                    if cols_a and cols_b:
+                        set_a = set(cols_a)
+                        set_b = set(cols_b)
+                        # Interpret diff as changes in the selected step (A) relative to the compare step (B).
+                        # - Removed: present in B, missing in A
+                        # - Added: present in A, missing in B
+                        removed = sorted(set_b - set_a)
+                        added = sorted(set_a - set_b)
+                        shared = sorted(set_a.intersection(set_b))
+
+                    def _get_plotly_graph_json(dataset_id: str, entry_obj: dict):
+                        graph_json = None
+                        idx_map = st.session_state.get("pipeline_studio_artifacts")
+                        if isinstance(idx_map, dict):
+                            entry_art = idx_map.get(dataset_id)
+                            entry_art = entry_art if isinstance(entry_art, dict) else {}
+                            pg = entry_art.get("plotly_graph")
+                            pg = pg if isinstance(pg, dict) else {}
+                            graph_json = pg.get("json")
+                        if not graph_json:
+                            detail = _latest_detail_for_dataset_id(
+                                dataset_id, require_key="plotly_graph"
+                            )
+                            graph_json = (
+                                detail.get("plotly_graph")
+                                if isinstance(detail, dict)
+                                else None
+                            )
+                        if not graph_json and isinstance(entry_obj, dict):
+                            fp = entry_obj.get("fingerprint")
+                            fp = fp if isinstance(fp, str) and fp else None
+                            if fp:
+                                persisted = _get_persisted_pipeline_studio_artifacts(
+                                    fingerprint=fp
+                                )
+                                pg = persisted.get("plotly_graph")
+                                pg = pg if isinstance(pg, dict) else {}
+                                graph_json = pg.get("json")
+                        return graph_json
+
+                    def _render_plotly_graph(graph_json, *, widget_key: str) -> None:
+                        payload = (
+                            json.dumps(graph_json)
+                            if isinstance(graph_json, dict)
+                            else graph_json
+                        )
+                        fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                        st.plotly_chart(fig, use_container_width=True, key=widget_key)
+
+                    def _build_code_snippet(entry_obj: dict):
+                        prov = (
+                            entry_obj.get("provenance")
+                            if isinstance(entry_obj.get("provenance"), dict)
+                            else {}
+                        )
+                        transform = (
+                            prov.get("transform")
+                            if isinstance(prov.get("transform"), dict)
+                            else {}
+                        )
+                        kind = str(transform.get("kind") or "")
+                        code_lang = "python"
+                        title = None
+                        code_text = None
+                        if kind == "python_function":
+                            title = "Transform function (Python)"
+                            code_text = transform.get("function_code")
+                        elif kind == "sql_query":
+                            title = "SQL query"
+                            code_text = transform.get("sql_query_code")
+                            code_lang = "sql"
+                        elif kind == "python_merge":
+                            title = "Merge code (Python)"
+                            code_text = transform.get("merge_code")
+                        elif kind == "mlflow_predict":
+                            run_id = transform.get("run_id")
+                            run_id = run_id.strip() if isinstance(run_id, str) else ""
+                            title = "Prediction (MLflow) snippet"
+                            code_text = (
+                                "\n".join(
+                                    [
+                                        "import pandas as pd",
+                                        "import mlflow",
+                                        "",
+                                        f"model_uri = 'runs:/{run_id}/model'",
+                                        "model = mlflow.pyfunc.load_model(model_uri)",
+                                        "preds = model.predict(df)",
+                                        "df_preds = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)",
+                                    ]
+                                ).strip()
+                                + "\n"
+                            )
+                        elif kind == "h2o_predict":
+                            model_id = transform.get("model_id")
+                            model_id = (
+                                model_id.strip() if isinstance(model_id, str) else ""
+                            )
+                            title = "Prediction (H2O) snippet"
+                            code_text = (
+                                "\n".join(
+                                    [
+                                        "import h2o",
+                                        "",
+                                        "h2o.init()",
+                                        f"model = h2o.get_model('{model_id}')",
+                                        "frame = h2o.H2OFrame(df)",
+                                        "preds = model.predict(frame)",
+                                        "df_preds = preds.as_data_frame(use_pandas=True)",
+                                    ]
+                                ).strip()
+                                + "\n"
+                            )
+                        code_text = (
+                            code_text if isinstance(code_text, str) and code_text.strip() else None
+                        )
+                        return title, code_text, code_lang, kind
+
+                    cmp_tabs = st.tabs(
+                        [
+                            "Schema diff",
+                            "Table preview",
+                            "Chart compare",
+                            "Code compare",
+                            "Row diff",
+                        ]
+                    )
                     with cmp_tabs[0]:
                         st.caption(
-                            "Diff is shown as changes in the selected step relative to the compare step."
+                            "Diff is shown as changes in the selected step (A) relative to the compare step (B)."
                         )
-                        col_map_a = (
-                            {str(c): c for c in list(df_a.columns)}
-                            if df_a is not None
-                            else {}
-                        )
-                        col_map_b = (
-                            {str(c): c for c in list(df_b.columns)}
-                            if df_b is not None
-                            else {}
-                        )
-                        cols_a = (
-                            [str(c) for c in list(df_a.columns)]
-                            if df_a is not None
-                            else (
-                                [str(c) for c in a_entry.get("columns")]
-                                if isinstance(a_entry.get("columns"), list)
-                                else []
-                            )
-                        )
-                        cols_b = (
-                            [str(c) for c in list(df_b.columns)]
-                            if df_b is not None
-                            else (
-                                [str(c) for c in b_entry.get("columns")]
-                                if isinstance(b_entry.get("columns"), list)
-                                else []
-                            )
-                        )
-
                         if not cols_a or not cols_b:
                             st.info(
                                 "Could not compute schema diff (missing column metadata). "
                                 "Try selecting steps with tabular data."
                             )
                         else:
-                            set_a = set(cols_a)
-                            set_b = set(cols_b)
-                            # Interpret diff as changes in the selected step (A) relative to the compare step (B).
-                            # - Removed: present in B, missing in A
-                            # - Added: present in A, missing in B
-                            removed = sorted(set_b - set_a)
-                            added = sorted(set_a - set_b)
-                            shared = sorted(set_a.intersection(set_b))
-
                             c1, c2 = st.columns(2)
                             with c1:
                                 st.markdown(f"**Removed columns ({len(removed)})**")
-                                st.code("\n".join(removed) if removed else "—", language="text")
+                                st.code(
+                                    "\n".join(removed) if removed else "—",
+                                    language="text",
+                                )
                             with c2:
                                 st.markdown(f"**Added columns ({len(added)})**")
-                                st.code("\n".join(added) if added else "—", language="text")
+                                st.code(
+                                    "\n".join(added) if added else "—",
+                                    language="text",
+                                )
 
                             if df_a is not None and df_b is not None and shared:
                                 changes = []
@@ -2694,7 +3003,9 @@ def _render_pipeline_studio() -> None:
                                         use_container_width=True,
                                     )
                                 else:
-                                    st.caption("No dtype changes detected (pandas dtypes).")
+                                    st.caption(
+                                        "No dtype changes detected (pandas dtypes)."
+                                    )
 
                                 with st.expander(
                                     "Missingness delta (sampled)", expanded=False
@@ -2733,7 +3044,8 @@ def _render_pipeline_studio() -> None:
                                                 }
                                             )
                                             miss_df = miss_df[
-                                                miss_df["delta (selected-compare)"] != 0
+                                                miss_df["delta (selected-compare)"]
+                                                != 0
                                             ]
                                             if len(miss_df) == 0:
                                                 st.caption(
@@ -2770,7 +3082,7 @@ def _render_pipeline_studio() -> None:
                         )
                         ca, cb = st.columns(2, gap="large")
                         with ca:
-                            st.markdown(f"**A: {_node_label(a_id)}**")
+                            st.markdown(f"**A (selected): {_node_label(a_id)}**")
                             if df_a is None:
                                 st.info("No tabular data available for A.")
                             else:
@@ -2779,7 +3091,7 @@ def _render_pipeline_studio() -> None:
                                     df_a.head(int(rows)), use_container_width=True
                                 )
                         with cb:
-                            st.markdown(f"**B: {_node_label(b_id)}**")
+                            st.markdown(f"**B (compare): {_node_label(b_id)}**")
                             if df_b is None:
                                 st.info("No tabular data available for B.")
                             else:
@@ -2787,6 +3099,300 @@ def _render_pipeline_studio() -> None:
                                 st.dataframe(
                                     df_b.head(int(rows)), use_container_width=True
                                 )
+
+                    with cmp_tabs[2]:
+                        ga = _get_plotly_graph_json(a_id, a_entry)
+                        gb = _get_plotly_graph_json(b_id, b_entry)
+                        if not ga and not gb:
+                            st.info(
+                                "No charts found for either step. Try generating a chart while each dataset is active."
+                            )
+                        else:
+                            ca, cb = st.columns(2, gap="large")
+                            with ca:
+                                st.markdown(f"**A (selected): {_node_label(a_id)}**")
+                                if not ga:
+                                    st.info("No chart found for A.")
+                                else:
+                                    try:
+                                        _render_plotly_graph(
+                                            ga,
+                                            widget_key=f"pipeline_studio_compare_chart_a_{a_id}",
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Error rendering chart A: {e}")
+                            with cb:
+                                st.markdown(f"**B (compare): {_node_label(b_id)}**")
+                                if not gb:
+                                    st.info("No chart found for B.")
+                                else:
+                                    try:
+                                        _render_plotly_graph(
+                                            gb,
+                                            widget_key=f"pipeline_studio_compare_chart_b_{b_id}",
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Error rendering chart B: {e}")
+
+                    with cmp_tabs[3]:
+                        title_a, code_a, lang_a, kind_a = _build_code_snippet(a_entry)
+                        title_b, code_b, lang_b, kind_b = _build_code_snippet(b_entry)
+                        ca, cb = st.columns(2, gap="large")
+                        with ca:
+                            st.markdown(
+                                f"**A (selected): {title_a or kind_a or 'Code'}**"
+                            )
+                            if code_a:
+                                st.code(code_a, language=lang_a)
+                                _render_copy_to_clipboard(code_a, label="Copy A")
+                            else:
+                                st.info("No runnable code recorded for A.")
+                        with cb:
+                            st.markdown(f"**B (compare): {title_b or kind_b or 'Code'}**")
+                            if code_b:
+                                st.code(code_b, language=lang_b)
+                                _render_copy_to_clipboard(code_b, label="Copy B")
+                            else:
+                                st.info("No runnable code recorded for B.")
+
+                        if code_a and code_b:
+                            with st.expander(
+                                "Unified diff (compare → selected)", expanded=False
+                            ):
+                                try:
+                                    import difflib
+
+                                    diff_lines = difflib.unified_diff(
+                                        code_b.splitlines(),
+                                        code_a.splitlines(),
+                                        fromfile="compare",
+                                        tofile="selected",
+                                        lineterm="",
+                                    )
+                                    diff_text = "\n".join(diff_lines).strip()
+                                    st.code(diff_text if diff_text else "—", language="diff")
+                                except Exception as e:
+                                    st.caption(f"Could not compute diff: {e}")
+
+                    with cmp_tabs[4]:
+                        if df_a is None or df_b is None:
+                            st.info(
+                                "Row diff requires tabular data for both A and B (DataFrames)."
+                            )
+                        elif not shared:
+                            st.info("No shared columns available for row diff.")
+                        else:
+                            key_options = shared[:200]
+                            current_key = st.session_state.get(
+                                "pipeline_studio_compare_rowdiff_key"
+                            )
+                            if (
+                                not isinstance(current_key, str)
+                                or current_key not in key_options
+                            ):
+                                st.session_state["pipeline_studio_compare_rowdiff_key"] = (
+                                    key_options[0]
+                                )
+                            key_col = st.selectbox(
+                                "Key column",
+                                options=key_options,
+                                key="pipeline_studio_compare_rowdiff_key",
+                                help="Used to align rows between A (selected) and B (compare).",
+                            )
+                            compare_candidates = [c for c in key_options if c != key_col]
+                            compare_candidates = compare_candidates[:50]
+                            default_cols = compare_candidates[:10]
+                            current_cols = st.session_state.get(
+                                "pipeline_studio_compare_rowdiff_cols"
+                            )
+                            if not isinstance(current_cols, list) or any(
+                                c not in compare_candidates for c in current_cols
+                            ):
+                                st.session_state["pipeline_studio_compare_rowdiff_cols"] = (
+                                    default_cols
+                                )
+                            cols_to_compare = st.multiselect(
+                                "Columns to compare",
+                                options=compare_candidates,
+                                key="pipeline_studio_compare_rowdiff_cols",
+                                help="Limit columns for faster diffing.",
+                            )
+                            preview_rows = st.slider(
+                                "Preview rows",
+                                min_value=5,
+                                max_value=200,
+                                value=25,
+                                step=5,
+                                key="pipeline_studio_compare_rowdiff_preview_rows",
+                            )
+
+                            col_a = col_map_a.get(key_col)
+                            col_b = col_map_b.get(key_col)
+                            if col_a is None or col_b is None:
+                                st.info("Key column not available in both DataFrames.")
+                            else:
+                                cols_a_actual = [col_a] + [
+                                    col_map_a[c]
+                                    for c in cols_to_compare
+                                    if c in col_map_a
+                                ]
+                                cols_b_actual = [col_b] + [
+                                    col_map_b[c]
+                                    for c in cols_to_compare
+                                    if c in col_map_b
+                                ]
+                                a_small = df_a[cols_a_actual].copy()
+                                b_small = df_b[cols_b_actual].copy()
+                                a_small.columns = [key_col] + [
+                                    c for c in cols_to_compare if c in col_map_a
+                                ]
+                                b_small.columns = [key_col] + [
+                                    c for c in cols_to_compare if c in col_map_b
+                                ]
+
+                                dup_a = bool(a_small[key_col].duplicated().any())
+                                dup_b = bool(b_small[key_col].duplicated().any())
+                                if dup_a or dup_b:
+                                    st.warning(
+                                        "Key column contains duplicates; row diff uses the first occurrence per key."
+                                    )
+                                    a_small = a_small.drop_duplicates(
+                                        subset=[key_col], keep="first"
+                                    )
+                                    b_small = b_small.drop_duplicates(
+                                        subset=[key_col], keep="first"
+                                    )
+
+                                a_keys = a_small[key_col].dropna()
+                                b_keys = b_small[key_col].dropna()
+                                try:
+                                    set_a_keys = set(a_keys.unique().tolist())
+                                except Exception:
+                                    set_a_keys = set(a_keys.astype(str).unique().tolist())
+                                try:
+                                    set_b_keys = set(b_keys.unique().tolist())
+                                except Exception:
+                                    set_b_keys = set(b_keys.astype(str).unique().tolist())
+
+                                only_a = set_a_keys - set_b_keys
+                                only_b = set_b_keys - set_a_keys
+                                both = set_a_keys.intersection(set_b_keys)
+
+                                m1, m2, m3, m4 = st.columns(4)
+                                with m1:
+                                    st.metric("Keys in A", len(set_a_keys))
+                                with m2:
+                                    st.metric("Keys in B", len(set_b_keys))
+                                with m3:
+                                    st.metric("Only in A", len(only_a))
+                                with m4:
+                                    st.metric("Only in B", len(only_b))
+
+                                if only_a:
+                                    with st.expander(
+                                        "Sample rows only in A (selected)",
+                                        expanded=False,
+                                    ):
+                                        sample_keys = list(only_a)[: int(preview_rows)]
+                                        st.dataframe(
+                                            a_small[a_small[key_col].isin(sample_keys)].head(
+                                                int(preview_rows)
+                                            ),
+                                            use_container_width=True,
+                                        )
+                                if only_b:
+                                    with st.expander(
+                                        "Sample rows only in B (compare)", expanded=False
+                                    ):
+                                        sample_keys = list(only_b)[: int(preview_rows)]
+                                        st.dataframe(
+                                            b_small[b_small[key_col].isin(sample_keys)].head(
+                                                int(preview_rows)
+                                            ),
+                                            use_container_width=True,
+                                        )
+
+                                if not cols_to_compare:
+                                    st.caption(
+                                        "Select one or more columns to compare for per-key value diffs."
+                                    )
+                                elif not both:
+                                    st.caption(
+                                        "No overlapping keys between A and B for detailed value comparison."
+                                    )
+                                else:
+                                    merged = a_small.merge(
+                                        b_small,
+                                        on=key_col,
+                                        how="inner",
+                                        suffixes=("_selected", "_compare"),
+                                    )
+                                    diff_counts = []
+                                    for col in cols_to_compare:
+                                        a_col = f"{col}_selected"
+                                        b_col = f"{col}_compare"
+                                        if a_col not in merged.columns or b_col not in merged.columns:
+                                            continue
+                                        a_vals = merged[a_col]
+                                        b_vals = merged[b_col]
+                                        try:
+                                            neq = ~(
+                                                a_vals.eq(b_vals)
+                                                | (a_vals.isna() & b_vals.isna())
+                                            )
+                                        except Exception:
+                                            neq = a_vals.astype(str) != b_vals.astype(str)
+                                        n_bad = int(neq.sum())
+                                        if n_bad:
+                                            diff_counts.append(
+                                                {"column": col, "mismatched_rows": n_bad}
+                                            )
+                                    if not diff_counts:
+                                        st.caption(
+                                            "No per-key value differences detected in the selected compare columns."
+                                        )
+                                    else:
+                                        diff_df = pd.DataFrame(diff_counts).sort_values(
+                                            "mismatched_rows", ascending=False
+                                        )
+                                        st.markdown("**Value diffs (by key)**")
+                                        st.dataframe(diff_df, use_container_width=True)
+                                        inspect_default = str(diff_df.iloc[0]["column"])
+                                        current_inspect = st.session_state.get(
+                                            "pipeline_studio_compare_rowdiff_inspect_col"
+                                        )
+                                        inspect_options = [str(x) for x in diff_df["column"].tolist()]
+                                        if (
+                                            not isinstance(current_inspect, str)
+                                            or current_inspect not in inspect_options
+                                        ):
+                                            st.session_state[
+                                                "pipeline_studio_compare_rowdiff_inspect_col"
+                                            ] = inspect_default
+                                        inspect_col = st.selectbox(
+                                            "Inspect column",
+                                            options=inspect_options,
+                                            key="pipeline_studio_compare_rowdiff_inspect_col",
+                                        )
+                                        a_col = f"{inspect_col}_selected"
+                                        b_col = f"{inspect_col}_compare"
+                                        try:
+                                            neq = ~(
+                                                merged[a_col].eq(merged[b_col])
+                                                | (merged[a_col].isna() & merged[b_col].isna())
+                                            )
+                                        except Exception:
+                                            neq = merged[a_col].astype(str) != merged[b_col].astype(str)
+                                        preview = merged.loc[
+                                            neq, [key_col, a_col, b_col]
+                                        ].head(int(preview_rows)).copy()
+                                        preview = preview.rename(
+                                            columns={
+                                                a_col: f"{inspect_col} (selected)",
+                                                b_col: f"{inspect_col} (compare)",
+                                            }
+                                        )
+                                        st.dataframe(preview, use_container_width=True)
 
                     # Compare mode replaces the workspace when enabled.
                     return
@@ -2907,21 +3513,34 @@ def _render_pipeline_studio() -> None:
                             detail.get("plotly_graph") if isinstance(detail, dict) else None
                         )
                     if not graph_json:
+                        fp = entry.get("fingerprint")
+                        fp = fp if isinstance(fp, str) and fp else None
+                        if fp:
+                            persisted = _get_persisted_pipeline_studio_artifacts(
+                                fingerprint=fp
+                            )
+                            pg = persisted.get("plotly_graph")
+                            pg = pg if isinstance(pg, dict) else {}
+                            graph_json = pg.get("json")
+                    if not graph_json:
                         st.info(
                             "No chart found for this dataset yet. Try: `plot ...` while this dataset is active."
                         )
                     else:
-                        payload = (
-                            json.dumps(graph_json)
-                            if isinstance(graph_json, dict)
-                            else graph_json
-                        )
-                        fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                        st.plotly_chart(
-                            fig,
-                            use_container_width=True,
-                            key=f"pipeline_studio_chart_{selected_node_id}",
-                        )
+                        try:
+                            payload = (
+                                json.dumps(graph_json)
+                                if isinstance(graph_json, dict)
+                                else graph_json
+                            )
+                            fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                            st.plotly_chart(
+                                fig,
+                                use_container_width=True,
+                                key=f"pipeline_studio_chart_{selected_node_id}",
+                            )
+                        except Exception as e:
+                            st.error(f"Error rendering chart: {e}")
 
                 elif view == "EDA":
                     reports = None
@@ -2939,6 +3558,16 @@ def _render_pipeline_studio() -> None:
                         reports = (
                             detail.get("eda_reports") if isinstance(detail, dict) else None
                         )
+                    if not reports:
+                        fp = entry.get("fingerprint")
+                        fp = fp if isinstance(fp, str) and fp else None
+                        if fp:
+                            persisted = _get_persisted_pipeline_studio_artifacts(
+                                fingerprint=fp
+                            )
+                            er = persisted.get("eda_reports")
+                            er = er if isinstance(er, dict) else {}
+                            reports = er.get("reports")
                     reports = reports if isinstance(reports, dict) else {}
                     sweetviz_file = (
                         reports.get("sweetviz_report_file")
@@ -3096,6 +3725,22 @@ def _render_pipeline_studio() -> None:
                             model_info = detail.get("model_info")
                             eval_art = detail.get("eval_artifacts")
                             eval_graph = detail.get("eval_plotly_graph")
+                    if model_info is None and eval_art is None and eval_graph is None:
+                        fp = entry.get("fingerprint")
+                        fp = fp if isinstance(fp, str) and fp else None
+                        if fp:
+                            persisted = _get_persisted_pipeline_studio_artifacts(
+                                fingerprint=fp
+                            )
+                            mi = persisted.get("model_info")
+                            mi = mi if isinstance(mi, dict) else {}
+                            model_info = mi.get("info")
+                            ea = persisted.get("eval_artifacts")
+                            ea = ea if isinstance(ea, dict) else {}
+                            eval_art = ea.get("artifacts")
+                            eg = persisted.get("eval_plotly_graph")
+                            eg = eg if isinstance(eg, dict) else {}
+                            eval_graph = eg.get("json")
 
                     if model_info is not None:
                         st.markdown("**Model Info**")
@@ -3183,6 +3828,16 @@ def _render_pipeline_studio() -> None:
                         )
                         if isinstance(detail, dict):
                             mlflow_art = detail.get("mlflow_artifacts")
+                    if mlflow_art is None:
+                        fp = entry.get("fingerprint")
+                        fp = fp if isinstance(fp, str) and fp else None
+                        if fp:
+                            persisted = _get_persisted_pipeline_studio_artifacts(
+                                fingerprint=fp
+                            )
+                            ma = persisted.get("mlflow_artifacts")
+                            ma = ma if isinstance(ma, dict) else {}
+                            mlflow_art = ma.get("artifacts")
 
                     if mlflow_art is None:
                         st.info(

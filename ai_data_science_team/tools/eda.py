@@ -304,7 +304,7 @@ def generate_sweetviz_report(
         The file name to save the Sweetviz HTML report. Default is "sweetviz_report.html".
     report_directory : str, optional
         The directory where the report should be saved.
-        If None, a temporary directory is created and used.
+        If None, a unique subdirectory under `pipeline_reports/` is created and used.
     open_browser : bool, optional
         Whether to open the report in a web browser. Default is False.
     include_html : bool, optional
@@ -333,8 +333,10 @@ def generate_sweetviz_report(
 
     # If no directory is specified, use a temporary directory.
     if not report_directory:
-        report_directory = tempfile.mkdtemp()
-        print(f"    * Using temporary directory: {report_directory}")
+        base_reports_dir = os.path.abspath(os.path.join(os.getcwd(), "pipeline_reports"))
+        os.makedirs(base_reports_dir, exist_ok=True)
+        report_directory = tempfile.mkdtemp(prefix="sweetviz_", dir=base_reports_dir)
+        print(f"    * Using pipeline reports directory: {report_directory}")
     else:
         # Ensure user-specified directory exists.
         if not os.path.exists(report_directory):
@@ -373,7 +375,7 @@ def generate_sweetviz_report(
 
     content = (
         f"Sweetviz EDA report generated and saved as '{os.path.abspath(full_report_path)}'. "
-        f"{'This was saved in a temporary directory.' if 'tmp' in report_directory else ''}"
+        f"{'This was saved under pipeline_reports.' if 'pipeline_reports' in report_directory else ''}"
     )
     artifact = {
         "report_file": os.path.abspath(full_report_path),

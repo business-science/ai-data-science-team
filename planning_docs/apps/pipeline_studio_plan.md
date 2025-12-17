@@ -38,12 +38,11 @@ This plan proposes a **Pipeline Studio** experience that:
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
 - Reproducibility: download pipeline spec (JSON) + pipeline script; copy/download buttons for per-node code snippets
 - Table pane includes a schema summary (columns + sampled missingness)
-- Compare mode: pick two nodes to view schema diff + dtype changes + missingness delta + side-by-side preview tables
-- Deterministic artifact linking (lightweight): maintains a per-dataset artifact index in `st.session_state` and uses it first (with history scan as fallback)
+- Compare mode: pick two nodes to view schema diff + dtype changes + missingness delta + chart/code compare + key-based row diff + side-by-side preview tables
+- Deterministic artifact linking (lightweight): maintains a per-dataset artifact index in `st.session_state`, with a file-backed fingerprint index as a cross-session fallback (`pipeline_store/pipeline_studio_artifact_store.json`)
 
 🔄 Still planned / incomplete:
-- Persist artifact pointers beyond the Streamlit session (optional; file-backed index)
-- Expand compare mode further (chart/code compare, row-level diff for key columns)
+- Visual workflow editor/canvas + inspector (Phase 5)
 
 ## Proposed UX
 
@@ -175,6 +174,11 @@ Ensure every node in lineage can provide:
 
 **Ownership decision:**
 - Prefer keeping this index in `st.session_state` (UI concern) unless another UI surface needs it; if it must be shared, store only lightweight pointers in supervisor `team_state`.
+- Optional persistence (implemented): write a lightweight JSON index to disk keyed by dataset `fingerprint` (used as a best-effort fallback across sessions) at `pipeline_store/pipeline_studio_artifact_store.json`.
+
+**Local output folders**
+- Pipeline files (spec + repro script): default to `pipeline_reports/pipelines/` (user-configurable in the sidebar).
+- EDA reports (Sweetviz HTML): default to a unique subfolder under `pipeline_reports/`.
 
 ### B) Schema summaries (fast, cached)
 - Use existing dataset registry metadata when possible (`shape`, `schema`, `schema_hash`, `fingerprint`).
@@ -185,14 +189,18 @@ Ensure every node in lineage can provide:
 **Inputs:** two dataset ids (A, B) from the same pipeline snapshot.
 
 **Outputs:**
-- `added_cols = B − A`, `removed_cols = A − B`
+- UI shows changes in the selected step (A) relative to the compare step (B):
+  - `removed_cols = B − A`, `added_cols = A − B`
 - dtype changes by comparing `schema` entries on intersecting columns
 - optional missingness delta for intersecting columns (sample-based)
+- chart compare (side-by-side Plotly charts when available)
+- code compare (side-by-side snippets + unified diff)
+- row diff (key-based): keys only in A/B + per-key value mismatches for selected columns
 - side-by-side `head(n)` previews (small `n`, user-controlled)
 
 **UX (ideal):** a “Compare” toggle that switches the right pane into a compare view (2-column layout).
 
-**UX (current implementation note):** the compare panel renders *above* the normal workspace (Table/Chart/...) to avoid using `st.stop()` (which would also hide the always-on Analysis Details section). Phase 4 can refactor this into a clean `if/else` so compare mode fully replaces the workspace.
+**UX (current implementation note):** compare mode fully replaces the workspace (via a clean `if/return`) to avoid `st.stop()` and keep the rest of the app rendering normally.
 
 ## Technical Design Notes (Visual Pipeline Editor)
 

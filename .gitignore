@@ -167,6 +167,8 @@ cython_debug/
 # Temp and Logs
 /temp
 /logs
+pipeline_store/
+pipeline_reports/
 h2o_models/
 mlruns/
 reports/
