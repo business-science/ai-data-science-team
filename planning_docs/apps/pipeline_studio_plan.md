@@ -36,8 +36,10 @@ This plan proposes a **Pipeline Studio** experience that:
 - Workspace toggles: Visual Editor / Table / Chart / EDA / Code / Model / Predictions / MLflow
 - Visual Editor is the default view; clicking a node opens an Inspector (Preview / Code / Metadata) with a draft code editor and “Ask AI” → sends the draft to chat
 - Draft code persistence (implemented): “Save draft” writes to `pipeline_store/pipeline_studio_code_drafts.json` (keyed by dataset fingerprint) so edits survive Streamlit session resets
-- Draft execution (implemented, python_function only): “Run draft” executes the edited code locally against the node’s parent dataset and registers a new dataset node (sets it active)
-- Undo/redo (implemented, limited): Pipeline Studio records reversible actions (currently: dataset creation via “Run draft”) so you can undo/redo the last Studio operation if it didn’t work
+- Draft execution (implemented): “Run draft” creates a new dataset node (active) for `python_function`, `python_merge`, and `sql_query` (read-only guardrails)
+- Project save/load (implemented, best effort): save datasets + Studio state to `pipeline_store/pipeline_projects/` (pickle; local-only)
+- Downstream invalidation + “Run downstream” (implemented): rerunning a node marks downstream nodes stale, provides a replay button (best effort; skips unsupported transforms), and captures a `{old→new}` mapping with quick actions to hide stale nodes / the old branch
+- Undo/redo (implemented, best effort): supports undo/redo for single-node runs and grouped downstream runs
 - “Auto-follow latest step” behavior after each run
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
 - Reproducibility: download pipeline spec (JSON) + pipeline script; copy/download buttons for per-node code snippets
@@ -48,8 +50,11 @@ This plan proposes a **Pipeline Studio** experience that:
 🧪 Phase 5 started (beta):
 - Visual workflow editor/canvas (“Visual Editor” workspace view) using `streamlit-flow-component` (`streamlit_flow`)
   - Drag nodes to arrange layout (persisted best effort to `pipeline_store/pipeline_studio_flow_layout.json`)
-  - Right-click node menu (delete/hide nodes in the canvas UI)
-  - Node inspector (open workspace view + hide/unhide) and sync back to the Studio selection
+  - Right-click node menu (soft-delete) + Inspector hide/unhide (semantic across Studio; persisted to `pipeline_store/pipeline_registry.json`)
+  - Node inspector moved below the canvas; `Preview | Code | Metadata` spans full width
+  - Edit actions (best effort): rename node (label/stage), branch actions (hide/unhide/soft-delete/restore + hard delete), run draft-only or run draft + downstream replay with “Replace mode” (auto-hide old branch)
+  - Node badges: `ACTIVE` / `TARGET` / `STALE` / `HIDDEN` / `DELETED` + “Stale only” canvas filter
+  - Downstream replacements: show `{old→new}` mapping + buttons to hide stale nodes / hide the old branch
   - Canvas actions: Reset layout, Show all nodes
 
 🔄 Still planned:
