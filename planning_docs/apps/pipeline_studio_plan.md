@@ -41,8 +41,15 @@ This plan proposes a **Pipeline Studio** experience that:
 - Compare mode: pick two nodes to view schema diff + dtype changes + missingness delta + chart/code compare + key-based row diff + side-by-side preview tables
 - Deterministic artifact linking (lightweight): maintains a per-dataset artifact index in `st.session_state`, with a file-backed fingerprint index as a cross-session fallback (`pipeline_store/pipeline_studio_artifact_store.json`)
 
-🔄 Still planned / incomplete:
-- Visual workflow editor/canvas + inspector (Phase 5)
+🧪 Phase 5 started (beta):
+- Visual workflow editor/canvas (“Visual Editor” workspace view) using `streamlit-flow-component` (`streamlit_flow`)
+  - Drag nodes to arrange layout (persisted best effort to `pipeline_store/pipeline_studio_flow_layout.json`)
+  - Right-click node menu (delete/hide nodes in the canvas UI)
+  - Node inspector (open workspace view + hide/unhide) and sync back to the Studio selection
+  - Canvas actions: Reset layout, Show all nodes
+
+🔄 Still planned:
+- Rich node inspector actions (edit code + rerun / delete subgraph) + semantic graph model
 
 ## Proposed UX
 
@@ -246,7 +253,7 @@ Suggested behavior (safe + versionable):
 ### F) Persistence
 Persist two files (or SQLite tables):
 - `pipeline_registry.json` (semantic graph + provenance + artifact pointers; no DataFrames)
-- `flow_layout.json` (node positions/viewport)
+- `pipeline_store/pipeline_studio_flow_layout.json` (node positions + hidden nodes; viewport not yet persisted)
 
 ## Implementation Plan (Phased)
 
@@ -283,16 +290,23 @@ Persist two files (or SQLite tables):
 2) Preserve Studio selection state across reruns (target, node id, view, compare selection)
 3) Keep the artifact index stable across navigation changes
 
-### Phase 5 — Visual Workflow Editor (3–7 days)
-1) Add a canvas page/panel using a React Flow wrapper (e.g., `streamlit-flow-component`)
-2) Build a `pipeline_registry` graph model from the dataset registry + artifact index
-3) Node inspector:
-   - show provenance + artifacts
-   - edit code (fork) + run
-   - delete/hide nodes
-4) Execution:
-   - implement `run_from(node_id)` and downstream invalidation
-   - persist outputs/artifacts by `(run_id, node_id)`
+### Phase 5 — Visual Workflow Editor 🧪 (in progress)
+1) Canvas view (implemented, beta)
+   - Workspace view: `Visual Editor` (Studio)
+   - Dependency: `streamlit-flow-component`
+   - State:
+     - Node positions: `st.session_state["pipeline_studio_flow_positions"]`
+     - Hidden nodes: `st.session_state["pipeline_studio_flow_hidden_ids"]`
+     - Persisted layout store: `pipeline_store/pipeline_studio_flow_layout.json` (best effort, keyed by pipeline hash)
+2) Semantic graph model (next)
+   - Build a `pipeline_registry` graph model from the dataset registry + artifact index
+3) Inspector actions (next)
+   - Show provenance + artifacts
+   - Edit code (fork) + run
+   - Delete/hide nodes (semantic, not just UI)
+4) Execution (future)
+   - Implement `run_from(node_id)` and downstream invalidation
+   - Persist outputs/artifacts by `(run_id, node_id)`
 
 ## Acceptance Criteria (MVP)
 ✅ Users can open Pipeline Studio and:

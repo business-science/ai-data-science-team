@@ -65,6 +65,11 @@ PIPELINE_STUDIO_ARTIFACT_STORE_LEGACY_PATH = os.path.join(
     APP_ROOT, "temp", "pipeline_studio_artifact_store.json"
 )
 PIPELINE_STUDIO_ARTIFACT_STORE_MAX_ITEMS = 250
+PIPELINE_STUDIO_FLOW_LAYOUT_VERSION = 1
+PIPELINE_STUDIO_FLOW_LAYOUT_PATH = os.path.join(
+    APP_ROOT, "pipeline_store", "pipeline_studio_flow_layout.json"
+)
+PIPELINE_STUDIO_FLOW_LAYOUT_MAX_ITEMS = 100
 
 
 def _load_pipeline_studio_artifact_store() -> dict:
@@ -237,6 +242,175 @@ def _get_persisted_pipeline_studio_artifacts(*, fingerprint: str) -> dict:
         return artifacts if isinstance(artifacts, dict) else {}
     except Exception:
         return {}
+
+
+def _load_pipeline_studio_flow_layout_store() -> dict:
+    """
+    Load a small, file-backed layout store so the Pipeline Studio Visual Editor can restore
+    node positions/hidden nodes across Streamlit sessions (best effort).
+    """
+    loaded_flag = "_pipeline_studio_flow_layout_store_loaded"
+    if bool(st.session_state.get(loaded_flag)):
+        store = st.session_state.get("pipeline_studio_flow_layout_store")
+        return store if isinstance(store, dict) else {}
+
+    store: dict = {
+        "version": PIPELINE_STUDIO_FLOW_LAYOUT_VERSION,
+        "path": PIPELINE_STUDIO_FLOW_LAYOUT_PATH,
+        "by_pipeline_hash": {},
+    }
+    try:
+        out_dir = os.path.dirname(PIPELINE_STUDIO_FLOW_LAYOUT_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+
+        if os.path.exists(PIPELINE_STUDIO_FLOW_LAYOUT_PATH):
+            with open(PIPELINE_STUDIO_FLOW_LAYOUT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                # v1 format
+                if isinstance(data.get("by_pipeline_hash"), dict):
+                    store.update(
+                        {
+                            "version": int(
+                                data.get("version") or PIPELINE_STUDIO_FLOW_LAYOUT_VERSION
+                            ),
+                            "by_pipeline_hash": data.get("by_pipeline_hash") or {},
+                        }
+                    )
+                # legacy: direct mapping {pipeline_hash: layout_record}
+                else:
+                    store["by_pipeline_hash"] = data
+    except Exception:
+        pass
+
+    st.session_state["pipeline_studio_flow_layout_store"] = store
+    st.session_state[loaded_flag] = True
+    return store
+
+
+def _save_pipeline_studio_flow_layout_store(store: dict) -> None:
+    try:
+        import tempfile
+        import time
+
+        if not isinstance(store, dict):
+            return
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+
+        # Enforce a small cap to avoid unbounded growth.
+        if len(by_ph) > int(PIPELINE_STUDIO_FLOW_LAYOUT_MAX_ITEMS):
+            items: list[tuple[float, str]] = []
+            for ph, rec in by_ph.items():
+                ts = 0.0
+                if isinstance(rec, dict):
+                    try:
+                        ts = float(rec.get("updated_ts") or rec.get("created_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                items.append((ts, str(ph)))
+            items.sort(reverse=True)
+            keep = {ph for _ts, ph in items[: int(PIPELINE_STUDIO_FLOW_LAYOUT_MAX_ITEMS)]}
+            by_ph = {ph: by_ph[ph] for ph in keep if ph in by_ph}
+            store["by_pipeline_hash"] = by_ph
+
+        store["version"] = PIPELINE_STUDIO_FLOW_LAYOUT_VERSION
+        store["updated_ts"] = time.time()
+        store["path"] = PIPELINE_STUDIO_FLOW_LAYOUT_PATH
+
+        out_dir = os.path.dirname(PIPELINE_STUDIO_FLOW_LAYOUT_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix="._pipeline_studio_flow_", suffix=".json", dir=out_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(store, f, indent=2, default=str)
+            os.replace(tmp_path, PIPELINE_STUDIO_FLOW_LAYOUT_PATH)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _get_persisted_pipeline_studio_flow_layout(*, pipeline_hash: str) -> dict:
+    try:
+        if not isinstance(pipeline_hash, str) or not pipeline_hash:
+            return {}
+        store = _load_pipeline_studio_flow_layout_store()
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+        rec = by_ph.get(pipeline_hash)
+        return rec if isinstance(rec, dict) else {}
+    except Exception:
+        return {}
+
+
+def _delete_persisted_pipeline_studio_flow_layout(*, pipeline_hash: str) -> None:
+    try:
+        if not isinstance(pipeline_hash, str) or not pipeline_hash:
+            return
+        store = _load_pipeline_studio_flow_layout_store()
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+        if pipeline_hash in by_ph:
+            by_ph.pop(pipeline_hash, None)
+            store["by_pipeline_hash"] = by_ph
+            st.session_state["pipeline_studio_flow_layout_store"] = store
+            _save_pipeline_studio_flow_layout_store(store)
+    except Exception:
+        pass
+
+
+def _update_persisted_pipeline_studio_flow_layout(
+    *, pipeline_hash: str, positions: dict, hidden_ids: list[str]
+) -> None:
+    try:
+        import time
+
+        if not isinstance(pipeline_hash, str) or not pipeline_hash:
+            return
+        positions = positions if isinstance(positions, dict) else {}
+        hidden_ids = hidden_ids if isinstance(hidden_ids, list) else []
+
+        pos_clean: dict[str, dict[str, float]] = {}
+        for nid, p in positions.items():
+            if not isinstance(nid, str) or not nid:
+                continue
+            if not isinstance(p, dict):
+                continue
+            try:
+                x = float(p.get("x", 0.0))
+                y = float(p.get("y", 0.0))
+            except Exception:
+                continue
+            pos_clean[nid] = {"x": x, "y": y}
+
+        hid_clean = [str(x) for x in hidden_ids if isinstance(x, str) and x]
+
+        store = _load_pipeline_studio_flow_layout_store()
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+        rec = by_ph.get(pipeline_hash)
+        rec = rec if isinstance(rec, dict) else {}
+        rec.update(
+            {
+                "pipeline_hash": pipeline_hash,
+                "positions": pos_clean,
+                "hidden_ids": hid_clean,
+                "updated_ts": time.time(),
+            }
+        )
+        if "created_ts" not in rec:
+            rec["created_ts"] = rec.get("updated_ts")
+        by_ph[pipeline_hash] = rec
+        store["by_pipeline_hash"] = by_ph
+        st.session_state["pipeline_studio_flow_layout_store"] = store
+        _save_pipeline_studio_flow_layout_store(store)
+    except Exception:
+        pass
 
 
 def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -2696,6 +2870,25 @@ def _render_pipeline_studio() -> None:
                         key="pipeline_studio_download_repro",
                     )
 
+                pending_node = st.session_state.pop("pipeline_studio_node_id_pending", None)
+                if (
+                    isinstance(pending_node, str)
+                    and pending_node
+                    and isinstance(node_ids, list)
+                    and pending_node in node_ids
+                ):
+                    st.session_state["pipeline_studio_node_id"] = pending_node
+                    # Disable auto-follow when a user explicitly selects a node.
+                    st.session_state["pipeline_studio_autofollow"] = False
+
+                pending_autofollow = st.session_state.pop(
+                    "pipeline_studio_autofollow_pending", None
+                )
+                if pending_autofollow is not None:
+                    st.session_state["pipeline_studio_autofollow"] = bool(
+                        pending_autofollow
+                    )
+
                 auto_follow_default = bool(
                     st.session_state.get("pipeline_studio_autofollow", True)
                 )
@@ -3396,9 +3589,31 @@ def _render_pipeline_studio() -> None:
 
                     # Compare mode replaces the workspace when enabled.
                     return
+                pending_view = st.session_state.pop("pipeline_studio_view_pending", None)
+                valid_views = {
+                    "Table",
+                    "Chart",
+                    "EDA",
+                    "Code",
+                    "Model",
+                    "Predictions",
+                    "MLflow",
+                    "Visual Editor",
+                }
+                if isinstance(pending_view, str) and pending_view in valid_views:
+                    st.session_state["pipeline_studio_view"] = pending_view
                 view = st.radio(
                     "Workspace",
-                    ["Table", "Chart", "EDA", "Code", "Model", "Predictions", "MLflow"],
+                    [
+                        "Table",
+                        "Chart",
+                        "EDA",
+                        "Code",
+                        "Model",
+                        "Predictions",
+                        "MLflow",
+                        "Visual Editor",
+                    ],
                     horizontal=True,
                     key="pipeline_studio_view",
                 )
@@ -3936,6 +4151,503 @@ def _render_pipeline_studio() -> None:
                         else:
                             _render_mlflow_artifact(mlflow_art)
 
+                elif view == "Visual Editor":
+                    st.caption(
+                        "Beta: drag nodes to arrange layout; right-click for node actions; click a node to inspect."
+                    )
+                    try:
+                        from streamlit_flow import (
+                            StreamlitFlowEdge,
+                            StreamlitFlowNode,
+                            StreamlitFlowState,
+                            streamlit_flow,
+                        )
+                        from streamlit_flow.layouts import LayeredLayout, ManualLayout
+                    except Exception:
+                        st.info(
+                            "Visual Editor dependency not installed. Add `streamlit-flow-component` and restart the app."
+                        )
+                        return
+
+                    base_node_ids = [did for did in node_ids if isinstance(did, str) and did]
+                    if not base_node_ids:
+                        st.info("No pipeline nodes available to render.")
+                        return
+
+                    pipeline_hash = (
+                        pipe.get("pipeline_hash") if isinstance(pipe, dict) else None
+                    )
+                    pipeline_hash = (
+                        pipeline_hash
+                        if isinstance(pipeline_hash, str) and pipeline_hash.strip()
+                        else None
+                    )
+                    prev_pipeline_hash = st.session_state.get(
+                        "pipeline_studio_flow_pipeline_hash"
+                    )
+                    if pipeline_hash and prev_pipeline_hash != pipeline_hash:
+                        st.session_state["pipeline_studio_flow_pipeline_hash"] = pipeline_hash
+                        # Reset in-session layout cache when switching pipelines.
+                        st.session_state.pop("pipeline_studio_flow_state", None)
+                        st.session_state.pop("pipeline_studio_flow_signature", None)
+                        st.session_state.pop("pipeline_studio_flow_positions", None)
+                        st.session_state.pop("pipeline_studio_flow_hidden_ids", None)
+                        st.session_state.pop("pipeline_studio_flow_layout_sig", None)
+
+                        persisted_layout = _get_persisted_pipeline_studio_flow_layout(
+                            pipeline_hash=pipeline_hash
+                        )
+                        pos = persisted_layout.get("positions")
+                        if isinstance(pos, dict):
+                            st.session_state["pipeline_studio_flow_positions"] = pos
+                        hid = persisted_layout.get("hidden_ids")
+                        if isinstance(hid, list):
+                            st.session_state["pipeline_studio_flow_hidden_ids"] = hid
+                        st.session_state["pipeline_studio_flow_fit_view_pending"] = True
+
+                    hidden_ids = st.session_state.get("pipeline_studio_flow_hidden_ids")
+                    hidden_ids = hidden_ids if isinstance(hidden_ids, list) else []
+                    hidden_set = {str(x) for x in hidden_ids if isinstance(x, str) and x}
+
+                    def _node_has_artifact(did: str, key: str) -> bool:
+                        try:
+                            idx_map = st.session_state.get("pipeline_studio_artifacts")
+                            if isinstance(idx_map, dict):
+                                entry_art = idx_map.get(did)
+                                entry_art = (
+                                    entry_art if isinstance(entry_art, dict) else {}
+                                )
+                                if isinstance(entry_art.get(key), dict):
+                                    return True
+                            ds_entry = (
+                                studio_datasets.get(did)
+                                if isinstance(studio_datasets, dict)
+                                else None
+                            )
+                            ds_entry = ds_entry if isinstance(ds_entry, dict) else {}
+                            fp = ds_entry.get("fingerprint")
+                            fp = fp if isinstance(fp, str) and fp else None
+                            if fp:
+                                persisted = _get_persisted_pipeline_studio_artifacts(
+                                    fingerprint=fp
+                                )
+                                return isinstance(persisted.get(key), dict)
+                        except Exception:
+                            return False
+                        return False
+
+                    def _node_style(stage: str) -> dict:
+                        stage = (stage or "").strip().lower()
+                        bg = "rgba(255,255,255,0.04)"
+                        border = "1px solid rgba(255,255,255,0.15)"
+                        if stage in {"raw", "sql"}:
+                            bg = "rgba(148,163,184,0.12)"
+                        elif stage in {"wrangled", "cleaned"}:
+                            bg = "rgba(56,189,248,0.10)"
+                        elif stage in {"feature"}:
+                            bg = "rgba(34,197,94,0.10)"
+                        elif stage in {"model"}:
+                            bg = "rgba(168,85,247,0.10)"
+                        return {
+                            "background": bg,
+                            "border": border,
+                            "borderRadius": "12px",
+                            "color": "rgba(255,255,255,0.92)",
+                            "fontSize": "12px",
+                            "padding": "10px 12px",
+                            "minWidth": "160px",
+                        }
+
+                    def _parent_ids_for(did: str) -> list[str]:
+                        entry = (
+                            studio_datasets.get(did)
+                            if isinstance(studio_datasets, dict)
+                            else None
+                        )
+                        entry = entry if isinstance(entry, dict) else {}
+                        parents: list[str] = []
+                        pids = entry.get("parent_ids")
+                        if isinstance(pids, (list, tuple)):
+                            parents.extend(
+                                [str(p) for p in pids if isinstance(p, str) and p]
+                            )
+                        pid = entry.get("parent_id")
+                        if isinstance(pid, str) and pid and pid not in parents:
+                            parents.insert(0, pid)
+                        return [p for p in parents if p]
+
+                    base_set = set(base_node_ids)
+                    hidden_set = {hid for hid in hidden_set if hid in base_set}
+                    st.session_state["pipeline_studio_flow_hidden_ids"] = sorted(hidden_set)
+                    base_edges: list[StreamlitFlowEdge] = []
+                    for did in base_node_ids:
+                        for pid in _parent_ids_for(did):
+                            if pid in base_set:
+                                base_edges.append(
+                                    StreamlitFlowEdge(
+                                        id=f"e:{pid}->{did}",
+                                        source=pid,
+                                        target=did,
+                                        edge_type="smoothstep",
+                                        animated=False,
+                                        deletable=False,
+                                    )
+                                )
+
+                    import hashlib
+                    import time
+
+                    prev_state = st.session_state.get("pipeline_studio_flow_state")
+                    if not isinstance(prev_state, StreamlitFlowState):
+                        prev_state = None
+
+                    pos_store = st.session_state.get("pipeline_studio_flow_positions")
+                    pos_store = pos_store if isinstance(pos_store, dict) else {}
+                    positions_by_id: dict[str, tuple[float, float]] = {}
+                    for nid, pos_val in pos_store.items():
+                        if not isinstance(nid, str) or not nid:
+                            continue
+                        x = None
+                        y = None
+                        try:
+                            if isinstance(pos_val, dict):
+                                x = float(pos_val.get("x", 0.0))
+                                y = float(pos_val.get("y", 0.0))
+                            elif isinstance(pos_val, (list, tuple)) and len(pos_val) == 2:
+                                x = float(pos_val[0])
+                                y = float(pos_val[1])
+                        except Exception:
+                            x = None
+                            y = None
+                        if x is None or y is None:
+                            continue
+                        positions_by_id[nid] = (x, y)
+                    if not positions_by_id and prev_state is not None:
+                        try:
+                            for n in prev_state.nodes:
+                                positions_by_id[str(n.id)] = (
+                                    float(n.position.get("x", 0.0)),
+                                    float(n.position.get("y", 0.0)),
+                                )
+                        except Exception:
+                            positions_by_id = {}
+
+                    flow_ts_key = "pipeline_studio_flow_ts"
+                    if flow_ts_key not in st.session_state:
+                        # Python-controlled timestamp: only bump when we want to force the component
+                        # to accept an updated graph definition (new nodes/labels/show-all/reset).
+                        st.session_state[flow_ts_key] = 0
+                    flow_ts = int(st.session_state.get(flow_ts_key) or 0)
+
+                    force_layout = bool(
+                        st.session_state.pop("pipeline_studio_flow_force_layout", False)
+                    )
+                    use_auto_layout = force_layout or not positions_by_id
+                    layout_obj = (
+                        LayeredLayout(direction="right")
+                        if use_auto_layout
+                        else ManualLayout()
+                    )
+                    should_fit_view = use_auto_layout or bool(
+                        st.session_state.pop(
+                            "pipeline_studio_flow_fit_view_pending", False
+                        )
+                    )
+
+                    selected_default = None
+                    if prev_state is not None and isinstance(prev_state.selected_id, str):
+                        selected_default = prev_state.selected_id
+                    elif isinstance(selected_node_id, str):
+                        selected_default = selected_node_id
+
+                    target_id = (
+                        pipe.get("target_dataset_id") if isinstance(pipe, dict) else None
+                    )
+                    target_id = target_id if isinstance(target_id, str) else None
+
+                    base_nodes: list[StreamlitFlowNode] = []
+                    sig_nodes = []
+                    for idx, did in enumerate(base_node_ids):
+                        meta = meta_by_id.get(did) if isinstance(meta_by_id, dict) else {}
+                        meta = meta if isinstance(meta, dict) else {}
+                        label = meta.get("label") or did
+                        stage = str(meta.get("stage") or "")
+                        tk = str(meta.get("transform_kind") or "")
+                        shape = meta.get("shape")
+                        shape_str = ""
+                        if isinstance(shape, (list, tuple)) and len(shape) == 2:
+                            shape_str = f"{shape[0]}×{shape[1]}"
+                        flags = []
+                        if _node_has_artifact(did, "plotly_graph"):
+                            flags.append("chart")
+                        if _node_has_artifact(did, "eda_reports"):
+                            flags.append("eda")
+                        if _node_has_artifact(did, "model_info") or _node_has_artifact(
+                            did, "eval_artifacts"
+                        ):
+                            flags.append("model")
+                        if _node_has_artifact(did, "mlflow_artifacts"):
+                            flags.append("mlflow")
+                        flags_str = f"Artifacts: {', '.join(flags)}" if flags else ""
+                        bits = [x for x in [stage, tk, shape_str, flags_str] if x]
+                        content = "\n".join([str(label)] + bits).strip()
+
+                        parents = _parent_ids_for(did)
+                        node_type = "input" if not parents else "default"
+                        if target_id and did == target_id:
+                            node_type = "output"
+
+                        if use_auto_layout:
+                            pos = (0.0, 0.0)
+                        else:
+                            pos = positions_by_id.get(did)
+                            if pos is None:
+                                pos = None
+                                for pid in parents:
+                                    ppos = positions_by_id.get(pid)
+                                    if ppos is None:
+                                        continue
+                                    pos = (ppos[0] + 280.0, ppos[1])
+                                    break
+                            if pos is None:
+                                pos = (0.0, float(idx * 80))
+                        sig_nodes.append(
+                            {
+                                "id": did,
+                                "label": str(label),
+                                "stage": stage,
+                                "transform_kind": tk,
+                                "shape": shape_str,
+                                "flags": sorted([str(x) for x in flags]),
+                                "node_type": node_type,
+                                "hidden": did in hidden_set,
+                            }
+                        )
+                        base_nodes.append(
+                            StreamlitFlowNode(
+                                id=did,
+                                pos=pos,
+                                data={"content": content},
+                                node_type=node_type,
+                                source_position="right",
+                                target_position="left",
+                                hidden=did in hidden_set,
+                                selectable=True,
+                                draggable=True,
+                                deletable=True,
+                                style=_node_style(stage),
+                            )
+                        )
+
+                    sig_obj = {
+                        "nodes": sorted(sig_nodes, key=lambda x: str(x.get("id") or "")),
+                        "edges": sorted(
+                            [(e.source, e.target) for e in base_edges],
+                            key=lambda x: (str(x[0]), str(x[1])),
+                        ),
+                        "hidden": sorted(hidden_set),
+                        "target_id": target_id,
+                    }
+                    sig = hashlib.sha1(
+                        json.dumps(sig_obj, sort_keys=True, default=str).encode("utf-8")
+                    ).hexdigest()
+                    if st.session_state.get("pipeline_studio_flow_signature") != sig:
+                        st.session_state["pipeline_studio_flow_signature"] = sig
+                        flow_ts = int(time.time() * 1000)
+                        st.session_state[flow_ts_key] = flow_ts
+
+                    flow_state = StreamlitFlowState(
+                        nodes=base_nodes,
+                        edges=base_edges,
+                        selected_id=selected_default,
+                        timestamp=flow_ts,
+                    )
+
+                    c_canvas, c_inspect = st.columns([0.72, 0.28], gap="large")
+                    with c_canvas:
+                        c1, c2, c3 = st.columns([0.22, 0.22, 0.56])
+                        with c1:
+                            if st.button(
+                                "Reset layout",
+                                key="pipeline_studio_flow_reset_layout",
+                                help="Rebuilds the canvas layout (keeps pipeline data intact).",
+                            ):
+                                st.session_state.pop("pipeline_studio_flow_state", None)
+                                st.session_state.pop("pipeline_studio_flow_positions", None)
+                                st.session_state.pop("pipeline_studio_flow_signature", None)
+                                if pipeline_hash:
+                                    _delete_persisted_pipeline_studio_flow_layout(
+                                        pipeline_hash=pipeline_hash
+                                    )
+                                st.session_state["pipeline_studio_flow_force_layout"] = True
+                                st.session_state["pipeline_studio_flow_fit_view_pending"] = True
+                                st.session_state[flow_ts_key] = int(time.time() * 1000)
+                                st.rerun()
+                        with c2:
+                            if st.button(
+                                "Show all nodes",
+                                key="pipeline_studio_flow_show_all",
+                                help="Restores any hidden/deleted nodes in the canvas.",
+                            ):
+                                st.session_state["pipeline_studio_flow_hidden_ids"] = []
+                                st.session_state["pipeline_studio_flow_fit_view_pending"] = True
+                                st.session_state[flow_ts_key] = int(time.time() * 1000)
+                                st.rerun()
+                        with c3:
+                            st.caption(
+                                f"Nodes: {len(base_node_ids)} | Edges: {len(base_edges)} | Hidden: {len(hidden_set)}"
+                            )
+
+                        new_state = streamlit_flow(
+                            key="pipeline_studio_flow",
+                            state=flow_state,
+                            height=650,
+                            fit_view=should_fit_view,
+                            show_controls=True,
+                            show_minimap=True,
+                            layout=layout_obj,
+                            get_node_on_click=True,
+                            enable_pane_menu=True,
+                            enable_node_menu=True,
+                            enable_edge_menu=False,
+                            hide_watermark=True,
+                        )
+                        pos_store = st.session_state.get("pipeline_studio_flow_positions")
+                        pos_store = pos_store if isinstance(pos_store, dict) else {}
+                        try:
+                            for n in new_state.nodes:
+                                pos_store[str(n.id)] = {
+                                    "x": float(n.position.get("x", 0.0)),
+                                    "y": float(n.position.get("y", 0.0)),
+                                }
+                        except Exception:
+                            pass
+                        st.session_state["pipeline_studio_flow_positions"] = pos_store
+                        new_ids = {n.id for n in new_state.nodes}
+                        removed_by_user = base_set - new_ids
+                        if removed_by_user:
+                            hidden_set.update(removed_by_user)
+                            st.session_state["pipeline_studio_flow_hidden_ids"] = sorted(
+                                hidden_set
+                            )
+                        st.session_state["pipeline_studio_flow_state"] = new_state
+                        if pipeline_hash:
+                            try:
+                                hid_save = st.session_state.get(
+                                    "pipeline_studio_flow_hidden_ids"
+                                )
+                                hid_save = (
+                                    hid_save
+                                    if isinstance(hid_save, list)
+                                    else sorted(hidden_set)
+                                )
+                                _update_persisted_pipeline_studio_flow_layout(
+                                    pipeline_hash=pipeline_hash,
+                                    positions=pos_store,
+                                    hidden_ids=[
+                                        str(x) for x in hid_save if isinstance(x, str) and x
+                                    ],
+                                )
+                            except Exception:
+                                pass
+
+                    with c_inspect:
+                        sel = (
+                            new_state.selected_id
+                            if isinstance(new_state.selected_id, str)
+                            else None
+                        )
+                        if not sel:
+                            st.info("Click a node to inspect it.")
+                        else:
+                            st.markdown("**Selected node**")
+                            st.code(sel, language="text")
+
+                            meta = (
+                                meta_by_id.get(sel) if isinstance(meta_by_id, dict) else {}
+                            )
+                            meta = meta if isinstance(meta, dict) else {}
+                            entry_obj = (
+                                studio_datasets.get(sel)
+                                if isinstance(studio_datasets, dict)
+                                else None
+                            )
+                            entry_obj = entry_obj if isinstance(entry_obj, dict) else {}
+                            prov = (
+                                entry_obj.get("provenance")
+                                if isinstance(entry_obj.get("provenance"), dict)
+                                else {}
+                            )
+                            transform = (
+                                prov.get("transform")
+                                if isinstance(prov.get("transform"), dict)
+                                else {}
+                            )
+                            kind = str(transform.get("kind") or "")
+
+                            if kind:
+                                st.caption(f"Transform: `{kind}`")
+
+                            available_views = ["Table", "Code"]
+                            if _node_has_artifact(sel, "plotly_graph"):
+                                available_views.append("Chart")
+                            if _node_has_artifact(sel, "eda_reports"):
+                                available_views.append("EDA")
+                            if _node_has_artifact(sel, "model_info") or _node_has_artifact(
+                                sel, "eval_artifacts"
+                            ):
+                                available_views.append("Model")
+                            if kind in {"mlflow_predict", "h2o_predict"}:
+                                available_views.append("Predictions")
+                            if _node_has_artifact(sel, "mlflow_artifacts"):
+                                available_views.append("MLflow")
+
+                            open_view_key = "pipeline_studio_flow_open_view"
+                            current_open_view = st.session_state.get(open_view_key)
+                            if (
+                                not isinstance(current_open_view, str)
+                                or current_open_view not in available_views
+                            ):
+                                st.session_state[open_view_key] = available_views[0]
+                            open_view = st.selectbox(
+                                "Open workspace view",
+                                options=available_views,
+                                key=open_view_key,
+                                help="Jump from the canvas to a standard Pipeline Studio workspace view.",
+                            )
+
+                            a, b = st.columns(2)
+                            with a:
+                                if st.button(
+                                    "Open in workspace",
+                                    key="pipeline_studio_flow_open_in_workspace",
+                                    help="Selects this node in the left rail and turns off auto-follow.",
+                                ):
+                                    st.session_state["pipeline_studio_node_id_pending"] = sel
+                                    st.session_state[
+                                        "pipeline_studio_autofollow_pending"
+                                    ] = False
+                                    st.session_state["pipeline_studio_view_pending"] = open_view
+                                    st.rerun()
+                            with b:
+                                in_hidden = sel in hidden_set
+                                if st.button(
+                                    "Unhide" if in_hidden else "Hide",
+                                    key="pipeline_studio_flow_hide_toggle",
+                                    help="Toggles this node visibility in the canvas (does not delete pipeline data).",
+                                ):
+                                    if in_hidden:
+                                        hidden_set.discard(sel)
+                                    else:
+                                        hidden_set.add(sel)
+                                    st.session_state["pipeline_studio_flow_hidden_ids"] = sorted(
+                                        hidden_set
+                                    )
+                                    st.session_state["pipeline_studio_flow_fit_view_pending"] = True
+                                    st.rerun()
+
+                            with st.expander("Metadata (debug)", expanded=False):
+                                st.json(meta)
 
 with tab_pipeline_studio:
     st.subheader("Pipeline Studio")

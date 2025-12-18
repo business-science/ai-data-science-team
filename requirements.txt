@@ -1,10 +1,10 @@
 openpyxl
-langchain
+langchain >= 1.0.0
 langchain_community
 langchain-ollama
-langchain_openai
+langchain_openai >= 1.0.0
 langchain_experimental
-langgraph >= 0.2.74
+langgraph >= 1.0.0
 openai
 pandas
 sqlalchemy
@@ -14,3 +14,4 @@ streamlit
 scikit-learn
 xgboost
 psutil
+streamlit-flow-component
