@@ -30,10 +30,14 @@ This plan proposes a **Pipeline Studio** experience that:
 
 ## Status (What’s Implemented In-Repo)
 ✅ A working MVP Pipeline Studio UI exists in `apps/supervisor-ds-team-app/app.py`:
-- Studio navigation: top-level tabs (`Chat | Pipeline Studio`)
+- Studio navigation: modal dialog (`st.dialog`) launched from the chat UI (Pipeline Studio button in main area + sidebar)
 - Pipeline target selector: Model / Active / Latest
 - Pipeline step selector (lineage nodes)
-- Workspace toggles: Table / Chart / EDA / Code / Model / Predictions / MLflow
+- Workspace toggles: Visual Editor / Table / Chart / EDA / Code / Model / Predictions / MLflow
+- Visual Editor is the default view; clicking a node opens an Inspector (Preview / Code / Metadata) with a draft code editor and “Ask AI” → sends the draft to chat
+- Draft code persistence (implemented): “Save draft” writes to `pipeline_store/pipeline_studio_code_drafts.json` (keyed by dataset fingerprint) so edits survive Streamlit session resets
+- Draft execution (implemented, python_function only): “Run draft” executes the edited code locally against the node’s parent dataset and registers a new dataset node (sets it active)
+- Undo/redo (implemented, limited): Pipeline Studio records reversible actions (currently: dataset creation via “Run draft”) so you can undo/redo the last Studio operation if it didn’t work
 - “Auto-follow latest step” behavior after each run
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
 - Reproducibility: download pipeline spec (JSON) + pipeline script; copy/download buttons for per-node code snippets
@@ -54,33 +58,33 @@ This plan proposes a **Pipeline Studio** experience that:
 ## Proposed UX
 
 ### A) Where Pipeline Studio “lives”
-**v1 (implemented):** Pipeline Studio lives in a top-level tab (`Chat | Pipeline Studio`) so it’s accessible without scrolling the chat history.
+**v1 (implemented):** Pipeline Studio opens as a modal (`st.dialog`) so it stays accessible without cluttering the chat layout (works well on desktop + mobile).
 
-**v2 (next):** Consider a split-pane layout inside the Studio tab (navigator + workspace) and/or a modal inspector for dense artifact views.
+**v2 (next):** Consider a dockable “drawer” (sidebar-like) Studio for wide screens, plus modal on mobile.
 
 **v3 (future):** Promote Pipeline Studio into a top-level workspace with a visual pipeline editor (graph/canvas) and a right-side inspector.
 
-### B) Declutter: Modal vs Tab
-Implemented Option 3 (tabs). Other options remain useful depending on UX needs:
+### B) Declutter: Modal vs Tabs
+Implemented Option 2 (modal). Other options remain useful depending on UX needs:
 
 **Option 1 — Collapsible expander (quick win)**
 - Keep Studio in the chat page but move it into `st.expander("Pipeline Studio", expanded=False)`.
 - Lowest-risk; doesn’t change navigation; still keeps “one page” mental model.
 
 **Option 2 — Modal inspector (`st.dialog`)**
-- Add an “Open Pipeline Studio” button that opens Studio in a modal.
-- Good for occasional use; can feel cramped for heavy workflows (tables + charts + reports).
+- ✅ Implemented: “Pipeline Studio” button opens Studio in a modal (works well on desktop + mobile).
+- Implementation note: avoid `st.rerun()` for most in-modal interactions (rerun closes the dialog); use `on_click` callbacks to mutate `st.session_state`.
 
 **Option 3 — Top-level tabs (`st.tabs`)**
 - Tabs: `Chat | Pipeline Studio` (optional: `Settings`).
-- Best “near-term” UX: removes scroll/clutter while keeping everything in one app file.
+- Useful fallback, but the current implementation favors a modal so Studio doesn’t fight the chat layout.
 
 **Option 4 — Multi-page app (Streamlit Pages)**
 - Separate `Chat` page and `Pipeline Studio` page.
 - Best “long-term” maintainability; introduces page-level state/navigation considerations.
 
 **Recommendation**
-- Keep Option 3 (tabs) as the default navigation and use Option 1 (expander) selectively for dense sub-panels.
+- Keep Option 2 (modal) as the default navigation; consider Option 1 (expander) for quick summaries and Option 3 (tabs) if/when Studio becomes the primary workflow surface.
 
 **Left rail (Navigator)**
 - Pipeline target selector: Model / Active / Latest (existing behavior)
@@ -90,7 +94,8 @@ Implemented Option 3 (tabs). Other options remain useful depending on UX needs:
 - Node selection changes the workspace context.
 
 **Main workspace (Toggle)**
-**v1 (implemented):** `Table | Chart | EDA | Code | Model | Predictions | MLflow`
+**v1 (implemented):** `Visual Editor | Table | Chart | EDA | Code | Model | Predictions | MLflow`
+- Visual Editor: draggable canvas view of the current pipeline, with an Inspector for Preview/Code/Metadata on node click
 - Table: dataframe preview (with row count and column summary)
 - Chart: if a plotly artifact exists for this node/turn, render it; otherwise show a helpful empty state
 - EDA: link or embed Sweetviz / D-Tale if present for that node/turn
@@ -252,7 +257,7 @@ Suggested behavior (safe + versionable):
 
 ### F) Persistence
 Persist two files (or SQLite tables):
-- `pipeline_registry.json` (semantic graph + provenance + artifact pointers; no DataFrames)
+- `pipeline_store/pipeline_registry.json` (semantic graph + provenance + artifact pointers; no DataFrames)
 - `pipeline_store/pipeline_studio_flow_layout.json` (node positions + hidden nodes; viewport not yet persisted)
 
 ## Implementation Plan (Phased)
@@ -285,8 +290,7 @@ Persist two files (or SQLite tables):
 
 ### Phase 4 — Declutter UI ✅ (implemented)
 1) Move Studio out of the bottom of the chat page:
-   - implemented: top-level tabs (`Chat | Pipeline Studio`)
-   - optional: modal (`st.dialog`) for quick inspection
+   - implemented: modal (`st.dialog`) launched from chat
 2) Preserve Studio selection state across reruns (target, node id, view, compare selection)
 3) Keep the artifact index stable across navigation changes
 
@@ -298,8 +302,9 @@ Persist two files (or SQLite tables):
      - Node positions: `st.session_state["pipeline_studio_flow_positions"]`
      - Hidden nodes: `st.session_state["pipeline_studio_flow_hidden_ids"]`
      - Persisted layout store: `pipeline_store/pipeline_studio_flow_layout.json` (best effort, keyed by pipeline hash)
-2) Semantic graph model (next)
-   - Build a `pipeline_registry` graph model from the dataset registry + artifact index
+2) Semantic graph model (implemented, v0)
+   - Persist a lightweight `pipeline_registry` graph model from the dataset registry + artifact index at `pipeline_store/pipeline_registry.json`
+   - Exposes a “Download pipeline registry (JSON)” button in Studio (semantic DAG metadata; no DataFrames)
 3) Inspector actions (next)
    - Show provenance + artifacts
    - Edit code (fork) + run

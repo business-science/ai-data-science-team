@@ -70,6 +70,821 @@ PIPELINE_STUDIO_FLOW_LAYOUT_PATH = os.path.join(
     APP_ROOT, "pipeline_store", "pipeline_studio_flow_layout.json"
 )
 PIPELINE_STUDIO_FLOW_LAYOUT_MAX_ITEMS = 100
+PIPELINE_STUDIO_PIPELINE_REGISTRY_VERSION = 1
+PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH = os.path.join(
+    APP_ROOT, "pipeline_store", "pipeline_registry.json"
+)
+PIPELINE_STUDIO_PIPELINE_REGISTRY_MAX_ITEMS = 50
+PIPELINE_STUDIO_CODE_DRAFTS_VERSION = 1
+PIPELINE_STUDIO_CODE_DRAFTS_PATH = os.path.join(
+    APP_ROOT, "pipeline_store", "pipeline_studio_code_drafts.json"
+)
+PIPELINE_STUDIO_CODE_DRAFTS_MAX_ITEMS = 250
+PIPELINE_STUDIO_HISTORY_MAX_ITEMS = 25
+
+
+def _pipeline_studio_history_init() -> None:
+    if "pipeline_studio_undo_stack" not in st.session_state:
+        st.session_state["pipeline_studio_undo_stack"] = []
+    if "pipeline_studio_redo_stack" not in st.session_state:
+        st.session_state["pipeline_studio_redo_stack"] = []
+
+
+def _pipeline_studio_push_history(action: dict) -> None:
+    """
+    Record a reversible Pipeline Studio operation (best effort).
+    This is intentionally in-memory only (may include DataFrames).
+    """
+    try:
+        _pipeline_studio_history_init()
+        undo = st.session_state.get("pipeline_studio_undo_stack")
+        undo = undo if isinstance(undo, list) else []
+        undo.append(action if isinstance(action, dict) else {})
+        if len(undo) > int(PIPELINE_STUDIO_HISTORY_MAX_ITEMS):
+            undo = undo[-int(PIPELINE_STUDIO_HISTORY_MAX_ITEMS) :]
+        st.session_state["pipeline_studio_undo_stack"] = undo
+        st.session_state["pipeline_studio_redo_stack"] = []
+    except Exception:
+        pass
+
+
+def _pipeline_studio_build_pipelines_from_team_state(team_state: dict) -> dict:
+    team_state = team_state if isinstance(team_state, dict) else {}
+    ds = team_state.get("datasets")
+    ds = ds if isinstance(ds, dict) else {}
+    active_id = team_state.get("active_dataset_id")
+    active_id = active_id if isinstance(active_id, str) else None
+    if not ds:
+        return {}
+    return {
+        "model": build_pipeline_snapshot(ds, active_dataset_id=active_id),
+        "active": build_pipeline_snapshot(ds, active_dataset_id=active_id, target="active"),
+        "latest": build_pipeline_snapshot(ds, active_dataset_id=active_id, target="latest"),
+    }
+
+
+def _pipeline_studio_undo_last_action() -> None:
+    try:
+        _pipeline_studio_history_init()
+        undo = st.session_state.get("pipeline_studio_undo_stack")
+        undo = undo if isinstance(undo, list) else []
+        if not undo:
+            return
+
+        action = undo.pop()
+        action = action if isinstance(action, dict) else {}
+
+        action_type = str(action.get("type") or "")
+        if action_type != "create_dataset":
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Undo not implemented for action type `{action_type}`."
+            )
+            undo.append(action)
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            return
+
+        dataset_id = action.get("dataset_id")
+        dataset_id = dataset_id if isinstance(dataset_id, str) and dataset_id else None
+        prev_active = action.get("prev_active_dataset_id")
+        prev_active = prev_active if isinstance(prev_active, str) and prev_active else None
+
+        if not dataset_id:
+            st.session_state["pipeline_studio_history_notice"] = "Undo failed: missing dataset_id."
+            return
+
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+
+        if dataset_id not in datasets:
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Undo skipped: dataset `{dataset_id}` is already gone."
+            )
+        else:
+            # Defensive: don't remove a dataset that has downstream children.
+            for did, ent in datasets.items():
+                if did == dataset_id or not isinstance(ent, dict):
+                    continue
+                pid = ent.get("parent_id")
+                pids = ent.get("parent_ids")
+                pids = pids if isinstance(pids, list) else []
+                if pid == dataset_id or dataset_id in pids:
+                    st.session_state["pipeline_studio_history_notice"] = (
+                        f"Cannot undo: dataset `{dataset_id}` has downstream dataset `{did}`."
+                    )
+                    undo.append(action)
+                    st.session_state["pipeline_studio_undo_stack"] = undo
+                    return
+
+            datasets = dict(datasets)
+            datasets.pop(dataset_id, None)
+            team_state = {**team_state, "datasets": datasets}
+
+            active_now = team_state.get("active_dataset_id")
+            active_now = active_now if isinstance(active_now, str) else None
+            if prev_active and prev_active in datasets:
+                team_state["active_dataset_id"] = prev_active
+            elif active_now == dataset_id or (active_now and active_now not in datasets):
+                # pick newest by created_ts
+                best_id = None
+                best_ts = -1.0
+                for did, ent in datasets.items():
+                    if not isinstance(ent, dict):
+                        continue
+                    try:
+                        ts = float(ent.get("created_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                    if ts >= best_ts:
+                        best_ts = ts
+                        best_id = did
+                team_state["active_dataset_id"] = best_id
+
+            st.session_state["team_state"] = team_state
+
+            # Remove per-dataset artifact index entries (best effort).
+            try:
+                idx_map = st.session_state.get("pipeline_studio_artifacts")
+                if isinstance(idx_map, dict) and dataset_id in idx_map:
+                    idx_map = dict(idx_map)
+                    idx_map.pop(dataset_id, None)
+                    st.session_state["pipeline_studio_artifacts"] = idx_map
+            except Exception:
+                pass
+
+            # Update persisted registry (best effort).
+            try:
+                pipelines_new = _pipeline_studio_build_pipelines_from_team_state(team_state)
+                ds_new = team_state.get("datasets")
+                ds_new = ds_new if isinstance(ds_new, dict) else {}
+                _update_pipeline_registry_store_for_pipelines(
+                    pipelines=pipelines_new, datasets=ds_new
+                )
+            except Exception:
+                pass
+
+            new_active = team_state.get("active_dataset_id")
+            new_active = new_active if isinstance(new_active, str) else None
+            if new_active:
+                st.session_state["pipeline_studio_node_id_pending"] = new_active
+                st.session_state["pipeline_studio_autofollow_pending"] = True
+
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Undid last action: removed dataset `{dataset_id}`."
+            )
+
+        redo = st.session_state.get("pipeline_studio_redo_stack")
+        redo = redo if isinstance(redo, list) else []
+        redo.append(action)
+        st.session_state["pipeline_studio_redo_stack"] = redo
+        st.session_state["pipeline_studio_undo_stack"] = undo
+    except Exception as e:
+        st.session_state["pipeline_studio_history_notice"] = f"Undo failed: {e}"
+
+
+def _pipeline_studio_redo_last_action() -> None:
+    try:
+        _pipeline_studio_history_init()
+        redo = st.session_state.get("pipeline_studio_redo_stack")
+        redo = redo if isinstance(redo, list) else []
+        if not redo:
+            return
+
+        action = redo.pop()
+        action = action if isinstance(action, dict) else {}
+        action_type = str(action.get("type") or "")
+        if action_type != "create_dataset":
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Redo not implemented for action type `{action_type}`."
+            )
+            redo.append(action)
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            return
+
+        dataset_id = action.get("dataset_id")
+        dataset_id = dataset_id if isinstance(dataset_id, str) and dataset_id else None
+        dataset_entry = action.get("dataset_entry")
+        dataset_entry = dataset_entry if isinstance(dataset_entry, dict) else None
+        if not dataset_id or dataset_entry is None:
+            st.session_state["pipeline_studio_history_notice"] = "Redo failed: missing dataset payload."
+            return
+
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+        datasets = dict(datasets)
+        datasets[dataset_id] = dataset_entry
+        team_state = {**team_state, "datasets": datasets, "active_dataset_id": dataset_id}
+        st.session_state["team_state"] = team_state
+
+        # Update persisted registry (best effort).
+        try:
+            pipelines_new = _pipeline_studio_build_pipelines_from_team_state(team_state)
+            _update_pipeline_registry_store_for_pipelines(
+                pipelines=pipelines_new, datasets=datasets
+            )
+        except Exception:
+            pass
+
+        st.session_state["pipeline_studio_node_id_pending"] = dataset_id
+        st.session_state["pipeline_studio_autofollow_pending"] = True
+        st.session_state["pipeline_studio_history_notice"] = (
+            f"Redid last action: restored dataset `{dataset_id}`."
+        )
+
+        undo = st.session_state.get("pipeline_studio_undo_stack")
+        undo = undo if isinstance(undo, list) else []
+        undo.append(action)
+        if len(undo) > int(PIPELINE_STUDIO_HISTORY_MAX_ITEMS):
+            undo = undo[-int(PIPELINE_STUDIO_HISTORY_MAX_ITEMS) :]
+        st.session_state["pipeline_studio_undo_stack"] = undo
+        st.session_state["pipeline_studio_redo_stack"] = redo
+    except Exception as e:
+        st.session_state["pipeline_studio_history_notice"] = f"Redo failed: {e}"
+
+
+def _load_pipeline_studio_code_drafts_store() -> dict:
+    """
+    Load a small, file-backed store of per-dataset code drafts keyed by dataset fingerprint.
+    """
+    loaded_flag = "_pipeline_studio_code_drafts_store_loaded"
+    if bool(st.session_state.get(loaded_flag)):
+        store = st.session_state.get("pipeline_studio_code_drafts_store")
+        return store if isinstance(store, dict) else {}
+
+    store: dict = {
+        "version": PIPELINE_STUDIO_CODE_DRAFTS_VERSION,
+        "path": PIPELINE_STUDIO_CODE_DRAFTS_PATH,
+        "by_fingerprint": {},
+    }
+    try:
+        out_dir = os.path.dirname(PIPELINE_STUDIO_CODE_DRAFTS_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        if os.path.exists(PIPELINE_STUDIO_CODE_DRAFTS_PATH):
+            with open(PIPELINE_STUDIO_CODE_DRAFTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                if isinstance(data.get("by_fingerprint"), dict):
+                    store.update(
+                        {
+                            "version": int(
+                                data.get("version") or PIPELINE_STUDIO_CODE_DRAFTS_VERSION
+                            ),
+                            "by_fingerprint": data.get("by_fingerprint") or {},
+                        }
+                    )
+                else:
+                    # legacy: direct mapping {fingerprint: draft_record}
+                    store["by_fingerprint"] = data
+    except Exception:
+        pass
+
+    st.session_state["pipeline_studio_code_drafts_store"] = store
+    st.session_state[loaded_flag] = True
+    return store
+
+
+def _save_pipeline_studio_code_drafts_store(store: dict) -> None:
+    try:
+        import tempfile
+        import time
+
+        if not isinstance(store, dict):
+            return
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+
+        if len(by_fp) > int(PIPELINE_STUDIO_CODE_DRAFTS_MAX_ITEMS):
+            items: list[tuple[float, str]] = []
+            for fp, rec in by_fp.items():
+                ts = 0.0
+                if isinstance(rec, dict):
+                    try:
+                        ts = float(rec.get("updated_ts") or rec.get("created_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                items.append((ts, str(fp)))
+            items.sort(reverse=True)
+            keep = {fp for _ts, fp in items[: int(PIPELINE_STUDIO_CODE_DRAFTS_MAX_ITEMS)]}
+            by_fp = {fp: by_fp[fp] for fp in keep if fp in by_fp}
+            store["by_fingerprint"] = by_fp
+
+        store["version"] = PIPELINE_STUDIO_CODE_DRAFTS_VERSION
+        store["updated_ts"] = time.time()
+        store["path"] = PIPELINE_STUDIO_CODE_DRAFTS_PATH
+
+        out_dir = os.path.dirname(PIPELINE_STUDIO_CODE_DRAFTS_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="._pipeline_code_drafts_", suffix=".json", dir=out_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(store, f, indent=2, default=str)
+            os.replace(tmp_path, PIPELINE_STUDIO_CODE_DRAFTS_PATH)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _get_pipeline_studio_code_draft(*, fingerprint: str) -> dict:
+    try:
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return {}
+        store = _load_pipeline_studio_code_drafts_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        rec = by_fp.get(fingerprint)
+        return rec if isinstance(rec, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_pipeline_studio_code_draft(
+    *,
+    fingerprint: str,
+    dataset_id: str | None,
+    transform_kind: str | None,
+    lang: str | None,
+    draft_code: str,
+) -> None:
+    try:
+        import time
+
+        fingerprint = fingerprint.strip() if isinstance(fingerprint, str) else ""
+        if not fingerprint:
+            return
+        draft_code = draft_code.strip() if isinstance(draft_code, str) else ""
+        if not draft_code:
+            return
+
+        store = _load_pipeline_studio_code_drafts_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        prev = by_fp.get(fingerprint)
+        prev = prev if isinstance(prev, dict) else {}
+        rec = {
+            "fingerprint": fingerprint,
+            "dataset_id": dataset_id,
+            "transform_kind": transform_kind,
+            "lang": lang,
+            "draft_code": draft_code,
+            "updated_ts": time.time(),
+            "created_ts": prev.get("created_ts") or time.time(),
+        }
+        by_fp[fingerprint] = rec
+        store["by_fingerprint"] = by_fp
+        st.session_state["pipeline_studio_code_drafts_store"] = store
+        _save_pipeline_studio_code_drafts_store(store)
+    except Exception:
+        pass
+
+
+def _delete_pipeline_studio_code_draft(*, fingerprint: str) -> None:
+    try:
+        fingerprint = fingerprint.strip() if isinstance(fingerprint, str) else ""
+        if not fingerprint:
+            return
+        store = _load_pipeline_studio_code_drafts_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        if fingerprint in by_fp:
+            by_fp.pop(fingerprint, None)
+            store["by_fingerprint"] = by_fp
+            st.session_state["pipeline_studio_code_drafts_store"] = store
+            _save_pipeline_studio_code_drafts_store(store)
+    except Exception:
+        pass
+
+
+def _pipeline_studio_dataset_meta(
+    data: object,
+) -> tuple[list[int] | None, list[str] | None, list[dict[str, str]] | None, str | None, str | None]:
+    """
+    Best-effort dataset metadata matching the supervisor's dataset registry conventions.
+    Returns (shape, cols, schema, schema_hash, fingerprint).
+    """
+    try:
+        import hashlib
+        import pandas as _pd
+        from pandas.util import hash_pandas_object
+
+        if not isinstance(data, _pd.DataFrame):
+            return None, None, None, None, None
+
+        shape = [int(data.shape[0]), int(data.shape[1])]
+        cols = [str(c) for c in list(data.columns)]
+        cols = cols[:200] if cols else None
+
+        col_order = sorted([str(c) for c in list(data.columns)])
+        schema = [
+            {"name": c, "dtype": str(data[c].dtype) if c in data.columns else ""}
+            for c in col_order[:200]
+        ]
+        schema_str = "|".join(f"{r['name']}:{r['dtype']}" for r in schema)
+        schema_hash = hashlib.sha256(schema_str.encode("utf-8")).hexdigest() if schema_str else None
+
+        df_sample = (
+            data.reindex(columns=col_order)
+            .head(2000)
+            .reset_index(drop=True)
+        )
+        try:
+            row_hashes = hash_pandas_object(df_sample, index=False).values
+            fingerprint = hashlib.sha256(row_hashes.tobytes()).hexdigest()
+        except Exception:
+            snap = df_sample.to_json(orient="split", date_format="iso")
+            fingerprint = hashlib.sha256(snap.encode("utf-8")).hexdigest()
+
+        return shape, cols, schema, schema_hash, fingerprint
+    except Exception:
+        return None, None, None, None, None
+
+
+def _pipeline_studio_register_dataset(
+    *,
+    team_state: dict,
+    data: pd.DataFrame,
+    stage: str,
+    label: str,
+    created_by: str,
+    provenance: dict[str, object],
+    parent_id: str | None = None,
+    parent_ids: list[str] | None = None,
+    make_active: bool = True,
+) -> tuple[dict, str]:
+    import time
+    from datetime import datetime, timezone
+
+    team_state = team_state if isinstance(team_state, dict) else {}
+    datasets = team_state.get("datasets")
+    datasets = datasets if isinstance(datasets, dict) else {}
+
+    stage = (stage or "custom").strip() or "custom"
+    did = f"{stage}_{uuid.uuid4().hex[:8]}"
+
+    shape, cols, schema, schema_hash, fingerprint = _pipeline_studio_dataset_meta(data)
+    ts = time.time()
+    normalized_parents: list[str] = []
+    if isinstance(parent_ids, list):
+        normalized_parents.extend([str(p) for p in parent_ids if isinstance(p, str) and p])
+    if isinstance(parent_id, str) and parent_id and parent_id not in normalized_parents:
+        normalized_parents.insert(0, parent_id)
+    normalized_parents = [p for p in normalized_parents if p]
+    parent_id = normalized_parents[0] if normalized_parents else parent_id
+
+    datasets = {
+        **datasets,
+        did: {
+            "id": did,
+            "label": label or did,
+            "stage": stage,
+            "data": data,
+            "shape": shape,
+            "columns": cols,
+            "schema": schema,
+            "schema_hash": schema_hash,
+            "fingerprint": fingerprint,
+            "created_ts": ts,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": created_by,
+            "provenance": provenance or {},
+            "parent_id": parent_id,
+            "parent_ids": normalized_parents,
+        },
+    }
+    active_id = did if make_active else team_state.get("active_dataset_id")
+    out_state = {**team_state, "datasets": datasets, "active_dataset_id": active_id}
+    return out_state, did
+
+
+def _load_pipeline_studio_pipeline_registry_store() -> dict:
+    """
+    Load a small, file-backed semantic graph store for Pipeline Studio (best effort).
+    The registry is intended to persist a lightweight DAG (no DataFrames) across sessions.
+    """
+    loaded_flag = "_pipeline_studio_pipeline_registry_store_loaded"
+    if bool(st.session_state.get(loaded_flag)):
+        store = st.session_state.get("pipeline_studio_pipeline_registry_store")
+        return store if isinstance(store, dict) else {}
+
+    store: dict = {
+        "version": PIPELINE_STUDIO_PIPELINE_REGISTRY_VERSION,
+        "path": PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH,
+        "by_pipeline_hash": {},
+    }
+    try:
+        out_dir = os.path.dirname(PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        if os.path.exists(PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH):
+            with open(PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                if isinstance(data.get("by_pipeline_hash"), dict):
+                    store.update(
+                        {
+                            "version": int(
+                                data.get("version")
+                                or PIPELINE_STUDIO_PIPELINE_REGISTRY_VERSION
+                            ),
+                            "by_pipeline_hash": data.get("by_pipeline_hash") or {},
+                        }
+                    )
+                else:
+                    # legacy: direct mapping {pipeline_hash: registry_record}
+                    store["by_pipeline_hash"] = data
+    except Exception:
+        pass
+
+    st.session_state["pipeline_studio_pipeline_registry_store"] = store
+    st.session_state[loaded_flag] = True
+    return store
+
+
+def _save_pipeline_studio_pipeline_registry_store(store: dict) -> None:
+    try:
+        import tempfile
+        import time
+
+        if not isinstance(store, dict):
+            return
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+
+        if len(by_ph) > int(PIPELINE_STUDIO_PIPELINE_REGISTRY_MAX_ITEMS):
+            items: list[tuple[float, str]] = []
+            for ph, rec in by_ph.items():
+                ts = 0.0
+                if isinstance(rec, dict):
+                    try:
+                        ts = float(rec.get("updated_ts") or rec.get("created_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                items.append((ts, str(ph)))
+            items.sort(reverse=True)
+            keep = {
+                ph for _ts, ph in items[: int(PIPELINE_STUDIO_PIPELINE_REGISTRY_MAX_ITEMS)]
+            }
+            by_ph = {ph: by_ph[ph] for ph in keep if ph in by_ph}
+            store["by_pipeline_hash"] = by_ph
+
+        store["version"] = PIPELINE_STUDIO_PIPELINE_REGISTRY_VERSION
+        store["updated_ts"] = time.time()
+        store["path"] = PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH
+
+        out_dir = os.path.dirname(PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="._pipeline_registry_", suffix=".json", dir=out_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(store, f, indent=2, default=str)
+            os.replace(tmp_path, PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _get_persisted_pipeline_registry(*, pipeline_hash: str) -> dict:
+    try:
+        if not isinstance(pipeline_hash, str) or not pipeline_hash:
+            return {}
+        store = _load_pipeline_studio_pipeline_registry_store()
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+        rec = by_ph.get(pipeline_hash)
+        return rec if isinstance(rec, dict) else {}
+    except Exception:
+        return {}
+
+
+def _build_pipeline_registry_record(
+    *, pipeline: dict, datasets: dict, artifacts_by_dataset_id: dict | None
+) -> dict:
+    import time
+    import hashlib
+
+    pipeline = pipeline if isinstance(pipeline, dict) else {}
+    datasets = datasets if isinstance(datasets, dict) else {}
+    artifacts_by_dataset_id = (
+        artifacts_by_dataset_id
+        if isinstance(artifacts_by_dataset_id, dict)
+        else {}
+    )
+
+    pipeline_hash = pipeline.get("pipeline_hash")
+    pipeline_hash = pipeline_hash if isinstance(pipeline_hash, str) and pipeline_hash else None
+
+    lineage = pipeline.get("lineage")
+    lineage = lineage if isinstance(lineage, list) else []
+    lineage_ids = [
+        str(x.get("id"))
+        for x in lineage
+        if isinstance(x, dict) and isinstance(x.get("id"), str) and x.get("id")
+    ]
+
+    def _sanitize_transform(transform: dict) -> dict:
+        transform = transform if isinstance(transform, dict) else {}
+        kind = transform.get("kind")
+        kind = str(kind) if isinstance(kind, str) and kind else ""
+        out: dict = {"kind": kind} if kind else {}
+        for k in (
+            "code_sha256",
+            "sql_sha256",
+            "sql_database_function_sha256",
+            "function_name",
+            "function_path",
+            "merge_strategy",
+            "run_id",
+            "model_uri",
+            "model_id",
+        ):
+            v = transform.get(k)
+            if isinstance(v, (str, int, float, bool)) and str(v).strip():
+                out[k] = v
+
+        # Keep optional code payloads, but cap size so the registry stays lightweight.
+        max_chars = 12_000
+        for code_key in ("function_code", "sql_query_code", "merge_code"):
+            code = transform.get(code_key)
+            if not isinstance(code, str):
+                continue
+            code = code.strip()
+            if not code:
+                continue
+            if len(code) > max_chars:
+                code = code[:max_chars].rstrip() + "\n\n# ... truncated ..."
+            out[code_key] = code
+        return out
+
+    def _sanitize_provenance(prov: dict) -> dict:
+        prov = prov if isinstance(prov, dict) else {}
+        out: dict = {}
+        for k in (
+            "source_type",
+            "source",
+            "source_label",
+            "original_name",
+            "sha256",
+        ):
+            v = prov.get(k)
+            if isinstance(v, (str, int, float, bool)) and str(v).strip():
+                out[k] = v
+        transform = prov.get("transform")
+        if isinstance(transform, dict):
+            out["transform"] = _sanitize_transform(transform)
+        return out
+
+    nodes: dict[str, dict] = {}
+    edges: list[dict[str, str]] = []
+    for did in lineage_ids:
+        entry = datasets.get(did)
+        entry = entry if isinstance(entry, dict) else {}
+
+        parent_ids = entry.get("parent_ids")
+        parent_ids = parent_ids if isinstance(parent_ids, list) else []
+        parent_ids_clean = [str(p) for p in parent_ids if isinstance(p, str) and p]
+        for pid in parent_ids_clean:
+            edges.append({"source": pid, "target": did})
+
+        shape = entry.get("shape")
+        shape_clean = None
+        if isinstance(shape, (list, tuple)) and len(shape) == 2:
+            try:
+                shape_clean = [int(shape[0]), int(shape[1])]
+            except Exception:
+                shape_clean = None
+
+        artifacts = artifacts_by_dataset_id.get(did)
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+        artifacts_slim: dict[str, dict] = {}
+        for k, rec in artifacts.items():
+            if not isinstance(k, str) or not k:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            slim = {}
+            if "turn_idx" in rec:
+                slim["turn_idx"] = rec.get("turn_idx")
+            if "created_ts" in rec:
+                slim["created_ts"] = rec.get("created_ts")
+            if "updated_ts" in rec:
+                slim["updated_ts"] = rec.get("updated_ts")
+            if slim:
+                artifacts_slim[k] = slim
+
+        prov = entry.get("provenance")
+        prov = prov if isinstance(prov, dict) else {}
+
+        nodes[did] = {
+            "id": did,
+            "label": entry.get("label"),
+            "stage": entry.get("stage"),
+            "shape": shape_clean,
+            "schema_hash": entry.get("schema_hash"),
+            "fingerprint": entry.get("fingerprint"),
+            "parent_ids": parent_ids_clean,
+            "created_ts": entry.get("created_ts"),
+            "created_at": entry.get("created_at"),
+            "created_by": entry.get("created_by"),
+            "provenance": _sanitize_provenance(prov),
+            "artifacts": artifacts_slim,
+        }
+
+    record: dict = {
+        "pipeline_hash": pipeline_hash,
+        "target": pipeline.get("target"),
+        "target_dataset_id": pipeline.get("target_dataset_id"),
+        "active_dataset_id": pipeline.get("active_dataset_id"),
+        "model_dataset_id": pipeline.get("model_dataset_id"),
+        "inputs": pipeline.get("inputs") if isinstance(pipeline.get("inputs"), list) else [],
+        "lineage": [
+            {k: v for k, v in (x or {}).items() if k != "script"}
+            for x in lineage
+            if isinstance(x, dict)
+        ],
+        "nodes": nodes,
+        "edges": edges,
+        "updated_ts": time.time(),
+    }
+    sig = hashlib.sha1(
+        json.dumps(record, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    record["signature"] = sig
+    return record
+
+
+def _update_pipeline_registry_store_for_pipelines(*, pipelines: dict, datasets: dict) -> None:
+    """
+    Persist a lightweight semantic registry keyed by pipeline_hash for each pipeline snapshot.
+    """
+    try:
+        import time
+
+        pipelines = pipelines if isinstance(pipelines, dict) else {}
+        datasets = datasets if isinstance(datasets, dict) else {}
+
+        artifacts_by_dataset_id = st.session_state.get("pipeline_studio_artifacts")
+        artifacts_by_dataset_id = (
+            artifacts_by_dataset_id
+            if isinstance(artifacts_by_dataset_id, dict)
+            else {}
+        )
+
+        store = _load_pipeline_studio_pipeline_registry_store()
+        by_ph = store.get("by_pipeline_hash")
+        by_ph = by_ph if isinstance(by_ph, dict) else {}
+
+        changed = False
+        for _name, pipe in pipelines.items():
+            pipe = pipe if isinstance(pipe, dict) else {}
+            if not pipe.get("lineage"):
+                continue
+            pipeline_hash = pipe.get("pipeline_hash")
+            pipeline_hash = (
+                pipeline_hash
+                if isinstance(pipeline_hash, str) and pipeline_hash.strip()
+                else None
+            )
+            if not pipeline_hash:
+                continue
+
+            rec = _build_pipeline_registry_record(
+                pipeline=pipe,
+                datasets=datasets,
+                artifacts_by_dataset_id=artifacts_by_dataset_id,
+            )
+            prev = by_ph.get(pipeline_hash)
+            prev = prev if isinstance(prev, dict) else {}
+            if prev.get("signature") == rec.get("signature"):
+                continue
+            if "created_ts" not in prev:
+                rec["created_ts"] = rec.get("updated_ts") or time.time()
+            else:
+                rec["created_ts"] = prev.get("created_ts")
+            by_ph[pipeline_hash] = rec
+            changed = True
+
+        if changed:
+            store["by_pipeline_hash"] = by_ph
+            store["updated_ts"] = time.time()
+            st.session_state["pipeline_studio_pipeline_registry_store"] = store
+            _save_pipeline_studio_pipeline_registry_store(store)
+    except Exception:
+        pass
 
 
 def _load_pipeline_studio_artifact_store() -> dict:
@@ -411,6 +1226,118 @@ def _update_persisted_pipeline_studio_flow_layout(
         _save_pipeline_studio_flow_layout_store(store)
     except Exception:
         pass
+
+
+def _pipeline_studio_transform_code_snippet(transform: dict) -> tuple[str | None, str | None, str, str]:
+    """
+    Best-effort extraction of runnable code for a pipeline transform.
+    Returns (title, code_text, code_lang, kind).
+    """
+    transform = transform if isinstance(transform, dict) else {}
+    kind = str(transform.get("kind") or "")
+    code_lang = "python"
+    title = None
+    code_text = None
+
+    if kind == "python_function":
+        title = "Transform function (Python)"
+        code_text = transform.get("function_code")
+    elif kind == "sql_query":
+        title = "SQL query"
+        code_text = transform.get("sql_query_code")
+        code_lang = "sql"
+    elif kind == "python_merge":
+        title = "Merge code (Python)"
+        code_text = transform.get("merge_code")
+    elif kind == "mlflow_predict":
+        run_id = transform.get("run_id")
+        run_id = run_id.strip() if isinstance(run_id, str) else ""
+        title = "Prediction (MLflow) snippet"
+        code_text = (
+            "\n".join(
+                [
+                    "import pandas as pd",
+                    "import mlflow",
+                    "",
+                    f"model_uri = 'runs:/{run_id}/model'",
+                    "model = mlflow.pyfunc.load_model(model_uri)",
+                    "preds = model.predict(df)",
+                    "df_preds = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)",
+                ]
+            ).strip()
+            + "\n"
+        )
+    elif kind == "h2o_predict":
+        model_id = transform.get("model_id")
+        model_id = model_id.strip() if isinstance(model_id, str) else ""
+        title = "Prediction (H2O) snippet"
+        code_text = (
+            "\n".join(
+                [
+                    "import h2o",
+                    "",
+                    "h2o.init()",
+                    f"model = h2o.get_model('{model_id}')",
+                    "frame = h2o.H2OFrame(df)",
+                    "preds = model.predict(frame)",
+                    "df_preds = preds.as_data_frame(use_pandas=True)",
+                ]
+            ).strip()
+            + "\n"
+        )
+
+    code_text = code_text if isinstance(code_text, str) and code_text.strip() else None
+    return title, code_text, code_lang, kind
+
+
+def _pipeline_studio_chat_context(*, include_code: bool = False) -> str:
+    """
+    Return a small context block describing the current Pipeline Studio selection, suitable
+    for appending to a chat prompt (kept lightweight; best effort).
+    """
+    try:
+        sel = st.session_state.get("pipeline_studio_node_id")
+        if not isinstance(sel, str) or not sel.strip():
+            return ""
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+        entry = datasets.get(sel)
+        entry = entry if isinstance(entry, dict) else {}
+
+        label = entry.get("label") if isinstance(entry.get("label"), str) else None
+        stage = entry.get("stage") if isinstance(entry.get("stage"), str) else None
+        shape = entry.get("shape")
+        shape_str = None
+        if isinstance(shape, (list, tuple)) and len(shape) == 2:
+            shape_str = f"{shape[0]}×{shape[1]}"
+
+        prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
+        transform = prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
+        _title, code_text, code_lang, kind = _pipeline_studio_transform_code_snippet(transform)
+
+        lines = [
+            "[Pipeline Studio context]",
+            f"pipeline_target: {st.session_state.get('pipeline_studio_target')}",
+            f"active_dataset_id: {team_state.get('active_dataset_id')}",
+            f"selected_node_id: {sel}",
+            f"label: {label}" if label else None,
+            f"stage: {stage}" if stage else None,
+            f"transform_kind: {kind}" if kind else None,
+            f"shape: {shape_str}" if shape_str else None,
+        ]
+        lines = [x for x in lines if isinstance(x, str) and x.strip()]
+
+        if include_code and isinstance(code_text, str) and code_text.strip():
+            max_chars = 4000
+            trimmed = code_text if len(code_text) <= max_chars else (code_text[:max_chars] + "\n# ...trimmed...\n")
+            lines.append("code_snippet:")
+            lines.append(f"```{code_lang}\n{trimmed}\n```")
+
+        return "\n".join(lines).strip()
+    except Exception:
+        return ""
 
 
 def _strip_ui_marker_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -851,6 +1778,16 @@ with st.expander(
 # ---------------- Sidebar ----------------
 key_status = None
 with st.sidebar:
+    if st.button(
+        "Pipeline Studio",
+        key="pipeline_studio_open_sidebar",
+        use_container_width=True,
+        help="Open Pipeline Studio as a modal.",
+    ):
+        # Delay opening until after `_render_pipeline_studio` is defined (Streamlit executes top-to-bottom).
+        st.session_state["pipeline_studio_open_requested"] = True
+    st.divider()
+
     st.header("LLM")
     llm_provider = st.selectbox(
         "Provider",
@@ -1140,6 +2077,20 @@ with st.sidebar:
         st.caption(
             f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`"
         )
+
+    st.markdown("**Chat ↔ Pipeline context**")
+    st.checkbox(
+        "Include Pipeline Studio context in chat",
+        value=bool(st.session_state.get("pipeline_chat_context_enabled", True)),
+        key="pipeline_chat_context_enabled",
+        help="When enabled, the current Pipeline Studio selection is appended (lightly) to your chat prompt.",
+    )
+    st.checkbox(
+        "Include selected node code snippet",
+        value=bool(st.session_state.get("pipeline_chat_context_include_code", False)),
+        key="pipeline_chat_context_include_code",
+        help="If enabled, includes a trimmed code snippet for the selected node in the chat context block.",
+    )
     st.markdown("**SQL options**")
     if "sql_url" not in st.session_state:
         st.session_state["sql_url"] = DEFAULT_SQL_URL
@@ -1421,405 +2372,387 @@ def get_input_data():
     return None, None, None
 
 
-def render_history(history: list[BaseMessage]):
-    def _render_analysis_detail(detail: dict, key_suffix: str):
-        tabs = st.tabs(
-            [
-                "AI Reasoning",
-                "Pipeline",
-                "Data (raw/sql/wrangle/clean/features)",
-                "SQL",
-                "Charts",
-                "EDA Reports",
-                "Models",
-                "Predictions",
-                "MLflow",
-            ]
-        )
-        # AI Reasoning
-        with tabs[0]:
-            reasoning_items = detail.get("reasoning_items", [])
-            if reasoning_items:
-                for name, text in reasoning_items:
-                    if not text:
-                        continue
-                    st.markdown(f"**{name}:**")
-                    st.write(text)
-                    st.markdown("---")
+def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
+    tabs = st.tabs(
+        [
+            "AI Reasoning",
+            "Pipeline",
+            "Data (raw/sql/wrangle/clean/features)",
+            "SQL",
+            "Charts",
+            "EDA Reports",
+            "Models",
+            "Predictions",
+            "MLflow",
+        ]
+    )
+    # AI Reasoning
+    with tabs[0]:
+        reasoning_items = detail.get("reasoning_items", [])
+        if reasoning_items:
+            for name, text in reasoning_items:
+                if not text:
+                    continue
+                st.markdown(f"**{name}:**")
+                st.write(text)
+                st.markdown("---")
+        else:
+            txt = detail.get("reasoning", detail.get("ai_reply", ""))
+            if txt:
+                st.write(txt)
             else:
-                txt = detail.get("reasoning", detail.get("ai_reply", ""))
-                if txt:
-                    st.write(txt)
-                else:
-                    st.info("No reasoning available.")
-        # Pipeline
-        with tabs[1]:
-            pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
-            if not isinstance(pipelines, dict):
-                pipelines = {}
-            pipe = detail.get("pipeline") if isinstance(detail, dict) else None
-            if pipelines:
-                options = [
-                    ("Model (latest feature)", "model"),
-                    ("Active dataset", "active"),
-                    ("Latest dataset", "latest"),
-                ]
-                target = st.radio(
-                    "Pipeline target",
-                    options=[k for k, _v in options],
-                    index=0,
-                    horizontal=True,
-                    key=f"pipeline_target_{key_suffix}",
+                st.info("No reasoning available.")
+    # Pipeline
+    with tabs[1]:
+        pipelines = detail.get("pipelines") if isinstance(detail, dict) else None
+        if not isinstance(pipelines, dict):
+            pipelines = {}
+        pipe = detail.get("pipeline") if isinstance(detail, dict) else None
+        if pipelines:
+            options = [
+                ("Model (latest feature)", "model"),
+                ("Active dataset", "active"),
+                ("Latest dataset", "latest"),
+            ]
+            target = st.radio(
+                "Pipeline target",
+                options=[k for k, _v in options],
+                index=0,
+                horizontal=True,
+                key=f"pipeline_target_{key_suffix}",
+            )
+            target_key = dict(options).get(target, "model")
+            if target_key == "model":
+                pipe = detail.get("pipeline") or pipelines.get("model") or pipe
+            else:
+                pipe = pipelines.get(target_key) or pipe
+        if isinstance(pipe, dict) and pipe.get("lineage"):
+            inputs = pipe.get("inputs") or []
+            inputs_txt = ""
+            if isinstance(inputs, list) and inputs:
+                inputs_txt = (
+                    f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
                 )
-                target_key = dict(options).get(target, "model")
-                if target_key == "model":
-                    pipe = detail.get("pipeline") or pipelines.get("model") or pipe
-                else:
-                    pipe = pipelines.get(target_key) or pipe
-            if isinstance(pipe, dict) and pipe.get("lineage"):
-                inputs = pipe.get("inputs") or []
-                inputs_txt = ""
-                if isinstance(inputs, list) and inputs:
-                    inputs_txt = (
-                        f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
-                    )
-                st.markdown(
-                    f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
-                    f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
-                    f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
-                    f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
-                    f"{inputs_txt}"
+            st.markdown(
+                f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
+                f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
+                f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
+                f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
+                f"{inputs_txt}"
+            )
+            if pipe.get("persisted_dir"):
+                st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
+            try:
+                st.dataframe(pd.DataFrame(pipe.get("lineage") or []))
+            except Exception:
+                st.json(pipe.get("lineage"))
+            script = pipe.get("script")
+            try:
+                spec = dict(pipe)
+                spec.pop("script", None)
+                st.download_button(
+                    "Download pipeline spec (JSON)",
+                    data=json.dumps(spec, indent=2).encode("utf-8"),
+                    file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
+                    mime="application/json",
+                    key=f"download_pipeline_spec_{key_suffix}",
                 )
-                if pipe.get("persisted_dir"):
-                    st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
-                try:
-                    st.dataframe(pd.DataFrame(pipe.get("lineage") or []))
-                except Exception:
-                    st.json(pipe.get("lineage"))
-                script = pipe.get("script")
-                try:
-                    spec = dict(pipe)
-                    spec.pop("script", None)
-                    st.download_button(
-                        "Download pipeline spec (JSON)",
-                        data=json.dumps(spec, indent=2).encode("utf-8"),
-                        file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
-                        mime="application/json",
-                        key=f"download_pipeline_spec_{key_suffix}",
-                    )
-                except Exception:
-                    pass
-                if isinstance(script, str) and script.strip():
-                    st.download_button(
-                        "Download pipeline script",
-                        data=script.encode("utf-8"),
-                        file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
-                        mime="text/x-python",
-                        key=f"download_pipeline_{key_suffix}",
-                    )
-                    st.code(script, language="python")
+            except Exception:
+                pass
+            if isinstance(script, str) and script.strip():
+                st.download_button(
+                    "Download pipeline script",
+                    data=script.encode("utf-8"),
+                    file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
+                    mime="text/x-python",
+                    key=f"download_pipeline_{key_suffix}",
+                )
+                st.code(script, language="python")
 
-                # ML & prediction code steps (best effort)
-                fe_code = detail.get("feature_engineering_code")
-                train_code = detail.get("model_training_code")
-                pred_code = detail.get("prediction_code")
-                if any(
-                    isinstance(x, str) and x.strip()
-                    for x in (fe_code, train_code, pred_code)
-                ):
-                    st.markdown("---")
-                    st.markdown("**ML / Prediction Steps (best effort)**")
-                    if isinstance(fe_code, str) and fe_code.strip():
-                        with st.expander("Feature engineering code", expanded=False):
-                            st.code(fe_code, language="python")
-                    if isinstance(train_code, str) and train_code.strip():
-                        with st.expander(
-                            "Model training code (H2O AutoML)", expanded=False
-                        ):
-                            st.code(train_code, language="python")
-                    if isinstance(pred_code, str) and pred_code.strip():
-                        with st.expander("Prediction code", expanded=False):
-                            st.code(pred_code, language="python")
+            # ML & prediction code steps (best effort)
+            fe_code = detail.get("feature_engineering_code")
+            train_code = detail.get("model_training_code")
+            pred_code = detail.get("prediction_code")
+            if any(
+                isinstance(x, str) and x.strip() for x in (fe_code, train_code, pred_code)
+            ):
+                st.markdown("---")
+                st.markdown("**ML / Prediction Steps (best effort)**")
+                if isinstance(fe_code, str) and fe_code.strip():
+                    with st.expander("Feature engineering code", expanded=False):
+                        st.code(fe_code, language="python")
+                if isinstance(train_code, str) and train_code.strip():
+                    with st.expander("Model training code (H2O AutoML)", expanded=False):
+                        st.code(train_code, language="python")
+                if isinstance(pred_code, str) and pred_code.strip():
+                    with st.expander("Prediction code", expanded=False):
+                        st.code(pred_code, language="python")
+        else:
+            st.info(
+                "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
+            )
+
+    # Data
+    with tabs[2]:
+        raw_df = detail.get("data_raw_df")
+        sql_df = detail.get("data_sql_df")
+        wrangled_df = detail.get("data_wrangled_df")
+        cleaned_df = detail.get("data_cleaned_df")
+        feature_df = detail.get("feature_data_df")
+        if raw_df is not None:
+            st.markdown("**Raw Preview**")
+            st.dataframe(raw_df)
+        if sql_df is not None:
+            st.markdown("**SQL Preview**")
+            st.dataframe(sql_df)
+        if wrangled_df is not None:
+            st.markdown("**Wrangled Preview**")
+            st.dataframe(wrangled_df)
+        if cleaned_df is not None:
+            st.markdown("**Cleaned Preview**")
+            st.dataframe(cleaned_df)
+        if feature_df is not None:
+            st.markdown("**Feature-engineered Preview**")
+            st.dataframe(feature_df)
+        if (
+            raw_df is None
+            and sql_df is None
+            and wrangled_df is None
+            and cleaned_df is None
+            and feature_df is None
+        ):
+            st.info("No data frames returned.")
+    # SQL
+    with tabs[3]:
+        sql_query = detail.get("sql_query_code")
+        sql_fn = detail.get("sql_database_function")
+        sql_fn_name = detail.get("sql_database_function_name")
+        sql_fn_path = detail.get("sql_database_function_path")
+
+        if sql_query:
+            st.markdown("**SQL Query**")
+            st.code(sql_query, language="sql")
+            try:
+                st.download_button(
+                    "Download query (.sql)",
+                    data=str(sql_query).encode("utf-8"),
+                    file_name="query.sql",
+                    mime="application/sql",
+                    key=f"download_sql_query_{key_suffix}",
+                )
+            except Exception:
+                pass
+        else:
+            st.info("No SQL query generated for this turn.")
+
+        if sql_fn:
+            st.markdown("**SQL Executor (Python)**")
+            if sql_fn_name or sql_fn_path:
+                st.caption(
+                    "  ".join(
+                        [
+                            f"name={sql_fn_name}" if sql_fn_name else "",
+                            f"path={sql_fn_path}" if sql_fn_path else "",
+                        ]
+                    ).strip()
+                )
+            st.code(sql_fn, language="python")
+            try:
+                st.download_button(
+                    "Download executor (.py)",
+                    data=str(sql_fn).encode("utf-8"),
+                    file_name="sql_executor.py",
+                    mime="text/x-python",
+                    key=f"download_sql_executor_{key_suffix}",
+                )
+            except Exception:
+                pass
+    # Charts
+    with tabs[4]:
+        graph_json = detail.get("plotly_graph")
+        if graph_json:
+            try:
+                payload = (
+                    json.dumps(graph_json) if isinstance(graph_json, dict) else graph_json
+                )
+                fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    key=f"detail_chart_{key_suffix}",
+                )
+            except Exception as e:
+                st.error(f"Error rendering chart: {e}")
+        else:
+            st.info("No charts returned.")
+    # EDA Reports
+    with tabs[5]:
+        reports = detail.get("eda_reports") if isinstance(detail, dict) else None
+        sweetviz_file = (
+            reports.get("sweetviz_report_file") if isinstance(reports, dict) else None
+        )
+        dtale_url = reports.get("dtale_url") if isinstance(reports, dict) else None
+
+        if sweetviz_file:
+            st.markdown("**Sweetviz report**")
+            st.write(sweetviz_file)
+            try:
+                with open(sweetviz_file, "r", encoding="utf-8") as f:
+                    html = f.read()
+                components.html(html, height=800, scrolling=True)
+                st.download_button(
+                    "Download Sweetviz HTML",
+                    data=html.encode("utf-8"),
+                    file_name=os.path.basename(sweetviz_file),
+                    mime="text/html",
+                    key=f"download_sweetviz_{key_suffix}",
+                )
+            except Exception as e:
+                st.warning(f"Could not render Sweetviz report: {e}")
+
+        if dtale_url:
+            st.markdown("**D-Tale**")
+            st.markdown(f"[Open D-Tale]({dtale_url})")
+
+        if not sweetviz_file and not dtale_url:
+            st.info("No EDA reports returned.")
+
+    # Models
+    with tabs[6]:
+        model_info = detail.get("model_info")
+        eval_art = detail.get("eval_artifacts")
+        eval_graph = detail.get("eval_plotly_graph")
+        if model_info is not None:
+            st.markdown("**Model Info**")
+            try:
+                if isinstance(model_info, dict):
+                    st.dataframe(pd.DataFrame(model_info), use_container_width=True)
+                elif isinstance(model_info, list):
+                    st.dataframe(pd.DataFrame(model_info), use_container_width=True)
+                else:
+                    st.json(model_info)
+            except Exception:
+                st.json(model_info)
+        if eval_art is not None:
+            st.markdown("**Evaluation**")
+            st.json(eval_art)
+        if eval_graph:
+            try:
+                payload = json.dumps(eval_graph) if isinstance(eval_graph, dict) else eval_graph
+                fig = _apply_streamlit_plot_style(pio.from_json(payload))
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    key=f"eval_chart_{key_suffix}",
+                )
+            except Exception as e:
+                st.error(f"Error rendering evaluation chart: {e}")
+
+        if model_info is None and eval_art is None and eval_graph is None:
+            st.info("No model or evaluation artifacts.")
+
+    # Predictions
+    with tabs[7]:
+        preds_df = detail.get("data_wrangled_df")
+        if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
+            lower_cols = {str(c).lower() for c in preds_df.columns}
+            looks_like_preds = (
+                "predict" in lower_cols
+                or any(str(c).lower().startswith("p") for c in preds_df.columns)
+                or any(str(c).lower().startswith("actual_") for c in preds_df.columns)
+            )
+            if looks_like_preds:
+                st.markdown("**Predictions Preview**")
+                st.dataframe(preds_df)
             else:
                 st.info(
-                    "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
+                    "No predictions detected for this turn. (Tip: ask `predict using mlflow on the dataset` or `predict with model <id> on the dataset`.)"
                 )
+        else:
+            st.info("No predictions returned.")
 
-        # Data
-        with tabs[2]:
-            raw_df = detail.get("data_raw_df")
-            sql_df = detail.get("data_sql_df")
-            wrangled_df = detail.get("data_wrangled_df")
-            cleaned_df = detail.get("data_cleaned_df")
-            feature_df = detail.get("feature_data_df")
-            if raw_df is not None:
-                st.markdown("**Raw Preview**")
-                st.dataframe(raw_df)
-            if sql_df is not None:
-                st.markdown("**SQL Preview**")
-                st.dataframe(sql_df)
-            if wrangled_df is not None:
-                st.markdown("**Wrangled Preview**")
-                st.dataframe(wrangled_df)
-            if cleaned_df is not None:
-                st.markdown("**Cleaned Preview**")
-                st.dataframe(cleaned_df)
-            if feature_df is not None:
-                st.markdown("**Feature-engineered Preview**")
-                st.dataframe(feature_df)
-            if (
-                raw_df is None
-                and sql_df is None
-                and wrangled_df is None
-                and cleaned_df is None
-                and feature_df is None
-            ):
-                st.info("No data frames returned.")
-        # SQL
-        with tabs[3]:
-            sql_query = detail.get("sql_query_code")
-            sql_fn = detail.get("sql_database_function")
-            sql_fn_name = detail.get("sql_database_function_name")
-            sql_fn_path = detail.get("sql_database_function_path")
+    # MLflow
+    with tabs[8]:
+        mlflow_art = detail.get("mlflow_artifacts")
+        if mlflow_art is None:
+            st.info("No MLflow artifacts.")
+        else:
+            st.markdown("**MLflow Artifacts**")
 
-            if sql_query:
-                st.markdown("**SQL Query**")
-                st.code(sql_query, language="sql")
+            def _render_mlflow_artifact(obj):
                 try:
-                    st.download_button(
-                        "Download query (.sql)",
-                        data=str(sql_query).encode("utf-8"),
-                        file_name="query.sql",
-                        mime="application/sql",
-                        key=f"download_sql_query_{key_suffix}",
-                    )
-                except Exception:
-                    pass
-            else:
-                st.info("No SQL query generated for this turn.")
-
-            if sql_fn:
-                st.markdown("**SQL Executor (Python)**")
-                if sql_fn_name or sql_fn_path:
-                    st.caption(
-                        "  ".join(
-                            [
-                                f"name={sql_fn_name}" if sql_fn_name else "",
-                                f"path={sql_fn_path}" if sql_fn_path else "",
+                    if isinstance(obj, dict) and isinstance(obj.get("runs"), list):
+                        df = pd.DataFrame(obj["runs"])
+                        preferred_cols = [
+                            c
+                            for c in [
+                                "run_id",
+                                "run_name",
+                                "status",
+                                "start_time",
+                                "duration_seconds",
+                                "has_model",
+                                "model_uri",
+                                "params_preview",
+                                "metrics_preview",
                             ]
-                        ).strip()
-                    )
-                st.code(sql_fn, language="python")
-                try:
-                    st.download_button(
-                        "Download executor (.py)",
-                        data=str(sql_fn).encode("utf-8"),
-                        file_name="sql_executor.py",
-                        mime="text/x-python",
-                        key=f"download_sql_executor_{key_suffix}",
-                    )
-                except Exception:
-                    pass
-        # Charts
-        with tabs[4]:
-            graph_json = detail.get("plotly_graph")
-            if graph_json:
-                try:
-                    payload = (
-                        json.dumps(graph_json)
-                        if isinstance(graph_json, dict)
-                        else graph_json
-                    )
-                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True,
-                        key=f"detail_chart_{key_suffix}",
-                    )
-                except Exception as e:
-                    st.error(f"Error rendering chart: {e}")
-            else:
-                st.info("No charts returned.")
-        # EDA Reports
-        with tabs[5]:
-            reports = detail.get("eda_reports") if isinstance(detail, dict) else None
-            sweetviz_file = (
-                reports.get("sweetviz_report_file")
-                if isinstance(reports, dict)
-                else None
-            )
-            dtale_url = reports.get("dtale_url") if isinstance(reports, dict) else None
-
-            if sweetviz_file:
-                st.markdown("**Sweetviz report**")
-                st.write(sweetviz_file)
-                try:
-                    with open(sweetviz_file, "r", encoding="utf-8") as f:
-                        html = f.read()
-                    components.html(html, height=800, scrolling=True)
-                    st.download_button(
-                        "Download Sweetviz HTML",
-                        data=html.encode("utf-8"),
-                        file_name=os.path.basename(sweetviz_file),
-                        mime="text/html",
-                        key=f"download_sweetviz_{key_suffix}",
-                    )
-                except Exception as e:
-                    st.warning(f"Could not render Sweetviz report: {e}")
-
-            if dtale_url:
-                st.markdown("**D-Tale**")
-                st.markdown(f"[Open D-Tale]({dtale_url})")
-
-            if not sweetviz_file and not dtale_url:
-                st.info("No EDA reports returned.")
-
-        # Models
-        with tabs[6]:
-            model_info = detail.get("model_info")
-            eval_art = detail.get("eval_artifacts")
-            eval_graph = detail.get("eval_plotly_graph")
-            if model_info is not None:
-                st.markdown("**Model Info**")
-                try:
-                    if isinstance(model_info, dict):
+                            if c in df.columns
+                        ]
                         st.dataframe(
-                            pd.DataFrame(model_info), use_container_width=True
+                            df[preferred_cols] if preferred_cols else df,
+                            use_container_width=True,
                         )
-                    elif isinstance(model_info, list):
-                        st.dataframe(
-                            pd.DataFrame(model_info), use_container_width=True
-                        )
-                    else:
-                        st.json(model_info)
-                except Exception:
-                    st.json(model_info)
-            if eval_art is not None:
-                st.markdown("**Evaluation**")
-                st.json(eval_art)
-            if eval_graph:
-                try:
-                    payload = (
-                        json.dumps(eval_graph)
-                        if isinstance(eval_graph, dict)
-                        else eval_graph
-                    )
-                    fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True,
-                        key=f"eval_chart_{key_suffix}",
-                    )
-                except Exception as e:
-                    st.error(f"Error rendering evaluation chart: {e}")
-
-            if model_info is None and eval_art is None and eval_graph is None:
-                st.info("No model or evaluation artifacts.")
-
-        # Predictions
-        with tabs[7]:
-            preds_df = detail.get("data_wrangled_df")
-            if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
-                lower_cols = {str(c).lower() for c in preds_df.columns}
-                looks_like_preds = (
-                    "predict" in lower_cols
-                    or any(str(c).lower().startswith("p") for c in preds_df.columns)
-                    or any(
-                        str(c).lower().startswith("actual_") for c in preds_df.columns
-                    )
-                )
-                if looks_like_preds:
-                    st.markdown("**Predictions Preview**")
-                    st.dataframe(preds_df)
-                else:
-                    st.info(
-                        "No predictions detected for this turn. (Tip: ask `predict using mlflow on the dataset` or `predict with model <id> on the dataset`.)"
-                    )
-            else:
-                st.info("No predictions returned.")
-
-        # MLflow
-        with tabs[8]:
-            mlflow_art = detail.get("mlflow_artifacts")
-            if mlflow_art is None:
-                st.info("No MLflow artifacts.")
-            else:
-                st.markdown("**MLflow Artifacts**")
-
-                def _render_mlflow_artifact(obj):
-                    try:
-                        if isinstance(obj, dict) and isinstance(obj.get("runs"), list):
-                            df = pd.DataFrame(obj["runs"])
-                            preferred_cols = [
-                                c
-                                for c in [
-                                    "run_id",
-                                    "run_name",
-                                    "status",
-                                    "start_time",
-                                    "duration_seconds",
-                                    "has_model",
-                                    "model_uri",
-                                    "params_preview",
-                                    "metrics_preview",
-                                ]
-                                if c in df.columns
-                            ]
-                            st.dataframe(
-                                df[preferred_cols] if preferred_cols else df,
-                                use_container_width=True,
-                            )
-                            if any(
-                                c in df.columns
-                                for c in ("params", "metrics", "tags", "artifact_uri")
-                            ):
-                                with st.expander("Raw run details", expanded=False):
-                                    st.json(obj)
-                            return
-                        if isinstance(obj, dict) and isinstance(
-                            obj.get("experiments"), list
+                        if any(
+                            c in df.columns
+                            for c in ("params", "metrics", "tags", "artifact_uri")
                         ):
-                            df = pd.DataFrame(obj["experiments"])
-                            preferred_cols = [
-                                c
-                                for c in [
-                                    "experiment_id",
-                                    "name",
-                                    "lifecycle_stage",
-                                    "creation_time",
-                                    "last_update_time",
-                                    "artifact_location",
-                                ]
-                                if c in df.columns
+                            with st.expander("Raw run details", expanded=False):
+                                st.json(obj)
+                        return
+                    if isinstance(obj, dict) and isinstance(obj.get("experiments"), list):
+                        df = pd.DataFrame(obj["experiments"])
+                        preferred_cols = [
+                            c
+                            for c in [
+                                "experiment_id",
+                                "name",
+                                "lifecycle_stage",
+                                "creation_time",
+                                "last_update_time",
+                                "artifact_location",
                             ]
-                            st.dataframe(
-                                df[preferred_cols] if preferred_cols else df,
-                                use_container_width=True,
-                            )
-                            return
-                        if isinstance(obj, list):
-                            st.dataframe(pd.DataFrame(obj), use_container_width=True)
-                            return
-                    except Exception:
-                        pass
-                    st.json(obj)
+                            if c in df.columns
+                        ]
+                        st.dataframe(
+                            df[preferred_cols] if preferred_cols else df,
+                            use_container_width=True,
+                        )
+                        return
+                    if isinstance(obj, list):
+                        st.dataframe(pd.DataFrame(obj), use_container_width=True)
+                        return
+                except Exception:
+                    pass
+                st.json(obj)
 
-                if isinstance(mlflow_art, dict) and not any(
-                    k in mlflow_art for k in ("runs", "experiments")
-                ):
-                    is_tool_map = all(
-                        isinstance(k, str) and k.startswith("mlflow_")
-                        for k in mlflow_art.keys()
-                    )
-                    if is_tool_map:
-                        for tool_name, tool_art in mlflow_art.items():
-                            st.markdown(f"`{tool_name}`")
-                            _render_mlflow_artifact(tool_art)
-                    else:
-                        _render_mlflow_artifact(mlflow_art)
+            if isinstance(mlflow_art, dict) and not any(
+                k in mlflow_art for k in ("runs", "experiments")
+            ):
+                is_tool_map = all(
+                    isinstance(k, str) and k.startswith("mlflow_")
+                    for k in mlflow_art.keys()
+                )
+                if is_tool_map:
+                    for tool_name, tool_art in mlflow_art.items():
+                        st.markdown(f"`{tool_name}`")
+                        _render_mlflow_artifact(tool_art)
                 else:
                     _render_mlflow_artifact(mlflow_art)
+            else:
+                _render_mlflow_artifact(mlflow_art)
 
+
+def render_history(history: list[BaseMessage]):
     for m in history:
         role = getattr(m, "role", getattr(m, "type", "assistant"))
         content = getattr(m, "content", "")
@@ -1837,27 +2770,52 @@ def render_history(history: list[BaseMessage]):
                 st.write(content)
 
 
-tab_chat, tab_pipeline_studio = st.tabs(["Chat", "Pipeline Studio"])
+@st.dialog("Pipeline Studio", width="large")
+def _open_pipeline_studio_dialog() -> None:
+    st.subheader("Pipeline Studio")
+    try:
+        _render_pipeline_studio()
+    except Exception as e:
+        st.error(f"Could not render Pipeline Studio: {e}")
 
-with tab_chat:
-    render_history(msgs.messages)
 
-    # Show data preview (if selected) and store for reuse on submit
-    data_raw_dict, _, input_provenance = get_input_data()
-    # If no new data selected, reuse previously loaded data_raw from session
-    if data_raw_dict is None:
-        data_raw_dict = st.session_state.get("selected_data_raw")
-        input_provenance = st.session_state.get("selected_data_provenance")
-    st.session_state.selected_data_raw = data_raw_dict
-    st.session_state.selected_data_provenance = input_provenance
+c_open_studio, c_hint = st.columns([0.22, 0.78], vertical_alignment="center")
+with c_open_studio:
+    open_studio_main = st.button(
+        "Pipeline Studio",
+        key="pipeline_studio_open_main",
+        use_container_width=True,
+        help="Opens Pipeline Studio as a modal (better on desktop + mobile).",
+    )
+with c_hint:
+    st.caption(
+        "Tip: Use Pipeline Studio to inspect datasets, diffs, and edit code drafts; use chat to run the team."
+    )
+if open_studio_main:
+    # Delay opening until after `_render_pipeline_studio` is defined (Streamlit executes top-to-bottom).
+    st.session_state["pipeline_studio_open_requested"] = True
+
+
+render_history(msgs.messages)
+
+# Show data preview (if selected) and store for reuse on submit
+data_raw_dict, _, input_provenance = get_input_data()
+# If no new data selected, reuse previously loaded data_raw from session
+if data_raw_dict is None:
+    data_raw_dict = st.session_state.get("selected_data_raw")
+    input_provenance = st.session_state.get("selected_data_provenance")
+st.session_state.selected_data_raw = data_raw_dict
+st.session_state.selected_data_provenance = input_provenance
 
 # ---------------- User input ----------------
-prompt = tab_chat.chat_input("Ask the data science team...")
+pending_prompt = st.session_state.pop("chat_prompt_pending", None)
+pending_prompt = pending_prompt.strip() if isinstance(pending_prompt, str) else ""
+prompt = pending_prompt if pending_prompt else st.chat_input("Ask the data science team...")
 if prompt:
     if llm_provider_selected == "OpenAI" and (
         not resolved_api_key or key_status == "bad"
     ):
-        tab_chat.error(
+        st.error(
             "OpenAI API key is required and must be valid. Enter it in the sidebar."
         )
         st.stop()
@@ -1877,7 +2835,7 @@ if prompt:
     else:
         team_prompt = display_prompt.strip()
 
-    tab_chat.chat_message("human").write(display_prompt)
+    st.chat_message("human").write(display_prompt)
     msgs.add_user_message(display_prompt)
 
     # Apply DB connect/disconnect updates before building the team.
@@ -1892,11 +2850,24 @@ if prompt:
                 )
         msg_text = db_cmd.get("message")
         if isinstance(msg_text, str) and msg_text.strip():
-            tab_chat.chat_message("assistant").write(msg_text)
+            st.chat_message("assistant").write(msg_text)
             msgs.add_ai_message(msg_text)
 
     data_raw_dict = st.session_state.get("selected_data_raw")
     input_provenance = st.session_state.get("selected_data_provenance")
+
+    if (
+        team_prompt
+        and bool(st.session_state.get("pipeline_chat_context_enabled", True))
+        and not (isinstance(db_cmd, dict) and db_cmd.get("action") in ("connect", "disconnect"))
+    ):
+        ctx = _pipeline_studio_chat_context(
+            include_code=bool(
+                st.session_state.get("pipeline_chat_context_include_code", False)
+            )
+        )
+        if ctx:
+            team_prompt = f"{team_prompt}\n\n{ctx}"
 
     result = None
     # If this was only a connect/disconnect command, skip running the team.
@@ -2003,12 +2974,12 @@ if prompt:
                 "configurable": {"thread_id": st.session_state.thread_id},
             }
             show_progress = bool(st.session_state.get("show_progress", True))
-            progress_box = tab_chat.empty() if show_progress else None
+            progress_box = st.empty() if show_progress else None
             if progress_box is not None:
                 progress_box.info("Working…")
 
             show_live_logs = bool(st.session_state.get("show_live_logs", False))
-            log_container = tab_chat.empty() if show_live_logs else None
+            log_container = st.empty() if show_live_logs else None
             log_placeholder = None
 
             import sys
@@ -2212,13 +3183,13 @@ if prompt:
                 or "tpm" in msg.lower()
                 or "request too large" in msg.lower()
             ):
-                tab_chat.error(f"Error running team (rate limit): {e}")
-                tab_chat.info(
+                st.error(f"Error running team (rate limit): {e}")
+                st.info(
                     "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
                     "or switching to a smaller model."
                 )
             else:
-                tab_chat.error(f"Error running team: {e}")
+                st.error(f"Error running team: {e}")
             result = None
 
     if result:
@@ -2287,7 +3258,7 @@ if prompt:
                 break
         if last_ai:
             msgs.add_ai_message(getattr(last_ai, "content", ""))
-            tab_chat.chat_message("assistant").write(getattr(last_ai, "content", ""))
+            st.chat_message("assistant").write(getattr(last_ai, "content", ""))
 
         # Collect reasoning from AI messages after latest human
         reasoning = ""
@@ -2702,6 +3673,15 @@ if prompt:
         except Exception:
             pass
 
+        # Persist a lightweight semantic pipeline registry (best effort).
+        try:
+            if isinstance(pipelines, dict) and isinstance(datasets_dict, dict):
+                _update_pipeline_registry_store_for_pipelines(
+                    pipelines=pipelines, datasets=datasets_dict
+                )
+        except Exception:
+            pass
+
         st.session_state.details.append(detail)
         msgs.add_ai_message(f"{UI_DETAIL_MARKER_PREFIX}{idx}")
 
@@ -2736,6 +3716,207 @@ def _render_pipeline_studio() -> None:
         except Exception:
             return None
         return None
+
+    def _infer_first_def_name(code: str) -> str | None:
+        if not isinstance(code, str) or not code:
+            return None
+        m = re.search(
+            r"^\\s*def\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+            code,
+            flags=re.MULTILINE,
+        )
+        return m.group(1) if m else None
+
+    def _run_python_function_draft(*, node_id: str, editor_key: str) -> None:
+        """
+        Run a user-edited python_function draft against the node's parent dataset and
+        register a new dataset in `st.session_state.team_state`.
+        """
+        try:
+            st.session_state.pop("pipeline_studio_run_error", None)
+            st.session_state.pop("pipeline_studio_run_success", None)
+
+            if not isinstance(node_id, str) or not node_id:
+                return
+            team_state = st.session_state.get("team_state", {})
+            team_state = team_state if isinstance(team_state, dict) else {}
+            prev_active_id = team_state.get("active_dataset_id")
+            prev_active_id = (
+                prev_active_id if isinstance(prev_active_id, str) and prev_active_id else None
+            )
+            datasets = team_state.get("datasets")
+            datasets = datasets if isinstance(datasets, dict) else {}
+            entry_obj = datasets.get(node_id)
+            entry_obj = entry_obj if isinstance(entry_obj, dict) else {}
+
+            prov = (
+                entry_obj.get("provenance")
+                if isinstance(entry_obj.get("provenance"), dict)
+                else {}
+            )
+            transform = (
+                prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
+            )
+            kind = str(transform.get("kind") or "")
+            if kind != "python_function":
+                st.session_state["pipeline_studio_run_error"] = (
+                    "Only `python_function` nodes can be executed from Pipeline Studio right now."
+                )
+                return
+
+            parent_id = entry_obj.get("parent_id")
+            parent_id = parent_id if isinstance(parent_id, str) and parent_id else None
+            if not parent_id:
+                pids = entry_obj.get("parent_ids")
+                if isinstance(pids, list) and pids:
+                    parent_id = pids[0] if isinstance(pids[0], str) else None
+            if not parent_id:
+                st.session_state["pipeline_studio_run_error"] = (
+                    "Could not find a parent dataset for this node."
+                )
+                return
+
+            parent_entry = datasets.get(parent_id)
+            parent_entry = parent_entry if isinstance(parent_entry, dict) else {}
+            df_in = _dataset_entry_to_df(parent_entry)
+            if df_in is None:
+                st.session_state["pipeline_studio_run_error"] = (
+                    f"Parent dataset `{parent_id}` has no tabular data to run against."
+                )
+                return
+
+            draft_code = st.session_state.get(editor_key)
+            draft_code = draft_code if isinstance(draft_code, str) else ""
+            draft_code = draft_code.strip()
+            if not draft_code:
+                st.session_state["pipeline_studio_run_error"] = (
+                    "Draft code is empty; nothing to run."
+                )
+                return
+
+            fn_name = (
+                transform.get("function_name")
+                if isinstance(transform.get("function_name"), str)
+                else None
+            )
+            fn_name = fn_name.strip() if isinstance(fn_name, str) else None
+            inferred = _infer_first_def_name(draft_code)
+
+            exec_globals: dict[str, object] = {"pd": pd}
+            exec_locals: dict[str, object] = {}
+            exec(draft_code, exec_globals, exec_locals)
+
+            fn = None
+            for candidate in [fn_name, inferred]:
+                if not candidate:
+                    continue
+                obj = exec_locals.get(candidate) or exec_globals.get(candidate)
+                if callable(obj):
+                    fn = obj
+                    break
+            if fn is None:
+                # Fall back: pick the first callable defined in locals.
+                for obj in exec_locals.values():
+                    if callable(obj):
+                        fn = obj
+                        break
+            if fn is None:
+                st.session_state["pipeline_studio_run_error"] = (
+                    "Could not find a callable function in the draft. Define a function like `def transform(df): ...`."
+                )
+                return
+
+            out = fn(df_in)
+            if isinstance(out, tuple) and out:
+                out = out[0]
+            if not isinstance(out, pd.DataFrame):
+                try:
+                    if isinstance(out, dict):
+                        out = pd.DataFrame.from_dict(out)
+                    elif isinstance(out, list):
+                        out = pd.DataFrame(out)
+                except Exception:
+                    out = None
+            if not isinstance(out, pd.DataFrame):
+                st.session_state["pipeline_studio_run_error"] = (
+                    "Draft function did not return a pandas DataFrame."
+                )
+                return
+
+            import hashlib
+
+            code_sha = hashlib.sha256(draft_code.encode("utf-8")).hexdigest()
+            stage = entry_obj.get("stage")
+            stage = stage if isinstance(stage, str) and stage else "custom"
+            label = entry_obj.get("label")
+            label = label if isinstance(label, str) and label else node_id
+
+            new_state, new_id = _pipeline_studio_register_dataset(
+                team_state=team_state,
+                data=out,
+                stage=stage,
+                label=f"{label}_edited",
+                created_by="Pipeline_Studio",
+                provenance={
+                    "source_type": "pipeline_studio",
+                    "source": f"rerun:{node_id}",
+                    "user_request": "Pipeline Studio: run edited transform draft",
+                    "transform": {
+                        "kind": "python_function",
+                        "function_name": fn_name or inferred or None,
+                        "function_code": draft_code[:12000],
+                        "code_sha256": code_sha,
+                    },
+                },
+                parent_id=parent_id,
+                parent_ids=[parent_id],
+                make_active=True,
+            )
+            st.session_state["team_state"] = new_state
+            try:
+                ds_new = new_state.get("datasets") if isinstance(new_state, dict) else None
+                ds_new = ds_new if isinstance(ds_new, dict) else {}
+                created_entry = ds_new.get(new_id)
+                created_entry = created_entry if isinstance(created_entry, dict) else {}
+                _pipeline_studio_push_history(
+                    {
+                        "type": "create_dataset",
+                        "dataset_id": new_id,
+                        "dataset_entry": created_entry,
+                        "prev_active_dataset_id": prev_active_id,
+                        "source": "pipeline_studio_run_draft",
+                    }
+                )
+            except Exception:
+                pass
+            try:
+                ds_new = new_state.get("datasets") if isinstance(new_state, dict) else None
+                ds_new = ds_new if isinstance(ds_new, dict) else {}
+                active_new = (
+                    new_state.get("active_dataset_id") if isinstance(new_state, dict) else None
+                )
+                active_new = active_new if isinstance(active_new, str) else None
+                pipelines_new = {
+                    "model": build_pipeline_snapshot(
+                        ds_new, active_dataset_id=active_new
+                    ),
+                    "active": build_pipeline_snapshot(
+                        ds_new, active_dataset_id=active_new, target="active"
+                    ),
+                    "latest": build_pipeline_snapshot(
+                        ds_new, active_dataset_id=active_new, target="latest"
+                    ),
+                }
+                _update_pipeline_registry_store_for_pipelines(
+                    pipelines=pipelines_new, datasets=ds_new
+                )
+            except Exception:
+                pass
+            st.session_state["pipeline_studio_node_id_pending"] = new_id
+            st.session_state["pipeline_studio_autofollow_pending"] = True
+            st.session_state["pipeline_studio_run_success"] = new_id
+        except Exception as e:
+            st.session_state["pipeline_studio_run_error"] = str(e)
 
     def _latest_detail_for_dataset_id(
         dataset_id: str, *, require_key: str | None = None
@@ -2844,6 +4025,38 @@ def _render_pipeline_studio() -> None:
                     f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
+                run_err = st.session_state.pop("pipeline_studio_run_error", None)
+                if isinstance(run_err, str) and run_err.strip():
+                    st.error(run_err)
+                run_ok = st.session_state.pop("pipeline_studio_run_success", None)
+                if isinstance(run_ok, str) and run_ok.strip():
+                    st.success(f"Created new dataset: `{run_ok}` (set active).")
+                history_notice = st.session_state.pop("pipeline_studio_history_notice", None)
+                if isinstance(history_notice, str) and history_notice.strip():
+                    st.info(history_notice)
+
+                _pipeline_studio_history_init()
+                undo_stack = st.session_state.get("pipeline_studio_undo_stack")
+                undo_stack = undo_stack if isinstance(undo_stack, list) else []
+                redo_stack = st.session_state.get("pipeline_studio_redo_stack")
+                redo_stack = redo_stack if isinstance(redo_stack, list) else []
+                c_undo, c_redo = st.columns(2)
+                with c_undo:
+                    st.button(
+                        "Undo",
+                        key="pipeline_studio_undo",
+                        help="Undo the most recent Pipeline Studio operation (best effort).",
+                        disabled=not bool(undo_stack),
+                        on_click=_pipeline_studio_undo_last_action,
+                    )
+                with c_redo:
+                    st.button(
+                        "Redo",
+                        key="pipeline_studio_redo",
+                        help="Redo the most recently undone Pipeline Studio operation (best effort).",
+                        disabled=not bool(redo_stack),
+                        on_click=_pipeline_studio_redo_last_action,
+                    )
 
                 script = pipe.get("script") if isinstance(pipe, dict) else None
                 spec_bytes = None
@@ -2860,6 +4073,36 @@ def _render_pipeline_studio() -> None:
                         file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
                         mime="application/json",
                         key="pipeline_studio_download_spec",
+                    )
+                registry_bytes = None
+                try:
+                    ph = pipe.get("pipeline_hash") if isinstance(pipe, dict) else None
+                    ph = ph if isinstance(ph, str) else ""
+                    rec = (
+                        _get_persisted_pipeline_registry(pipeline_hash=ph) if ph else {}
+                    )
+                    if not rec:
+                        rec = _build_pipeline_registry_record(
+                            pipeline=pipe,
+                            datasets=studio_datasets,
+                            artifacts_by_dataset_id=st.session_state.get(
+                                "pipeline_studio_artifacts"
+                            ),
+                        )
+                    if isinstance(rec, dict) and rec:
+                        registry_bytes = json.dumps(rec, indent=2, default=str).encode(
+                            "utf-8"
+                        )
+                except Exception:
+                    registry_bytes = None
+                if registry_bytes:
+                    st.download_button(
+                        "Download pipeline registry (JSON)",
+                        data=registry_bytes,
+                        file_name=f"pipeline_registry_{pipe.get('target') or 'model'}.json",
+                        mime="application/json",
+                        key="pipeline_studio_download_registry",
+                        help="Semantic DAG metadata + artifact pointers (no DataFrames).",
                     )
                 if isinstance(script, str) and script.strip():
                     st.download_button(
@@ -2934,6 +4177,54 @@ def _render_pipeline_studio() -> None:
                 m = meta_by_id.get(selected_node_id) or {}
                 with st.expander("Selected step details", expanded=False):
                     st.json(m)
+
+                try:
+                    entry_obj = (
+                        studio_datasets.get(selected_node_id)
+                        if isinstance(studio_datasets, dict)
+                        else None
+                    )
+                    entry_obj = entry_obj if isinstance(entry_obj, dict) else {}
+                    prov = (
+                        entry_obj.get("provenance")
+                        if isinstance(entry_obj.get("provenance"), dict)
+                        else {}
+                    )
+                    transform = (
+                        prov.get("transform")
+                        if isinstance(prov.get("transform"), dict)
+                        else {}
+                    )
+                    title, code_text, code_lang, kind = _pipeline_studio_transform_code_snippet(
+                        transform
+                    )
+                except Exception:
+                    title, code_text, code_lang, kind = None, None, "python", ""
+
+                if st.button(
+                    "Ask AI about this step",
+                    key="pipeline_studio_ask_ai_about_step",
+                    help="Sends the selected pipeline step (and code, when available) to the chat for help.",
+                ):
+                    prompt_lines = [
+                        "Pipeline Studio request: help me understand and improve this pipeline step.",
+                        f"selected_node_id: {selected_node_id}",
+                        f"label: {m.get('label')}" if isinstance(m, dict) and m.get("label") else "",
+                        f"stage: {m.get('stage')}" if isinstance(m, dict) and m.get("stage") else "",
+                        f"transform_kind: {kind}" if kind else "",
+                    ]
+                    if isinstance(code_text, str) and code_text.strip():
+                        prompt_lines.extend(
+                            [
+                                "",
+                                f"{title or 'Code'}:",
+                                f"```{code_lang}\n{code_text}\n```",
+                            ]
+                        )
+                    st.session_state["chat_prompt_pending"] = "\n".join(
+                        [x for x in prompt_lines if isinstance(x, str) and x.strip()]
+                    ).strip()
+                    st.rerun()
 
                 compare_node_id = None
                 compare_mode = st.checkbox(
@@ -3589,6 +4880,8 @@ def _render_pipeline_studio() -> None:
 
                     # Compare mode replaces the workspace when enabled.
                     return
+                if "pipeline_studio_view" not in st.session_state:
+                    st.session_state["pipeline_studio_view"] = "Visual Editor"
                 pending_view = st.session_state.pop("pipeline_studio_view_pending", None)
                 valid_views = {
                     "Table",
@@ -3886,7 +5179,60 @@ def _render_pipeline_studio() -> None:
 
                     if isinstance(code_text, str) and code_text.strip():
                         st.markdown(f"**{title or 'Code'}**")
-                        st.code(code_text, language=code_lang)
+                        editor_key = f"pipeline_studio_code_editor_{selected_node_id}"
+                        reset_pending = st.session_state.pop(
+                            "pipeline_studio_code_reset_pending", None
+                        )
+                        if reset_pending == selected_node_id:
+                            st.session_state.pop(editor_key, None)
+                        fp = entry.get("fingerprint")
+                        fp = fp if isinstance(fp, str) and fp else None
+                        saved_draft = None
+                        saved_meta = {}
+                        if fp:
+                            saved_meta = _get_pipeline_studio_code_draft(fingerprint=fp)
+                            saved_draft = (
+                                saved_meta.get("draft_code")
+                                if isinstance(saved_meta, dict)
+                                else None
+                            )
+                            saved_draft = (
+                                saved_draft
+                                if isinstance(saved_draft, str) and saved_draft.strip()
+                                else None
+                            )
+                        if (
+                            saved_draft
+                            and editor_key not in st.session_state
+                            and reset_pending != selected_node_id
+                        ):
+                            st.session_state[editor_key] = saved_draft
+                        draft_saved_flag = st.session_state.pop(
+                            "pipeline_studio_code_draft_saved", None
+                        )
+                        if draft_saved_flag == selected_node_id:
+                            st.success("Draft saved to `pipeline_store/`.")
+                        if saved_draft:
+                            ts = None
+                            try:
+                                ts = float(
+                                    (saved_meta or {}).get("updated_ts")
+                                    or (saved_meta or {}).get("created_ts")
+                                    or 0.0
+                                )
+                            except Exception:
+                                ts = None
+                            st.caption(
+                                "Loaded saved draft from `pipeline_store/`."
+                                + (f" (updated_ts={ts:.0f})" if isinstance(ts, float) and ts else "")
+                            )
+                        draft_code = st.text_area(
+                            "Draft editor",
+                            value=code_text,
+                            key=editor_key,
+                            height=320,
+                            help="Edit the snippet and use Ask AI to refine it. Running edited code from Studio is planned in Phase 5.",
+                        )
                         try:
                             ext = "sql" if code_lang == "sql" else "py"
                             mime = (
@@ -3894,19 +5240,124 @@ def _render_pipeline_studio() -> None:
                                 if code_lang == "sql"
                                 else "text/x-python"
                             )
-                            c_copy, c_download = st.columns([0.22, 0.26])
+                            c_ask, c_save, c_reset, c_copy, c_download = st.columns(
+                                [0.16, 0.16, 0.14, 0.20, 0.34]
+                            )
+                            with c_ask:
+                                if st.button(
+                                    "Ask AI",
+                                    key=f"pipeline_studio_code_ask_ai_{selected_node_id}",
+                                    help="Send this draft to chat for review and improvement.",
+                                ):
+                                    prompt_lines = [
+                                        "Pipeline Studio request: review and improve this draft code for the selected pipeline step.",
+                                        f"selected_node_id: {selected_node_id}",
+                                        f"transform_kind: {kind}" if kind else "",
+                                        "",
+                                        f"```{code_lang}\n{draft_code}\n```",
+                                        "",
+                                        "Return the full improved code snippet and explain key changes briefly.",
+                                    ]
+                                    st.session_state["chat_prompt_pending"] = "\n".join(
+                                        [
+                                            x
+                                            for x in prompt_lines
+                                            if isinstance(x, str) and x.strip()
+                                        ]
+                                    ).strip()
+                                    st.rerun()
+                            with c_save:
+                                def _save_code_draft(
+                                    fingerprint: str | None,
+                                    node_id: str,
+                                    e_key: str,
+                                    t_kind: str,
+                                    lang: str,
+                                ) -> None:
+                                    if not isinstance(fingerprint, str) or not fingerprint:
+                                        return
+                                    code = st.session_state.get(e_key)
+                                    code = code if isinstance(code, str) else ""
+                                    _save_pipeline_studio_code_draft(
+                                        fingerprint=fingerprint,
+                                        dataset_id=node_id,
+                                        transform_kind=t_kind,
+                                        lang=lang,
+                                        draft_code=code,
+                                    )
+                                    st.session_state["pipeline_studio_code_draft_saved"] = (
+                                        node_id
+                                    )
+
+                                st.button(
+                                    "Save",
+                                    key=f"pipeline_studio_code_save_{selected_node_id}",
+                                    help="Persist this draft to `pipeline_store/` (keyed by dataset fingerprint).",
+                                    on_click=_save_code_draft,
+                                    args=(fp, selected_node_id, editor_key, kind, code_lang),
+                                )
+                            with c_reset:
+                                def _queue_code_reset(node_id: str, fingerprint: str | None) -> None:
+                                    st.session_state["pipeline_studio_code_reset_pending"] = (
+                                        node_id
+                                    )
+                                    if isinstance(fingerprint, str) and fingerprint:
+                                        _delete_pipeline_studio_code_draft(
+                                            fingerprint=fingerprint
+                                        )
+
+                                st.button(
+                                    "Reset",
+                                    key=f"pipeline_studio_code_reset_{selected_node_id}",
+                                    help="Discard edits and restore the recorded code for this node.",
+                                    on_click=_queue_code_reset,
+                                    args=(selected_node_id, fp),
+                                )
                             with c_copy:
-                                _render_copy_to_clipboard(code_text, label="Copy snippet")
+                                _render_copy_to_clipboard(
+                                    draft_code, label="Copy draft"
+                                )
                             with c_download:
                                 st.download_button(
-                                    "Download snippet",
-                                    data=code_text.encode("utf-8"),
+                                    "Download draft",
+                                    data=draft_code.encode("utf-8"),
                                     file_name=f"{selected_node_id}_{kind or 'step'}.{ext}",
                                     mime=mime,
                                     key=f"pipeline_studio_download_snippet_{selected_node_id}",
                                 )
                         except Exception:
                             pass
+
+                        if kind == "python_function":
+                            parent_id = entry.get("parent_id")
+                            parent_id = (
+                                parent_id
+                                if isinstance(parent_id, str) and parent_id.strip()
+                                else None
+                            )
+                            st.markdown("---")
+                            st.markdown("**Run draft (local, executes code)**")
+                            if parent_id:
+                                st.caption(f"Input dataset: `{parent_id}` → creates a new `{entry.get('stage')}` node")
+                            confirm_key = f"pipeline_studio_run_confirm_{selected_node_id}"
+                            confirmed = st.checkbox(
+                                "I understand this executes code locally",
+                                key=confirm_key,
+                                help="This runs the edited python function in your environment and creates a new dataset node.",
+                            )
+
+                            def _run_draft_click(nid: str, e_key: str) -> None:
+                                _run_python_function_draft(node_id=nid, editor_key=e_key)
+
+                            st.button(
+                                "Run draft and create new dataset",
+                                key=f"pipeline_studio_run_draft_{selected_node_id}",
+                                type="primary",
+                                disabled=not bool(confirmed),
+                                on_click=_run_draft_click,
+                                args=(selected_node_id, editor_key),
+                                help="Runs the draft on the parent dataset and registers the output as a new dataset (active).",
+                            )
                     else:
                         st.info("No runnable code recorded for this step.")
 
@@ -4467,32 +5918,37 @@ def _render_pipeline_studio() -> None:
                     with c_canvas:
                         c1, c2, c3 = st.columns([0.22, 0.22, 0.56])
                         with c1:
-                            if st.button(
-                                "Reset layout",
-                                key="pipeline_studio_flow_reset_layout",
-                                help="Rebuilds the canvas layout (keeps pipeline data intact).",
-                            ):
+                            def _flow_reset_layout(p_hash: str | None) -> None:
                                 st.session_state.pop("pipeline_studio_flow_state", None)
                                 st.session_state.pop("pipeline_studio_flow_positions", None)
                                 st.session_state.pop("pipeline_studio_flow_signature", None)
-                                if pipeline_hash:
+                                if isinstance(p_hash, str) and p_hash:
                                     _delete_persisted_pipeline_studio_flow_layout(
-                                        pipeline_hash=pipeline_hash
+                                        pipeline_hash=p_hash
                                     )
                                 st.session_state["pipeline_studio_flow_force_layout"] = True
                                 st.session_state["pipeline_studio_flow_fit_view_pending"] = True
                                 st.session_state[flow_ts_key] = int(time.time() * 1000)
-                                st.rerun()
+
+                            st.button(
+                                "Reset layout",
+                                key="pipeline_studio_flow_reset_layout",
+                                help="Rebuilds the canvas layout (keeps pipeline data intact).",
+                                on_click=_flow_reset_layout,
+                                args=(pipeline_hash,),
+                            )
                         with c2:
-                            if st.button(
-                                "Show all nodes",
-                                key="pipeline_studio_flow_show_all",
-                                help="Restores any hidden/deleted nodes in the canvas.",
-                            ):
+                            def _flow_show_all_nodes() -> None:
                                 st.session_state["pipeline_studio_flow_hidden_ids"] = []
                                 st.session_state["pipeline_studio_flow_fit_view_pending"] = True
                                 st.session_state[flow_ts_key] = int(time.time() * 1000)
-                                st.rerun()
+
+                            st.button(
+                                "Show all nodes",
+                                key="pipeline_studio_flow_show_all",
+                                help="Restores any hidden/deleted nodes in the canvas.",
+                                on_click=_flow_show_all_nodes,
+                            )
                         with c3:
                             st.caption(
                                 f"Nodes: {len(base_node_ids)} | Edges: {len(base_edges)} | Hidden: {len(hidden_set)}"
@@ -4618,444 +6074,291 @@ def _render_pipeline_studio() -> None:
 
                             a, b = st.columns(2)
                             with a:
-                                if st.button(
-                                    "Open in workspace",
-                                    key="pipeline_studio_flow_open_in_workspace",
-                                    help="Selects this node in the left rail and turns off auto-follow.",
-                                ):
-                                    st.session_state["pipeline_studio_node_id_pending"] = sel
+                                def _flow_open_in_workspace(
+                                    node_id: str, view_name: str
+                                ) -> None:
+                                    st.session_state["pipeline_studio_node_id_pending"] = (
+                                        node_id
+                                    )
                                     st.session_state[
                                         "pipeline_studio_autofollow_pending"
                                     ] = False
-                                    st.session_state["pipeline_studio_view_pending"] = open_view
-                                    st.rerun()
+                                    st.session_state["pipeline_studio_view_pending"] = (
+                                        view_name
+                                    )
+
+                                st.button(
+                                    "Open in workspace",
+                                    key="pipeline_studio_flow_open_in_workspace",
+                                    help="Selects this node in the left rail and turns off auto-follow.",
+                                    on_click=_flow_open_in_workspace,
+                                    args=(sel, str(open_view)),
+                                )
                             with b:
                                 in_hidden = sel in hidden_set
-                                if st.button(
+                                def _flow_toggle_hidden(
+                                    node_id: str, currently_hidden: bool
+                                ) -> None:
+                                    existing = st.session_state.get(
+                                        "pipeline_studio_flow_hidden_ids"
+                                    )
+                                    existing = (
+                                        existing if isinstance(existing, list) else []
+                                    )
+                                    hs = {
+                                        str(x)
+                                        for x in existing
+                                        if isinstance(x, str) and x
+                                    }
+                                    if currently_hidden:
+                                        hs.discard(node_id)
+                                    else:
+                                        hs.add(node_id)
+                                    st.session_state["pipeline_studio_flow_hidden_ids"] = (
+                                        sorted(hs)
+                                    )
+                                    st.session_state[
+                                        "pipeline_studio_flow_fit_view_pending"
+                                    ] = True
+                                    st.session_state[flow_ts_key] = int(
+                                        time.time() * 1000
+                                    )
+
+                                st.button(
                                     "Unhide" if in_hidden else "Hide",
                                     key="pipeline_studio_flow_hide_toggle",
                                     help="Toggles this node visibility in the canvas (does not delete pipeline data).",
-                                ):
-                                    if in_hidden:
-                                        hidden_set.discard(sel)
-                                    else:
-                                        hidden_set.add(sel)
-                                    st.session_state["pipeline_studio_flow_hidden_ids"] = sorted(
-                                        hidden_set
-                                    )
-                                    st.session_state["pipeline_studio_flow_fit_view_pending"] = True
-                                    st.rerun()
+                                    on_click=_flow_toggle_hidden,
+                                    args=(sel, bool(in_hidden)),
+                                )
 
-                            with st.expander("Metadata (debug)", expanded=False):
+                            node_tabs = st.tabs(["Preview", "Code", "Metadata"])
+
+                            with node_tabs[0]:
+                                df_node = _dataset_entry_to_df(entry_obj)
+                                if df_node is None:
+                                    st.info("No tabular data available for this node.")
+                                else:
+                                    n_rows = int(getattr(df_node, "shape", (0, 0))[0] or 0)
+                                    n_cols = int(getattr(df_node, "shape", (0, 0))[1] or 0)
+                                    st.caption(f"Shape: {n_rows} rows × {n_cols} columns")
+                                    preview_rows = st.slider(
+                                        "Preview rows",
+                                        min_value=5,
+                                        max_value=200,
+                                        value=25,
+                                        step=5,
+                                        key="pipeline_studio_flow_preview_rows",
+                                    )
+                                    st.dataframe(
+                                        df_node.head(int(preview_rows)),
+                                        use_container_width=True,
+                                    )
+
+                            with node_tabs[1]:
+                                title, code_text, code_lang, _kind = (
+                                    _pipeline_studio_transform_code_snippet(transform)
+                                )
+                                if not code_text:
+                                    st.info("No runnable code recorded for this node.")
+                                else:
+                                    editor_key = f"pipeline_studio_code_editor_{sel}"
+                                    reset_pending = st.session_state.pop(
+                                        "pipeline_studio_code_reset_pending", None
+                                    )
+                                    if reset_pending == sel:
+                                        st.session_state.pop(editor_key, None)
+                                    fp = entry_obj.get("fingerprint")
+                                    fp = fp if isinstance(fp, str) and fp else None
+                                    saved_draft = None
+                                    saved_meta = {}
+                                    if fp:
+                                        saved_meta = _get_pipeline_studio_code_draft(
+                                            fingerprint=fp
+                                        )
+                                        saved_draft = (
+                                            saved_meta.get("draft_code")
+                                            if isinstance(saved_meta, dict)
+                                            else None
+                                        )
+                                        saved_draft = (
+                                            saved_draft
+                                            if isinstance(saved_draft, str)
+                                            and saved_draft.strip()
+                                            else None
+                                        )
+                                    if (
+                                        saved_draft
+                                        and editor_key not in st.session_state
+                                        and reset_pending != sel
+                                    ):
+                                        st.session_state[editor_key] = saved_draft
+                                    draft_saved_flag = st.session_state.pop(
+                                        "pipeline_studio_code_draft_saved", None
+                                    )
+                                    if draft_saved_flag == sel:
+                                        st.success("Draft saved to `pipeline_store/`.")
+                                    if saved_draft:
+                                        ts = None
+                                        try:
+                                            ts = float(
+                                                (saved_meta or {}).get("updated_ts")
+                                                or (saved_meta or {}).get("created_ts")
+                                                or 0.0
+                                            )
+                                        except Exception:
+                                            ts = None
+                                        st.caption(
+                                            "Loaded saved draft from `pipeline_store/`."
+                                            + (
+                                                f" (updated_ts={ts:.0f})"
+                                                if isinstance(ts, float) and ts
+                                                else ""
+                                            )
+                                        )
+
+                                    draft_code = st.text_area(
+                                        title or "Code",
+                                        value=code_text,
+                                        key=editor_key,
+                                        height=260,
+                                        help="Edit this draft and ask chat for improvements. Running edited code from Studio is planned.",
+                                    )
+
+                                    c_ask, c_save, c_reset = st.columns(3)
+                                    with c_ask:
+                                        if st.button(
+                                            "Ask AI about this code",
+                                            key=f"pipeline_studio_flow_code_ask_ai_{sel}",
+                                            help="Send this draft to chat for review and improvement.",
+                                        ):
+                                            prompt_lines = [
+                                                "Pipeline Studio request: review and improve this code draft for the selected pipeline node.",
+                                                f"selected_node_id: {sel}",
+                                                f"transform_kind: {_kind}" if _kind else "",
+                                                "",
+                                                f"```{code_lang}\n{draft_code}\n```",
+                                            ]
+                                            st.session_state["chat_prompt_pending"] = "\n".join(
+                                                [
+                                                    x
+                                                    for x in prompt_lines
+                                                    if isinstance(x, str) and x.strip()
+                                                ]
+                                            ).strip()
+                                            st.rerun()
+                                    with c_save:
+                                        def _save_code_draft_from_flow(
+                                            fingerprint: str | None,
+                                            node_id: str,
+                                            e_key: str,
+                                            t_kind: str,
+                                            lang: str,
+                                        ) -> None:
+                                            if not isinstance(fingerprint, str) or not fingerprint:
+                                                return
+                                            code = st.session_state.get(e_key)
+                                            code = code if isinstance(code, str) else ""
+                                            _save_pipeline_studio_code_draft(
+                                                fingerprint=fingerprint,
+                                                dataset_id=node_id,
+                                                transform_kind=t_kind,
+                                                lang=lang,
+                                                draft_code=code,
+                                            )
+                                            st.session_state["pipeline_studio_code_draft_saved"] = (
+                                                node_id
+                                            )
+
+                                        st.button(
+                                            "Save draft",
+                                            key=f"pipeline_studio_flow_code_save_{sel}",
+                                            help="Persist this draft to `pipeline_store/` (keyed by dataset fingerprint).",
+                                            on_click=_save_code_draft_from_flow,
+                                            args=(fp, sel, editor_key, _kind, code_lang),
+                                        )
+                                    with c_reset:
+                                        def _queue_code_reset_from_flow(
+                                            node_id: str, fingerprint: str | None
+                                        ) -> None:
+                                            st.session_state[
+                                                "pipeline_studio_code_reset_pending"
+                                            ] = node_id
+                                            if isinstance(fingerprint, str) and fingerprint:
+                                                _delete_pipeline_studio_code_draft(
+                                                    fingerprint=fingerprint
+                                                )
+
+                                        st.button(
+                                            "Reset draft",
+                                            key=f"pipeline_studio_flow_code_reset_{sel}",
+                                            help="Discard edits and restore the recorded code for this node.",
+                                            on_click=_queue_code_reset_from_flow,
+                                            args=(sel, fp),
+                                        )
+                                    _render_copy_to_clipboard(
+                                        draft_code, label="Copy draft"
+                                    )
+                                    if _kind == "python_function":
+                                        parent_id = entry_obj.get("parent_id")
+                                        parent_id = (
+                                            parent_id
+                                            if isinstance(parent_id, str) and parent_id.strip()
+                                            else None
+                                        )
+                                        st.markdown("---")
+                                        st.markdown("**Run draft (local, executes code)**")
+                                        if parent_id:
+                                            st.caption(
+                                                f"Input dataset: `{parent_id}` → creates a new `{entry_obj.get('stage')}` node"
+                                            )
+                                        confirm_key = f"pipeline_studio_run_confirm_{sel}"
+                                        confirmed = st.checkbox(
+                                            "I understand this executes code locally",
+                                            key=confirm_key,
+                                            help="This runs the edited python function in your environment and creates a new dataset node.",
+                                        )
+
+                                        def _run_draft_click_from_flow(nid: str, e_key: str) -> None:
+                                            _run_python_function_draft(
+                                                node_id=nid, editor_key=e_key
+                                            )
+
+                                        st.button(
+                                            "Run draft and create new dataset",
+                                            key=f"pipeline_studio_flow_run_draft_{sel}",
+                                            type="primary",
+                                            disabled=not bool(confirmed),
+                                            on_click=_run_draft_click_from_flow,
+                                            args=(sel, editor_key),
+                                            help="Runs the draft on the parent dataset and registers the output as a new dataset (active).",
+                                        )
+
+                            with node_tabs[2]:
                                 st.json(meta)
 
-with tab_pipeline_studio:
-    st.subheader("Pipeline Studio")
+open_studio_requested = bool(st.session_state.pop("pipeline_studio_open_requested", False))
+if open_studio_requested:
+    _open_pipeline_studio_dialog()
+
+st.markdown("---")
+st.subheader("Analysis Details")
+details = st.session_state.get("details")
+details = details if isinstance(details, list) else []
+if not details:
+    st.info("No analysis details yet.")
+else:
+    default_idx = len(details) - 1
+    selected = st.selectbox(
+        "Inspect a prior turn",
+        options=list(range(len(details))),
+        index=default_idx,
+        format_func=lambda i: f"Turn {i + 1}",
+        key="analysis_details_turn_select",
+    )
     try:
-        _render_pipeline_studio()
+        detail = details[int(selected)]
+        _render_analysis_detail(detail, key_suffix=f"bottom_{selected}")
     except Exception as e:
-        st.error(f"Could not render Pipeline Studio: {e}")
-
-with tab_chat:
-    st.markdown("---")
-    st.subheader("Analysis Details")
-    if st.session_state.get("details"):
-        details = st.session_state.details
-        default_idx = len(details) - 1
-        selected = st.selectbox(
-            "Inspect a prior turn",
-            options=list(range(len(details))),
-            index=default_idx,
-            format_func=lambda i: f"Turn {i + 1}",
-            key="analysis_details_turn_select",
-        )
-        try:
-            # Reuse the same rendering logic as chat history by calling render_history's helper pattern.
-            # Minimal duplication: render via a small inline function to avoid leaking outer scope.
-            detail = details[int(selected)]
-            tabs = st.tabs(
-                [
-                    "AI Reasoning",
-                    "Pipeline",
-                    "Data (raw/sql/wrangle/clean/features)",
-                    "SQL",
-                    "Charts",
-                    "EDA Reports",
-                    "Models",
-                    "Predictions",
-                    "MLflow",
-                ]
-            )
-            with tabs[0]:
-                reasoning_items = detail.get("reasoning_items", [])
-                if reasoning_items:
-                    for name, text in reasoning_items:
-                        if not text:
-                            continue
-                        st.markdown(f"**{name}:**")
-                        st.write(text)
-                        st.markdown("---")
-                else:
-                    txt = detail.get("reasoning", detail.get("ai_reply", ""))
-                    st.write(txt if txt else "No reasoning available.")
-
-            with tabs[1]:
-                pipelines = (
-                    detail.get("pipelines") if isinstance(detail, dict) else None
-                )
-                if not isinstance(pipelines, dict):
-                    pipelines = {}
-                pipe = detail.get("pipeline") if isinstance(detail, dict) else None
-                if pipelines:
-                    options = [
-                        ("Model (latest feature)", "model"),
-                        ("Active dataset", "active"),
-                        ("Latest dataset", "latest"),
-                    ]
-                    target = st.radio(
-                        "Pipeline target",
-                        options=[k for k, _v in options],
-                        index=0,
-                        horizontal=True,
-                        key=f"bottom_pipeline_target_{selected}",
-                    )
-                    target_key = dict(options).get(target, "model")
-                    if target_key == "model":
-                        pipe = detail.get("pipeline") or pipelines.get("model") or pipe
-                    else:
-                        pipe = pipelines.get(target_key) or pipe
-
-                if isinstance(pipe, dict) and pipe.get("lineage"):
-                    inputs = pipe.get("inputs") or []
-                    inputs_txt = ""
-                    if isinstance(inputs, list) and inputs:
-                        inputs_txt = f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
-                    st.markdown(
-                        f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
-                        f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
-                        f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
-                        f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
-                        f"{inputs_txt}"
-                    )
-                    if pipe.get("persisted_dir"):
-                        st.caption(f"Saved to: `{pipe.get('persisted_dir')}`")
-                    try:
-                        st.dataframe(pd.DataFrame(pipe.get("lineage") or []))
-                    except Exception:
-                        st.json(pipe.get("lineage"))
-                    script = pipe.get("script")
-                    try:
-                        spec = dict(pipe)
-                        spec.pop("script", None)
-                        st.download_button(
-                            "Download pipeline spec (JSON)",
-                            data=json.dumps(spec, indent=2).encode("utf-8"),
-                            file_name=f"pipeline_spec_{pipe.get('target') or 'model'}.json",
-                            mime="application/json",
-                            key=f"bottom_download_pipeline_spec_{selected}",
-                        )
-                    except Exception:
-                        pass
-                    if isinstance(script, str) and script.strip():
-                        st.download_button(
-                            "Download pipeline script",
-                            data=script.encode("utf-8"),
-                            file_name=f"pipeline_repro_{pipe.get('target') or 'model'}.py",
-                            mime="text/x-python",
-                            key=f"bottom_download_pipeline_{selected}",
-                        )
-                        st.code(script, language="python")
-
-                    fe_code = detail.get("feature_engineering_code")
-                    train_code = detail.get("model_training_code")
-                    pred_code = detail.get("prediction_code")
-                    if any(
-                        isinstance(x, str) and x.strip()
-                        for x in (fe_code, train_code, pred_code)
-                    ):
-                        st.markdown("---")
-                        st.markdown("**ML / Prediction Steps (best effort)**")
-                        if isinstance(fe_code, str) and fe_code.strip():
-                            with st.expander(
-                                "Feature engineering code", expanded=False
-                            ):
-                                st.code(fe_code, language="python")
-                        if isinstance(train_code, str) and train_code.strip():
-                            with st.expander(
-                                "Model training code (H2O AutoML)", expanded=False
-                            ):
-                                st.code(train_code, language="python")
-                        if isinstance(pred_code, str) and pred_code.strip():
-                            with st.expander("Prediction code", expanded=False):
-                                st.code(pred_code, language="python")
-                else:
-                    st.info(
-                        "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
-                    )
-
-            with tabs[2]:
-                raw_df = detail.get("data_raw_df")
-                sql_df = detail.get("data_sql_df")
-                wrangled_df = detail.get("data_wrangled_df")
-                cleaned_df = detail.get("data_cleaned_df")
-                feature_df = detail.get("feature_data_df")
-                if raw_df is not None:
-                    st.markdown("**Raw Preview**")
-                    st.dataframe(raw_df)
-                if sql_df is not None:
-                    st.markdown("**SQL Preview**")
-                    st.dataframe(sql_df)
-                if wrangled_df is not None:
-                    st.markdown("**Wrangled Preview**")
-                    st.dataframe(wrangled_df)
-                if cleaned_df is not None:
-                    st.markdown("**Cleaned Preview**")
-                    st.dataframe(cleaned_df)
-                if feature_df is not None:
-                    st.markdown("**Feature-engineered Preview**")
-                    st.dataframe(feature_df)
-                if (
-                    raw_df is None
-                    and sql_df is None
-                    and wrangled_df is None
-                    and cleaned_df is None
-                    and feature_df is None
-                ):
-                    st.info("No data frames returned.")
-        finally:
-            pass
-        with tabs[3]:
-            sql_query = detail.get("sql_query_code")
-            sql_fn = detail.get("sql_database_function")
-            sql_fn_name = detail.get("sql_database_function_name")
-            sql_fn_path = detail.get("sql_database_function_path")
-
-            if sql_query:
-                st.markdown("**SQL Query**")
-                st.code(sql_query, language="sql")
-                try:
-                    st.download_button(
-                        "Download query (.sql)",
-                        data=str(sql_query).encode("utf-8"),
-                        file_name="query.sql",
-                        mime="application/sql",
-                        key=f"bottom_download_sql_query_{selected}",
-                    )
-                except Exception:
-                    pass
-            else:
-                st.info("No SQL query generated for this turn.")
-
-            if sql_fn:
-                st.markdown("**SQL Executor (Python)**")
-                if sql_fn_name or sql_fn_path:
-                    st.caption(
-                        "  ".join(
-                            [
-                                f"name={sql_fn_name}" if sql_fn_name else "",
-                                f"path={sql_fn_path}" if sql_fn_path else "",
-                            ]
-                        ).strip()
-                    )
-                st.code(sql_fn, language="python")
-                try:
-                    st.download_button(
-                        "Download executor (.py)",
-                        data=str(sql_fn).encode("utf-8"),
-                        file_name="sql_executor.py",
-                        mime="text/x-python",
-                        key=f"bottom_download_sql_executor_{selected}",
-                    )
-                except Exception:
-                    pass
-        with tabs[4]:
-            graph_json = detail.get("plotly_graph")
-            if graph_json:
-                payload = (
-                    json.dumps(graph_json)
-                    if isinstance(graph_json, dict)
-                    else graph_json
-                )
-                fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    key=f"bottom_detail_chart_{selected}",
-                )
-            else:
-                st.info("No charts returned.")
-        with tabs[5]:
-            reports = detail.get("eda_reports") if isinstance(detail, dict) else None
-            sweetviz_file = (
-                reports.get("sweetviz_report_file")
-                if isinstance(reports, dict)
-                else None
-            )
-            dtale_url = reports.get("dtale_url") if isinstance(reports, dict) else None
-
-            if sweetviz_file:
-                st.markdown("**Sweetviz report**")
-                st.write(sweetviz_file)
-                try:
-                    with open(sweetviz_file, "r", encoding="utf-8") as f:
-                        html = f.read()
-                    components.html(html, height=800, scrolling=True)
-                    st.download_button(
-                        "Download Sweetviz HTML",
-                        data=html.encode("utf-8"),
-                        file_name=os.path.basename(sweetviz_file),
-                        mime="text/html",
-                        key=f"bottom_download_sweetviz_{selected}",
-                    )
-                except Exception as e:
-                    st.warning(f"Could not render Sweetviz report: {e}")
-
-            if dtale_url:
-                st.markdown("**D-Tale**")
-                st.markdown(f"[Open D-Tale]({dtale_url})")
-
-            if not sweetviz_file and not dtale_url:
-                st.info("No EDA reports returned.")
-
-        with tabs[6]:
-            model_info = detail.get("model_info")
-            eval_art = detail.get("eval_artifacts")
-            eval_graph = detail.get("eval_plotly_graph")
-            if model_info is not None:
-                st.markdown("**Model Info**")
-                try:
-                    if isinstance(model_info, dict):
-                        st.dataframe(
-                            pd.DataFrame(model_info), use_container_width=True
-                        )
-                    elif isinstance(model_info, list):
-                        st.dataframe(
-                            pd.DataFrame(model_info), use_container_width=True
-                        )
-                    else:
-                        st.json(model_info)
-                except Exception:
-                    st.json(model_info)
-            if eval_art is not None:
-                st.markdown("**Evaluation**")
-                st.json(eval_art)
-            if eval_graph:
-                payload = (
-                    json.dumps(eval_graph)
-                    if isinstance(eval_graph, dict)
-                    else eval_graph
-                )
-                fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True,
-                    key=f"bottom_eval_chart_{selected}",
-                )
-            if model_info is None and eval_art is None and eval_graph is None:
-                st.info("No model or evaluation artifacts.")
-
-        with tabs[7]:
-            preds_df = detail.get("data_wrangled_df")
-            if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
-                lower_cols = {str(c).lower() for c in preds_df.columns}
-                looks_like_preds = (
-                    "predict" in lower_cols
-                    or any(str(c).lower().startswith("p") for c in preds_df.columns)
-                    or any(
-                        str(c).lower().startswith("actual_") for c in preds_df.columns
-                    )
-                )
-                if looks_like_preds:
-                    st.markdown("**Predictions Preview**")
-                    st.dataframe(preds_df)
-                else:
-                    st.info("No predictions detected for this turn.")
-            else:
-                st.info("No predictions returned.")
-
-        with tabs[8]:
-            mlflow_art = detail.get("mlflow_artifacts")
-            if mlflow_art is None:
-                st.info("No MLflow artifacts.")
-            else:
-                st.markdown("**MLflow Artifacts**")
-
-                def _render_mlflow_artifact(obj):
-                    try:
-                        if isinstance(obj, dict) and isinstance(obj.get("runs"), list):
-                            df = pd.DataFrame(obj["runs"])
-                            preferred_cols = [
-                                c
-                                for c in [
-                                    "run_id",
-                                    "run_name",
-                                    "status",
-                                    "start_time",
-                                    "duration_seconds",
-                                    "has_model",
-                                    "model_uri",
-                                    "params_preview",
-                                    "metrics_preview",
-                                ]
-                                if c in df.columns
-                            ]
-                            st.dataframe(
-                                df[preferred_cols] if preferred_cols else df,
-                                use_container_width=True,
-                            )
-                            if any(
-                                c in df.columns
-                                for c in (
-                                    "params",
-                                    "metrics",
-                                    "tags",
-                                    "artifact_uri",
-                                )
-                            ):
-                                with st.expander("Raw run details", expanded=False):
-                                    st.json(obj)
-                            return
-                        if isinstance(obj, dict) and isinstance(
-                            obj.get("experiments"), list
-                        ):
-                            df = pd.DataFrame(obj["experiments"])
-                            preferred_cols = [
-                                c
-                                for c in [
-                                    "experiment_id",
-                                    "name",
-                                    "lifecycle_stage",
-                                    "creation_time",
-                                    "last_update_time",
-                                    "artifact_location",
-                                ]
-                                if c in df.columns
-                            ]
-                            st.dataframe(
-                                df[preferred_cols] if preferred_cols else df,
-                                use_container_width=True,
-                            )
-                            return
-                        if isinstance(obj, list):
-                            st.dataframe(pd.DataFrame(obj), use_container_width=True)
-                            return
-                    except Exception:
-                        pass
-                    st.json(obj)
-
-                if isinstance(mlflow_art, dict) and not any(
-                    k in mlflow_art for k in ("runs", "experiments")
-                ):
-                    is_tool_map = all(
-                        isinstance(k, str) and k.startswith("mlflow_")
-                        for k in mlflow_art.keys()
-                    )
-                    if is_tool_map:
-                        for tool_name, tool_art in mlflow_art.items():
-                            st.markdown(f"`{tool_name}`")
-                            _render_mlflow_artifact(tool_art)
-                    else:
-                        _render_mlflow_artifact(mlflow_art)
-                else:
-                    _render_mlflow_artifact(mlflow_art)
-    # Note: analysis details rendering is best-effort; errors should not break the app.
+        st.warning(f"Could not render analysis details: {e}")
+# Note: analysis details rendering is best-effort; errors should not break the app.

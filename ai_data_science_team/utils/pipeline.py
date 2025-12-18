@@ -141,11 +141,37 @@ def build_dataset_dag_ids(datasets: Dict[str, Any], target_dataset_id: str) -> L
 def compute_pipeline_hash(datasets: Dict[str, Any], lineage_ids: List[str]) -> Optional[str]:
     """
     Compute a stable-ish pipeline hash from source + transform hashes across lineage.
+
+    Notes:
+    - Dataset IDs in this project may be randomly generated per run/session. To keep the hash useful
+      across sessions, the hash prefers stable dataset properties (fingerprint/schema) over IDs.
     """
     if not lineage_ids or not isinstance(datasets, dict):
         return None
     import hashlib
     import json
+
+    def _dataset_key(did: str) -> str:
+        """
+        Prefer stable identifiers (fingerprint/schema) to make the pipeline hash resilient to
+        session-specific dataset IDs.
+        """
+        entry = datasets.get(did)
+        if not isinstance(entry, dict):
+            return str(did)
+        fp = entry.get("fingerprint")
+        if isinstance(fp, str) and fp:
+            return fp
+        sh = entry.get("schema_hash")
+        if isinstance(sh, str) and sh:
+            return f"schema:{sh}"
+        stage = entry.get("stage")
+        label = entry.get("label")
+        if isinstance(stage, str) and stage and isinstance(label, str) and label:
+            return f"{stage}:{label}"
+        if isinstance(label, str) and label:
+            return label
+        return str(did)
 
     items: List[Dict[str, Any]] = []
     for idx, did in enumerate(lineage_ids):
@@ -155,11 +181,11 @@ def compute_pipeline_hash(datasets: Dict[str, Any], lineage_ids: List[str]) -> O
         prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
         transform = prov.get("transform") if isinstance(prov.get("transform"), dict) else {}
         parents = _parent_ids(entry)
+        parent_keys = sorted([_dataset_key(p) for p in parents if p])
         step = {
-            "id": did,
             "stage": entry.get("stage"),
             "label": entry.get("label"),
-            "parent_ids": sorted([p for p in parents if p]),
+            "parent_keys": parent_keys,
             "schema_hash": entry.get("schema_hash"),
             "fingerprint": entry.get("fingerprint"),
         }
@@ -170,6 +196,10 @@ def compute_pipeline_hash(datasets: Dict[str, Any], lineage_ids: List[str]) -> O
             step["transform_kind"] = transform.get("kind")
             step["code_sha256"] = transform.get("code_sha256") or transform.get("sql_sha256")
             step["sql_sha256"] = transform.get("sql_sha256")
+            if str(transform.get("kind") or "") == "mlflow_predict":
+                step["run_id"] = transform.get("run_id") or transform.get("model_uri")
+            if str(transform.get("kind") or "") == "h2o_predict":
+                step["model_id"] = transform.get("model_id")
         items.append(step)
 
     payload = json.dumps(items, sort_keys=True, ensure_ascii=True).encode("utf-8")
