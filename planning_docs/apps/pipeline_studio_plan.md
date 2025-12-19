@@ -31,15 +31,17 @@ This plan proposes a **Pipeline Studio** experience that:
 ## Status (What’s Implemented In-Repo)
 ✅ A working MVP Pipeline Studio UI exists in `apps/supervisor-ds-team-app/app.py`:
 - Studio navigation: modal dialog (`st.dialog`) launched from the chat UI (Pipeline Studio button in main area + sidebar)
+- Auto-seed on upload/sample: selecting an uploaded CSV or the sample Telco churn dataset seeds a `raw` dataset node so Studio can be used without running chat first (best effort)
 - Pipeline target selector: Model / Active / Latest
 - Pipeline step selector (lineage nodes)
 - Workspace toggles: Visual Editor / Table / Chart / EDA / Code / Model / Predictions / MLflow
 - Visual Editor is the default view; clicking a node opens an Inspector (Preview / Code / Metadata) with a draft code editor and “Ask AI” → sends the draft to chat
 - Draft code persistence (implemented): “Save draft” writes to `pipeline_store/pipeline_studio_code_drafts.json` (keyed by dataset fingerprint) so edits survive Streamlit session resets
 - Draft execution (implemented): “Run draft” creates a new dataset node (active) for `python_function`, `python_merge`, and `sql_query` (read-only guardrails)
+- Manual node creation (beta): “New node” in the Visual Editor lets you paste/upload a Python script to create a new `python_function` node from a selected parent dataset
 - Project save/load (implemented, best effort): save datasets + Studio state to `pipeline_store/pipeline_projects/` (pickle; local-only)
 - Downstream invalidation + “Run downstream” (implemented): rerunning a node marks downstream nodes stale, provides a replay button (best effort; skips unsupported transforms), and captures a `{old→new}` mapping with quick actions to hide stale nodes / the old branch
-- Undo/redo (implemented, best effort): supports undo/redo for single-node runs and grouped downstream runs
+- Undo/redo (implemented, best effort): “Undo run / Redo run” supports undo/redo for single-node runs and grouped downstream runs (hide/delete uses Restore/Unhide)
 - “Auto-follow latest step” behavior after each run
 - Code pane renders provenance-backed snippets for `python_function`, `sql_query`, `python_merge`, and `*_predict` steps (best effort)
 - Reproducibility: download pipeline spec (JSON) + pipeline script; copy/download buttons for per-node code snippets

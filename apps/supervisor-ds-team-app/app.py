@@ -2655,20 +2655,10 @@ with st.sidebar:
         # Reset checkpointer when clearing chat
         st.session_state.checkpointer = get_checkpointer() if add_memory else None
 
-# Hard gate: only require an API key for OpenAI provider
+# LLM credentials are only required when running chat (Pipeline Studio + previews should still work).
 llm_provider_selected = st.session_state.get("llm_provider") or "OpenAI"
-resolved_api_key = st.session_state.get("OPENAI_API_KEY")
-if llm_provider_selected == "OpenAI":
-    if not resolved_api_key:
-        st.info("Please enter your OpenAI API key in the sidebar to proceed.")
-        st.stop()
-    if key_status == "bad":
-        st.error("Invalid OpenAI API key. Please fix it in the sidebar.")
-        st.stop()
-else:
-    if not (st.session_state.get("ollama_model") or "").strip():
-        st.info("Please enter an Ollama model name in the sidebar (e.g., `llama3.1:8b`).")
-        st.stop()
+resolved_api_key = (st.session_state.get("OPENAI_API_KEY") or "").strip() or None
+resolved_ollama_model = (st.session_state.get("ollama_model") or "").strip() or None
 
 
 def build_team(
@@ -2831,6 +2821,80 @@ def get_input_data():
             st.warning(f"Sample file not found at {sample_path}")
 
     if df is not None:
+        # Best-effort: seed the Pipeline Studio dataset registry so Studio can open
+        # immediately after a file upload/sample selection (no chat run required).
+        try:
+            team_state = st.session_state.get("team_state", {})
+            team_state = team_state if isinstance(team_state, dict) else {}
+            datasets = team_state.get("datasets")
+            datasets = datasets if isinstance(datasets, dict) else {}
+
+            prov = provenance if isinstance(provenance, dict) else {}
+            prov_source = prov.get("source") if isinstance(prov.get("source"), str) else None
+            prov_sha = prov.get("sha256") if isinstance(prov.get("sha256"), str) else None
+            seed_key = (prov_sha or prov_source or "").strip() or None
+            prev_seed_key = st.session_state.get("pipeline_studio_seed_key")
+            prev_seed_key = prev_seed_key.strip() if isinstance(prev_seed_key, str) else None
+            is_new_selection = bool(seed_key and seed_key != prev_seed_key)
+
+            match_id = None
+            for did, ent in datasets.items():
+                if not isinstance(did, str) or not did or not isinstance(ent, dict):
+                    continue
+                ent_prov = ent.get("provenance")
+                ent_prov = ent_prov if isinstance(ent_prov, dict) else {}
+                if prov_sha and ent_prov.get("sha256") == prov_sha:
+                    match_id = did
+                    break
+                if prov_source and ent_prov.get("source") == prov_source:
+                    match_id = did
+                    break
+
+            if seed_key:
+                # Only force-select the seeded dataset when the user *changes* the selected input.
+                # Otherwise, leave the active dataset alone so Pipeline Studio edits/runs aren't overwritten.
+                if is_new_selection:
+                    st.session_state["pipeline_studio_seed_key"] = seed_key
+                    if match_id and team_state.get("active_dataset_id") != match_id:
+                        st.session_state["team_state"] = {
+                            **team_state,
+                            "active_dataset_id": match_id,
+                        }
+
+                # If the selected dataset isn't present in the registry (e.g., after clearing chat),
+                # seed it again regardless of selection history.
+                if not match_id:
+                    st.session_state["pipeline_studio_seed_key"] = seed_key
+                    label = (
+                        prov.get("original_name")
+                        if isinstance(prov.get("original_name"), str)
+                        else None
+                    )
+                    label = label or (os.path.basename(prov_source) if prov_source else None) or "data_raw"
+                    new_state, _new_id = _pipeline_studio_register_dataset(
+                        team_state=team_state,
+                        data=df,
+                        stage="raw",
+                        label=label,
+                        created_by="User",
+                        provenance=prov or {"source_type": "file", "source": prov_source or "upload"},
+                        parent_id=None,
+                        parent_ids=None,
+                        make_active=True,
+                    )
+                    st.session_state["team_state"] = new_state
+                    try:
+                        pipelines_new = _pipeline_studio_build_pipelines_from_team_state(new_state)
+                        ds_new = new_state.get("datasets") if isinstance(new_state, dict) else {}
+                        ds_new = ds_new if isinstance(ds_new, dict) else {}
+                        _update_pipeline_registry_store_for_pipelines(
+                            pipelines=pipelines_new, datasets=ds_new
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         st.markdown("**Data preview**")
         st.dataframe(df.head(preview_rows))
         return df.to_dict(), df.head(preview_rows), provenance
@@ -2943,7 +3007,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
             ):
                 # Best-effort: align Studio target selector with the Analysis Details selector.
                 if isinstance(target, str) and target:
-                    st.session_state["pipeline_studio_target"] = target
+                    st.session_state["pipeline_studio_target_pending"] = target
                 st.session_state["pipeline_studio_open_requested"] = True
 
             if isinstance(script, str) and script.strip():
@@ -2971,6 +3035,16 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
             st.info(
                 "No pipeline available yet. Load data and run a transform (wrangle/clean/features)."
             )
+            if st.button(
+                "Open Pipeline Studio",
+                key=f"open_pipeline_studio_from_details_{key_suffix}",
+                type="primary",
+                help="Open Pipeline Studio (modal) to inspect the current dataset registry/pipeline.",
+            ):
+                st.session_state["pipeline_studio_target_pending"] = (
+                    target if isinstance(target, str) and target else "Active dataset"
+                )
+                st.session_state["pipeline_studio_open_requested"] = True
 
     # Data
     with tabs[2]:
@@ -3292,13 +3366,16 @@ pending_prompt = st.session_state.pop("chat_prompt_pending", None)
 pending_prompt = pending_prompt.strip() if isinstance(pending_prompt, str) else ""
 prompt = pending_prompt if pending_prompt else st.chat_input("Ask the data science team...")
 if prompt:
-    if llm_provider_selected == "OpenAI" and (
-        not resolved_api_key or key_status == "bad"
-    ):
-        st.error(
-            "OpenAI API key is required and must be valid. Enter it in the sidebar."
-        )
-        st.stop()
+    if llm_provider_selected == "OpenAI":
+        if not resolved_api_key or key_status == "bad":
+            st.error(
+                "OpenAI API key is required and must be valid. Enter it in the sidebar."
+            )
+            st.stop()
+    else:
+        if not resolved_ollama_model:
+            st.error("Ollama model name is required. Enter it in the sidebar.")
+            st.stop()
 
     debug_mode = bool(st.session_state.get("debug_mode", False))
     raw_prompt = prompt
@@ -4179,6 +4256,19 @@ def _render_pipeline_studio() -> None:
     studio_active_id = studio_state.get("active_dataset_id")
     studio_active_id = studio_active_id if isinstance(studio_active_id, str) else None
 
+    # Make editable code areas look like code (monospace).
+    st.markdown(
+        """
+        <style>
+          div[data-testid="stTextArea"] textarea {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+            font-size: 0.9rem;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     def _dataset_entry_to_df(entry: dict) -> pd.DataFrame | None:
         if not isinstance(entry, dict):
             return None
@@ -4201,11 +4291,78 @@ def _render_pipeline_studio() -> None:
         if not isinstance(code, str) or not code:
             return None
         m = re.search(
-            r"^\\s*def\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+            r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
             code,
             flags=re.MULTILINE,
         )
         return m.group(1) if m else None
+
+    def _normalize_pipeline_stage(stage: str) -> str:
+        stage = stage.strip().lower() if isinstance(stage, str) else ""
+        stage = re.sub(r"[^a-z0-9_]+", "_", stage)
+        stage = re.sub(r"_+", "_", stage).strip("_")
+        return stage or "custom"
+
+    def _exec_python_transform(
+        *,
+        code: str,
+        df_in: pd.DataFrame,
+        fn_name_hint: str | None = None,
+    ) -> tuple[pd.DataFrame, str | None]:
+        code = code if isinstance(code, str) else ""
+        code = code.strip()
+        if not code:
+            raise ValueError("Draft code is empty; nothing to run.")
+
+        inferred = _infer_first_def_name(code)
+        fn_name_hint = fn_name_hint.strip() if isinstance(fn_name_hint, str) else None
+
+        # Use a single namespace for globals so top-level imports are visible to the function.
+        exec_env: dict[str, object] = {"pd": pd}
+        try:
+            import numpy as np  # type: ignore
+
+            exec_env["np"] = np
+        except Exception:
+            pass
+        exec(code, exec_env, exec_env)
+
+        fn = None
+        fn_used: str | None = None
+        for candidate in [fn_name_hint, inferred]:
+            if not candidate:
+                continue
+            obj = exec_env.get(candidate)
+            if callable(obj):
+                fn = obj
+                fn_used = candidate
+                break
+        if fn is None:
+            # Fall back: pick the first callable defined in locals.
+            for name, obj in exec_env.items():
+                if callable(obj):
+                    fn = obj
+                    fn_used = name if isinstance(name, str) and name else None
+                    break
+        if fn is None:
+            raise ValueError(
+                "Could not find a callable function in the draft. Define a function like `def transform(df): ...`."
+            )
+
+        out = fn(df_in)
+        if isinstance(out, tuple) and out:
+            out = out[0]
+        if not isinstance(out, pd.DataFrame):
+            try:
+                if isinstance(out, dict):
+                    out = pd.DataFrame.from_dict(out)
+                elif isinstance(out, list):
+                    out = pd.DataFrame(out)
+            except Exception:
+                out = None
+        if not isinstance(out, pd.DataFrame):
+            raise ValueError("Draft function did not return a pandas DataFrame.")
+        return out, fn_used
 
     def _entry_parent_ids(entry_obj: dict) -> list[str]:
         entry_obj = entry_obj if isinstance(entry_obj, dict) else {}
@@ -4373,46 +4530,12 @@ def _render_pipeline_studio() -> None:
             )
             fn_name = fn_name.strip() if isinstance(fn_name, str) else None
             inferred = _infer_first_def_name(draft_code)
-
-            exec_globals: dict[str, object] = {"pd": pd}
-            exec_locals: dict[str, object] = {}
-            exec(draft_code, exec_globals, exec_locals)
-
-            fn = None
-            for candidate in [fn_name, inferred]:
-                if not candidate:
-                    continue
-                obj = exec_locals.get(candidate) or exec_globals.get(candidate)
-                if callable(obj):
-                    fn = obj
-                    break
-            if fn is None:
-                # Fall back: pick the first callable defined in locals.
-                for obj in exec_locals.values():
-                    if callable(obj):
-                        fn = obj
-                        break
-            if fn is None:
-                st.session_state["pipeline_studio_run_error"] = (
-                    "Could not find a callable function in the draft. Define a function like `def transform(df): ...`."
+            try:
+                out, fn_used = _exec_python_transform(
+                    code=draft_code, df_in=df_in, fn_name_hint=fn_name or inferred
                 )
-                return
-
-            out = fn(df_in)
-            if isinstance(out, tuple) and out:
-                out = out[0]
-            if not isinstance(out, pd.DataFrame):
-                try:
-                    if isinstance(out, dict):
-                        out = pd.DataFrame.from_dict(out)
-                    elif isinstance(out, list):
-                        out = pd.DataFrame(out)
-                except Exception:
-                    out = None
-            if not isinstance(out, pd.DataFrame):
-                st.session_state["pipeline_studio_run_error"] = (
-                    "Draft function did not return a pandas DataFrame."
-                )
+            except Exception as e:
+                st.session_state["pipeline_studio_run_error"] = str(e)
                 return
 
             import hashlib
@@ -4433,14 +4556,14 @@ def _render_pipeline_studio() -> None:
                         "source_type": "pipeline_studio",
                         "source": f"rerun:{node_id}",
                         "user_request": "Pipeline Studio: run edited transform draft",
-                        "transform": {
-                            "kind": "python_function",
-                            "supersedes_dataset_id": node_id,
-                            "function_name": fn_name or inferred or None,
-                            "function_code": draft_code[:12000],
-                            "code_sha256": code_sha,
-                        },
+                    "transform": {
+                        "kind": "python_function",
+                        "supersedes_dataset_id": node_id,
+                        "function_name": fn_used or fn_name or inferred or None,
+                        "function_code": draft_code[:12000],
+                        "code_sha256": code_sha,
                     },
+                },
                 parent_id=parent_id,
                 parent_ids=[parent_id],
                 make_active=True,
@@ -4452,6 +4575,94 @@ def _render_pipeline_studio() -> None:
                 source="pipeline_studio_run_draft",
                 supersedes_node_id=node_id,
             )
+        except Exception as e:
+            st.session_state["pipeline_studio_run_error"] = str(e)
+
+    def _pipeline_studio_create_manual_python_node(
+        *,
+        parent_id: str,
+        stage: str,
+        label: str,
+        code: str,
+    ) -> None:
+        try:
+            st.session_state.pop("pipeline_studio_run_error", None)
+            st.session_state.pop("pipeline_studio_run_success", None)
+
+            parent_id = parent_id.strip() if isinstance(parent_id, str) else ""
+            if not parent_id:
+                st.session_state["pipeline_studio_run_error"] = "Select a parent dataset to run against."
+                return
+
+            team_state = st.session_state.get("team_state", {})
+            team_state = team_state if isinstance(team_state, dict) else {}
+            prev_active_id = team_state.get("active_dataset_id")
+            prev_active_id = (
+                prev_active_id if isinstance(prev_active_id, str) and prev_active_id else None
+            )
+            datasets = team_state.get("datasets")
+            datasets = datasets if isinstance(datasets, dict) else {}
+            parent_entry = datasets.get(parent_id)
+            parent_entry = parent_entry if isinstance(parent_entry, dict) else {}
+            df_in = _dataset_entry_to_df(parent_entry)
+            if df_in is None:
+                st.session_state["pipeline_studio_run_error"] = (
+                    f"Parent dataset `{parent_id}` has no tabular data to run against."
+                )
+                return
+
+            code = code if isinstance(code, str) else ""
+            try:
+                out, fn_used = _exec_python_transform(code=code, df_in=df_in)
+            except Exception as e:
+                st.session_state["pipeline_studio_run_error"] = str(e)
+                return
+
+            import hashlib
+
+            code = code.strip()
+            code_sha = hashlib.sha256(code.encode("utf-8")).hexdigest() if code else ""
+
+            stage = _normalize_pipeline_stage(stage or "custom")
+            label = label.strip() if isinstance(label, str) else ""
+            if not label:
+                label = f"{stage}_manual"
+
+            new_state, new_id = _pipeline_studio_register_dataset(
+                team_state=team_state,
+                data=out,
+                stage=stage,
+                label=label,
+                created_by="Pipeline_Studio",
+                provenance={
+                    "source_type": "pipeline_studio",
+                    "source": f"manual:{parent_id}",
+                    "user_request": "Pipeline Studio: manual python transform",
+                    "transform": {
+                        "kind": "python_function",
+                        "function_name": fn_used or None,
+                        "function_code": code[:12000],
+                        "code_sha256": code_sha,
+                    },
+                },
+                parent_id=parent_id,
+                parent_ids=[parent_id],
+                make_active=True,
+            )
+            _finalize_created_dataset(
+                new_state=new_state,
+                new_id=new_id,
+                prev_active_id=prev_active_id,
+                source="pipeline_studio_manual_python_node",
+            )
+            st.session_state["pipeline_studio_manual_last_created_id"] = new_id
+            # Ensure the newly created node is visible immediately even when the user is
+            # viewing the "Model (latest feature)" pipeline target (which only follows `stage=feature`).
+            if stage != "feature":
+                st.session_state["pipeline_studio_target_pending"] = "Active dataset"
+            st.session_state["pipeline_studio_manual_node_open"] = False
+            st.session_state["pipeline_studio_flow_force_layout"] = True
+            st.session_state["pipeline_studio_flow_fit_view_pending"] = True
         except Exception as e:
             st.session_state["pipeline_studio_run_error"] = str(e)
 
@@ -4640,8 +4851,8 @@ def _render_pipeline_studio() -> None:
                 )
                 return
             sql_text = non_empty[0] if non_empty else ""
-            first = re.sub(r"^\\s*\\(+\\s*", "", sql_text).strip().lower()
-            if not re.match(r"^(select|with|pragma|explain)\\b", first):
+            first = re.sub(r"^\s*\(+\s*", "", sql_text).strip().lower()
+            if not re.match(r"^(select|with|pragma|explain)\b", first):
                 st.session_state["pipeline_studio_run_error"] = (
                     "Only read-only queries are allowed (SELECT/WITH/PRAGMA/EXPLAIN)."
                 )
@@ -4860,8 +5071,8 @@ def _render_pipeline_studio() -> None:
                 if len(non_empty) > 1:
                     raise ValueError("Only single-statement queries are allowed.")
                 sql_text = non_empty[0] if non_empty else ""
-                first = re.sub(r"^\\s*\\(+\\s*", "", sql_text).strip().lower()
-                if not re.match(r"^(select|with|pragma|explain)\\b", first):
+                first = re.sub(r"^\s*\(+\s*", "", sql_text).strip().lower()
+                if not re.match(r"^(select|with|pragma|explain)\b", first):
                     raise ValueError("Only read-only queries are allowed (SELECT/WITH/PRAGMA/EXPLAIN).")
                 return sql_text
 
@@ -5181,6 +5392,11 @@ def _render_pipeline_studio() -> None:
             ("Active dataset", "active"),
             ("Latest dataset", "latest"),
         ]
+        pending_target = st.session_state.pop("pipeline_studio_target_pending", None)
+        if isinstance(pending_target, str):
+            valid_labels = [k for k, _v in target_options]
+            if pending_target in valid_labels:
+                st.session_state["pipeline_studio_target"] = pending_target
         target_label = st.radio(
             "Pipeline target",
             options=[k for k, _v in target_options],
@@ -5224,6 +5440,16 @@ def _render_pipeline_studio() -> None:
                     f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
+                if (
+                    target_key == "model"
+                    and isinstance(studio_active_id, str)
+                    and studio_active_id
+                    and studio_active_id not in node_ids
+                ):
+                    st.info(
+                        "Your *active dataset* is not part of the current **Model (latest feature)** pipeline view. "
+                        "Switch **Pipeline target → Active dataset** (or set stage to `feature`) to see the newest node."
+                    )
                 run_err = st.session_state.pop("pipeline_studio_run_error", None)
                 if isinstance(run_err, str) and run_err.strip():
                     st.error(run_err)
@@ -5482,23 +5708,70 @@ def _render_pipeline_studio() -> None:
                 undo_stack = undo_stack if isinstance(undo_stack, list) else []
                 redo_stack = st.session_state.get("pipeline_studio_redo_stack")
                 redo_stack = redo_stack if isinstance(redo_stack, list) else []
+
+                def _history_action_summary(action: dict) -> tuple[str, list[str]]:
+                    action = action if isinstance(action, dict) else {}
+                    action_type = str(action.get("type") or "")
+                    if action_type == "create_dataset":
+                        did = action.get("dataset_id")
+                        did = did if isinstance(did, str) and did else ""
+                        return (f"Remove `{did}`" if did else "Remove last dataset", [did] if did else [])
+                    if action_type == "create_datasets":
+                        ids = action.get("dataset_ids")
+                        ids = ids if isinstance(ids, list) else []
+                        clean = [str(x) for x in ids if isinstance(x, str) and x]
+                        return (f"Remove {len(clean)} dataset(s)", clean)
+                    return (f"Action `{action_type}`", [])
+
+                undo_summary, undo_ids = (
+                    _history_action_summary(undo_stack[-1]) if undo_stack else ("", [])
+                )
+                redo_summary, _redo_ids = (
+                    _history_action_summary(redo_stack[-1]) if redo_stack else ("", [])
+                )
+
+                undo_blocked_reason = None
+                if undo_ids:
+                    try:
+                        remove_set = set(undo_ids)
+                        for did, ent in studio_datasets.items():
+                            if did in remove_set or not isinstance(ent, dict):
+                                continue
+                            parents = _entry_parent_ids(ent)
+                            if any(p in remove_set for p in parents):
+                                undo_blocked_reason = (
+                                    f"Undo blocked: downstream dataset `{did}` depends on the last run."
+                                )
+                                break
+                    except Exception:
+                        undo_blocked_reason = None
+
                 c_undo, c_redo = st.columns(2)
                 with c_undo:
                     st.button(
-                        "Undo",
+                        "Undo run",
                         key="pipeline_studio_undo",
-                        help="Undo the most recent Pipeline Studio operation (best effort).",
-                        disabled=not bool(undo_stack),
+                        help=(
+                            "Undo the most recent run (removes the last created dataset node). "
+                            "Hide/Delete actions are handled separately via Restore/Unhide."
+                            + (f" ({undo_summary})" if undo_summary else "")
+                        ),
+                        disabled=not bool(undo_stack) or bool(undo_blocked_reason),
                         on_click=_pipeline_studio_undo_last_action,
                     )
                 with c_redo:
                     st.button(
-                        "Redo",
+                        "Redo run",
                         key="pipeline_studio_redo",
-                        help="Redo the most recently undone Pipeline Studio operation (best effort).",
+                        help=(
+                            "Redo the most recently undone run (restores the dataset node)."
+                            + (f" ({redo_summary})" if redo_summary else "")
+                        ),
                         disabled=not bool(redo_stack),
                         on_click=_pipeline_studio_redo_last_action,
                     )
+                if isinstance(undo_blocked_reason, str) and undo_blocked_reason.strip():
+                    st.caption(undo_blocked_reason)
 
                 script = pipe.get("script") if isinstance(pipe, dict) else None
                 spec_bytes = None
@@ -6711,6 +6984,16 @@ def _render_pipeline_studio() -> None:
                             height=320,
                             help="Edit the snippet and use Ask AI to refine it. You can run drafts for python_function/python_merge/sql_query.",
                         )
+                        show_preview = st.checkbox(
+                            "Show formatted preview",
+                            value=False,
+                            key=f"pipeline_studio_draft_preview_{selected_node_id}",
+                        )
+                        if show_preview:
+                            st.code(
+                                draft_code if isinstance(draft_code, str) else "",
+                                language="sql" if code_lang == "sql" else "python",
+                            )
                         try:
                             ext = "sql" if code_lang == "sql" else "py"
                             mime = (
@@ -7555,7 +7838,7 @@ def _render_pipeline_studio() -> None:
                         timestamp=flow_ts,
                     )
 
-                    c1, c2, c3, c4 = st.columns([0.18, 0.18, 0.18, 0.46])
+                    c1, c2, c3, c4, c5 = st.columns([0.16, 0.16, 0.16, 0.16, 0.36])
                     with c1:
                         def _flow_reset_layout(p_hash: str | None) -> None:
                             st.session_state.pop("pipeline_studio_flow_state", None)
@@ -7596,6 +7879,18 @@ def _render_pipeline_studio() -> None:
                             args=(pipeline_hash,),
                         )
                     with c3:
+                        def _open_manual_node_editor() -> None:
+                            st.session_state["pipeline_studio_manual_node_open"] = True
+                            st.session_state["pipeline_studio_manual_seed_defaults"] = True
+
+                        st.button(
+                            "New node",
+                            key="pipeline_studio_flow_new_node_open",
+                            help="Create a new transform node from a Python script (runs locally).",
+                            use_container_width=True,
+                            on_click=_open_manual_node_editor,
+                        )
+                    with c4:
                         st.checkbox(
                             "Stale only",
                             key=stale_only_key,
@@ -7603,7 +7898,7 @@ def _render_pipeline_studio() -> None:
                         )
                         if stale_only and stale_only_empty:
                             st.caption("No stale nodes to focus; showing all.")
-                    with c4:
+                    with c5:
                         st.caption(
                             f"Nodes: {len(flow_node_ids)}/{len(all_node_ids)} | "
                             f"Edges: {len(base_edges)} | "
@@ -7611,6 +7906,191 @@ def _render_pipeline_studio() -> None:
                             f"Deleted: {len(ui_deleted_ids)} | "
                             f"Stale: {len(stale_set)}"
                         )
+
+                    manual_open = bool(st.session_state.get("pipeline_studio_manual_node_open", False))
+                    if manual_open:
+                        with st.expander("New node (manual Python transform)", expanded=True):
+                            default_parent = (
+                                selected_default
+                                if isinstance(selected_default, str) and selected_default in all_node_ids
+                                else (
+                                    active_id
+                                    if isinstance(active_id, str) and active_id in all_node_ids
+                                    else (all_node_ids[0] if all_node_ids else None)
+                                )
+                            )
+                            parent_index = (
+                                int(all_node_ids.index(default_parent))
+                                if default_parent in all_node_ids
+                                else 0
+                            )
+
+                            def _parent_fmt(did: str) -> str:
+                                m = meta_by_id.get(did) if isinstance(meta_by_id, dict) else {}
+                                m = m if isinstance(m, dict) else {}
+                                lbl = m.get("label") or did
+                                stg = str(m.get("stage") or "")
+                                shp = m.get("shape")
+                                shp_str = ""
+                                if isinstance(shp, (list, tuple)) and len(shp) == 2:
+                                    shp_str = f"{shp[0]}×{shp[1]}"
+                                parts = [p for p in [stg, shp_str] if p]
+                                meta = f" ({', '.join(parts)})" if parts else ""
+                                return f"{lbl}{meta} — {did}"
+
+                            parent_id_new = st.selectbox(
+                                "Parent dataset",
+                                options=all_node_ids,
+                                index=parent_index,
+                                format_func=_parent_fmt,
+                                key="pipeline_studio_manual_parent_id",
+                                help="The input dataset passed into your transform function.",
+                            )
+                            seed_defaults = bool(
+                                st.session_state.pop("pipeline_studio_manual_seed_defaults", False)
+                            )
+                            if seed_defaults:
+                                try:
+                                    parent_meta = (
+                                        meta_by_id.get(parent_id_new)
+                                        if isinstance(meta_by_id, dict)
+                                        and isinstance(parent_id_new, str)
+                                        else {}
+                                    )
+                                    parent_meta = (
+                                        parent_meta if isinstance(parent_meta, dict) else {}
+                                    )
+                                    parent_stage_guess = (
+                                        str(parent_meta.get("stage") or "").strip()
+                                    )
+                                    stage_default = (
+                                        _normalize_pipeline_stage(parent_stage_guess)
+                                        if parent_stage_guess
+                                        else "custom"
+                                    )
+                                    st.session_state["pipeline_studio_manual_stage"] = stage_default
+                                    st.session_state["pipeline_studio_manual_label"] = (
+                                        "manual_transform"
+                                    )
+                                    st.session_state["pipeline_studio_manual_confirm_run"] = False
+                                except Exception:
+                                    pass
+                            c_stage, c_label = st.columns([0.25, 0.75])
+                            with c_stage:
+                                parent_meta = (
+                                    meta_by_id.get(parent_id_new)
+                                    if isinstance(meta_by_id, dict) and isinstance(parent_id_new, str)
+                                    else {}
+                                )
+                                parent_meta = parent_meta if isinstance(parent_meta, dict) else {}
+                                parent_stage_guess = str(parent_meta.get("stage") or "").strip()
+                                stage_default = (
+                                    _normalize_pipeline_stage(parent_stage_guess)
+                                    if parent_stage_guess
+                                    else "custom"
+                                )
+                                if (
+                                    "pipeline_studio_manual_stage" not in st.session_state
+                                    or not str(st.session_state.get("pipeline_studio_manual_stage") or "").strip()
+                                ):
+                                    st.session_state["pipeline_studio_manual_stage"] = stage_default
+                                stage_new = st.text_input(
+                                    "Stage",
+                                    value=stage_default,
+                                    key="pipeline_studio_manual_stage",
+                                    help="Used as the dataset id prefix (e.g. `cleaned_...`, `features_...`).",
+                                )
+                            with c_label:
+                                label_new = st.text_input(
+                                    "Label",
+                                    value="manual_transform",
+                                    key="pipeline_studio_manual_label",
+                                    help="Human-friendly name shown in the pipeline.",
+                                )
+
+                            template_key = "pipeline_studio_manual_python_code"
+                            if template_key not in st.session_state:
+                                st.session_state[template_key] = (
+                                    "import pandas as pd\n\n"
+                                    "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
+                                    "    df = df.copy()\n"
+                                    "    # TODO: modify df\n"
+                                    "    return df\n"
+                                )
+
+                            up = st.file_uploader(
+                                "Load a Python script (optional)",
+                                type=["py", "txt"],
+                                key="pipeline_studio_manual_upload",
+                                help="Loads the file content into the editor below.",
+                            )
+                            if up is not None:
+                                if st.button(
+                                    "Load script into editor",
+                                    key="pipeline_studio_manual_load_script",
+                                    use_container_width=True,
+                                ):
+                                    try:
+                                        st.session_state[template_key] = (
+                                            up.getvalue().decode("utf-8", errors="replace")
+                                        )
+                                    except Exception:
+                                        pass
+
+                            code_new = st.text_area(
+                                "Python transform code",
+                                key=template_key,
+                                height=260,
+                                help="Define a function (e.g. `def transform(df): ...`) that returns a pandas DataFrame.",
+                            )
+                            show_preview = st.checkbox(
+                                "Show formatted preview",
+                                value=False,
+                                key="pipeline_studio_manual_code_preview",
+                            )
+                            if show_preview:
+                                st.code(
+                                    code_new if isinstance(code_new, str) else "",
+                                    language="python",
+                                )
+                            last_created = st.session_state.get("pipeline_studio_manual_last_created_id")
+                            if isinstance(last_created, str) and last_created.strip():
+                                st.caption(f"Last manual node created: `{last_created}`")
+                            confirm_run = st.checkbox(
+                                "I understand this executes code locally",
+                                key="pipeline_studio_manual_confirm_run",
+                            )
+                            c_run, c_close = st.columns([0.7, 0.3])
+                            with c_run:
+                                def _manual_create_click() -> None:
+                                    _pipeline_studio_create_manual_python_node(
+                                        parent_id=st.session_state.get(
+                                            "pipeline_studio_manual_parent_id", ""
+                                        ),
+                                        stage=st.session_state.get(
+                                            "pipeline_studio_manual_stage", ""
+                                        ),
+                                        label=st.session_state.get(
+                                            "pipeline_studio_manual_label", ""
+                                        ),
+                                        code=st.session_state.get(template_key, ""),
+                                    )
+
+                                st.button(
+                                    "Create node",
+                                    key="pipeline_studio_manual_create_node",
+                                    type="primary",
+                                    disabled=not bool(confirm_run),
+                                    use_container_width=True,
+                                    on_click=_manual_create_click,
+                                )
+                            with c_close:
+                                if st.button(
+                                    "Close",
+                                    key="pipeline_studio_manual_close",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state["pipeline_studio_manual_node_open"] = False
 
                     new_state = streamlit_flow(
                         key="pipeline_studio_flow",
@@ -8203,6 +8683,16 @@ def _render_pipeline_studio() -> None:
                                         height=260,
                                         help="Edit this draft and ask chat for improvements. You can run drafts for python_function/python_merge/sql_query.",
                                     )
+                                    show_preview = st.checkbox(
+                                        "Show formatted preview",
+                                        value=False,
+                                        key=f"pipeline_studio_flow_draft_preview_{sel}",
+                                    )
+                                    if show_preview:
+                                        st.code(
+                                            draft_code if isinstance(draft_code, str) else "",
+                                            language="sql" if code_lang == "sql" else "python",
+                                        )
 
                                     c_ask, c_save, c_reset = st.columns(3)
                                     with c_ask:
