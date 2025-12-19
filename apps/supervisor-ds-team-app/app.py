@@ -7678,8 +7678,14 @@ def _render_pipeline_studio() -> None:
                         st.session_state.pop("pipeline_studio_flow_force_layout", False)
                     )
                     use_auto_layout = force_layout or not positions_by_id
+                    flow_layer_spacing = 320.0
+                    flow_node_spacing = 140.0
                     layout_obj = (
-                        LayeredLayout(direction="right")
+                        LayeredLayout(
+                            direction="right",
+                            node_node_spacing=flow_node_spacing,
+                            node_layer_spacing=flow_layer_spacing,
+                        )
                         if use_auto_layout
                         else ManualLayout()
                     )
@@ -7769,10 +7775,10 @@ def _render_pipeline_studio() -> None:
                                     ppos = positions_by_id.get(pid)
                                     if ppos is None:
                                         continue
-                                    pos = (ppos[0] + 280.0, ppos[1])
+                                    pos = (ppos[0] + flow_layer_spacing, ppos[1])
                                     break
                             if pos is None:
-                                pos = (0.0, float(idx * 80))
+                                pos = (0.0, float(idx * flow_node_spacing))
                         sig_nodes.append(
                             {
                                 "id": did,
@@ -7996,14 +8002,17 @@ def _render_pipeline_studio() -> None:
                                     st.session_state["pipeline_studio_manual_stage"] = stage_default
                                 stage_new = st.text_input(
                                     "Stage",
-                                    value=stage_default,
                                     key="pipeline_studio_manual_stage",
                                     help="Used as the dataset id prefix (e.g. `cleaned_...`, `features_...`).",
                                 )
                             with c_label:
+                                if (
+                                    "pipeline_studio_manual_label" not in st.session_state
+                                    or not str(st.session_state.get("pipeline_studio_manual_label") or "").strip()
+                                ):
+                                    st.session_state["pipeline_studio_manual_label"] = "manual_transform"
                                 label_new = st.text_input(
                                     "Label",
-                                    value="manual_transform",
                                     key="pipeline_studio_manual_label",
                                     help="Human-friendly name shown in the pipeline.",
                                 )
