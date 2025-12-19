@@ -38,7 +38,8 @@ This plan proposes a **Pipeline Studio** experience that:
 - Visual Editor is the default view; clicking a node opens an Inspector (Preview / Code / Metadata) with a draft code editor and “Ask AI” → sends the draft to chat
 - Draft code persistence (implemented): “Save draft” writes to `pipeline_store/pipeline_studio_code_drafts.json` (keyed by dataset fingerprint) so edits survive Streamlit session resets
 - Draft execution (implemented): “Run draft” creates a new dataset node (active) for `python_function`, `python_merge`, and `sql_query` (read-only guardrails)
-- Manual node creation (beta): “New node” in the Visual Editor lets you paste/upload a Python script to create a new `python_function` node from a selected parent dataset
+- Manual node creation (beta): “New node” in the Visual Editor supports Python/SQL/Merge nodes (validation + templates + file upload) and creates `python_function`, `sql_query`, or `python_merge` nodes from selected parent dataset(s)
+- Insert between nodes (beta): manual node creation can re-link a downstream node to the new node (inserts between parent → child and marks downstream stale)
 - Project save/load (implemented, best effort): save datasets + Studio state to `pipeline_store/pipeline_projects/` (pickle; local-only)
 - Downstream invalidation + “Run downstream” (implemented): rerunning a node marks downstream nodes stale, provides a replay button (best effort; skips unsupported transforms), and captures a `{old→new}` mapping with quick actions to hide stale nodes / the old branch
 - Undo/redo (implemented, best effort): “Undo run / Redo run” supports undo/redo for single-node runs and grouped downstream runs (hide/delete uses Restore/Unhide)
@@ -59,15 +60,16 @@ This plan proposes a **Pipeline Studio** experience that:
   - Downstream replacements: show `{old→new}` mapping + buttons to hide stale nodes / hide the old branch
   - Canvas actions: Reset layout, Show all nodes
 
-🔄 Still planned:
+✅ Recently implemented:
 - Rich node inspector actions (edit code + rerun / delete subgraph) + semantic graph model
+- Templates palette (quick add) with prebuilt Python/SQL/Merge snippets that open the manual node editor
 
 ## Proposed UX
 
 ### A) Where Pipeline Studio “lives”
 **v1 (implemented):** Pipeline Studio opens as a modal (`st.dialog`) so it stays accessible without cluttering the chat layout (works well on desktop + mobile).
 
-**v2 (next):** Consider a dockable “drawer” (sidebar-like) Studio for wide screens, plus modal on mobile.
+**v2 (beta):** Dockable “drawer” mode (inline expander) for wide screens, plus modal on mobile.
 
 **v3 (future):** Promote Pipeline Studio into a top-level workspace with a visual pipeline editor (graph/canvas) and a right-side inspector.
 
