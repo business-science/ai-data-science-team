@@ -37,7 +37,9 @@ def _is_agent_output_report_message(m: BaseMessage) -> bool:
     if not s.startswith("{"):
         return False
     head = s[:1200]
-    return '"report_title"' in head and ("Agent Outputs" in head or "Agent Output Summary" in head)
+    return '"report_title"' in head and (
+        "Agent Outputs" in head or "Agent Output Summary" in head
+    )
 
 
 def _supervisor_merge_messages(
@@ -145,7 +147,7 @@ def make_supervisor_ds_team(
     model_evaluation_agent,
     workflow_planner_agent=None,
     checkpointer: Optional[Checkpointer] = None,
-    temperature: float = 0,
+    temperature: float = 1.0,
 ):
     """
     Build a supervisor-led data science team using existing sub-agents.
@@ -182,8 +184,20 @@ def make_supervisor_ds_team(
         "MLflow_Tools_Agent",
     ]
 
+    def _openai_requires_responses(model_name: str | None) -> bool:
+        model_name = model_name.strip().lower() if isinstance(model_name, str) else ""
+        if not model_name:
+            return False
+        if "codex" in model_name:
+            return True
+        return model_name in {"gpt-5.1-codex-mini"}
+
     if isinstance(model, str):
-        llm = ChatOpenAI(model=model, temperature=temperature)
+        llm_kwargs: dict[str, object] = {"model": model, "temperature": temperature}
+        if _openai_requires_responses(model):
+            llm_kwargs["use_responses_api"] = True
+            llm_kwargs["output_version"] = "responses/v1"
+        llm = ChatOpenAI(**llm_kwargs)
     else:
         llm = model
         # Best-effort: allow callers to pass an already-configured LLM
@@ -328,10 +342,7 @@ Examples:
         )
     else:
         supervisor_chain = (
-            prompt
-            | llm
-            | StrOutputParser()
-            | RunnableLambda(_parse_router_output)
+            prompt | llm | StrOutputParser() | RunnableLambda(_parse_router_output)
         )
 
     def _clean_messages(msgs: Sequence[BaseMessage]) -> Sequence[BaseMessage]:
@@ -357,7 +368,9 @@ Examples:
         return cleaned
 
     # Optional LLM intent parser (enable via artifacts.config.use_llm_intent_parser).
-    def _parse_intent(msgs: Sequence[BaseMessage], *, use_llm: bool = False) -> dict[str, bool]:
+    def _parse_intent(
+        msgs: Sequence[BaseMessage], *, use_llm: bool = False
+    ) -> dict[str, bool]:
         last_human_text = ""
         for m in reversed(msgs or []):
             role = getattr(m, "role", getattr(m, "type", None))
@@ -425,15 +438,18 @@ Examples:
             "snake case",
             "snake_case",
         )
-        wants_wrangling = has(
-            "wrangle",
-            "transform",
-            "reshape",
-            "pivot",
-            "melt",
-            "rename",
-            "format",
-        ) or standardize_column_names
+        wants_wrangling = (
+            has(
+                "wrangle",
+                "transform",
+                "reshape",
+                "pivot",
+                "melt",
+                "rename",
+                "format",
+            )
+            or standardize_column_names
+        )
         wants_eda = has(
             "describe", "eda", "summary", "correlation", "sweetviz", "missingness"
         )
@@ -473,19 +489,16 @@ Examples:
         # "model" is ambiguous (e.g., a product "bike model" vs an ML model). Prefer a conservative
         # interpretation: only trigger ML modeling when the user explicitly requests training/AutoML/prediction,
         # or when ML terminology appears without a feature-engineering intent.
-        explicit_modeling = (
-            has(
-                "train",
-                "automl",
-                "fit",
-                "tune",
-                "cross-validation",
-                "cross validation",
-                "cv",
-                "hyperparameter",
-            )
-            or has_word("predict")
-        )
+        explicit_modeling = has(
+            "train",
+            "automl",
+            "fit",
+            "tune",
+            "cross-validation",
+            "cross validation",
+            "cv",
+            "hyperparameter",
+        ) or has_word("predict")
         ml_context = has(
             "classification",
             "classify",
@@ -508,7 +521,9 @@ Examples:
             "phone model",
             "vehicle model",
         ) or (wants_viz and has("by model", "per model", "for each model"))
-        model_ready_context = has("model-ready", "model ready", "model-ready data", "model ready data")
+        model_ready_context = has(
+            "model-ready", "model ready", "model-ready data", "model ready data"
+        )
         wants_model = bool(
             ml_signal
             or (
@@ -627,7 +642,7 @@ Examples:
                 "- If `mlflow_log` or `mlflow_tools` is true, set `mlflow` true.\n"
                 "- If `workflow` is true, you may also set common steps true (clean/eda/viz/model/evaluate).\n"
             )
-            intent_llm = llm.bind(temperature=0) if hasattr(llm, "bind") else llm
+            intent_llm = llm.bind(temperature=1.0) if hasattr(llm, "bind") else llm
             raw = intent_llm.invoke(
                 [
                     SystemMessage(content=intent_prompt),
@@ -694,7 +709,16 @@ Examples:
             "melt",
             "rename",
         )
-        explicit_cleaning = has("clean", "impute", "missing", "null", "na", "outlier", "duplicate", "deduplicate")
+        explicit_cleaning = has(
+            "clean",
+            "impute",
+            "missing",
+            "null",
+            "na",
+            "outlier",
+            "duplicate",
+            "deduplicate",
+        )
         if bool(feature_action) and not explicit_wrangling:
             llm_intents["wrangle"] = False
         if bool(feature_action) and not explicit_cleaning:
@@ -729,9 +753,13 @@ Examples:
         except Exception:
             pass
         cfg = (state.get("artifacts") or {}).get("config") or {}
-        use_llm_intent_parser = bool(cfg.get("use_llm_intent_parser")) if isinstance(cfg, dict) else False
+        use_llm_intent_parser = (
+            bool(cfg.get("use_llm_intent_parser")) if isinstance(cfg, dict) else False
+        )
         intents = _parse_intent(clean_msgs, use_llm=use_llm_intent_parser)
-        proactive_mode = bool(cfg.get("proactive_workflow_mode")) if isinstance(cfg, dict) else False
+        proactive_mode = (
+            bool(cfg.get("proactive_workflow_mode")) if isinstance(cfg, dict) else False
+        )
 
         # Track per-user-request steps (within the current user message) to support
         # deterministic sequencing for multi-step prompts.
@@ -741,7 +769,9 @@ Examples:
             if role in ("human", "user"):
                 last_human_msg = m
                 break
-        current_request_id = getattr(last_human_msg, "id", None) if last_human_msg else None
+        current_request_id = (
+            getattr(last_human_msg, "id", None) if last_human_msg else None
+        )
 
         handled_request_id = state.get("handled_request_id")
         handled_steps: dict[str, bool] = dict(state.get("handled_steps") or {})
@@ -842,8 +872,16 @@ Examples:
             requested_dataset_id = None
 
         if requested_dataset_id and requested_dataset_id != active_dataset_id:
-            selected = datasets.get(requested_dataset_id) if isinstance(datasets, dict) else None
-            label = selected.get("label") if isinstance(selected, dict) else requested_dataset_id
+            selected = (
+                datasets.get(requested_dataset_id)
+                if isinstance(datasets, dict)
+                else None
+            )
+            label = (
+                selected.get("label")
+                if isinstance(selected, dict)
+                else requested_dataset_id
+            )
             msg = AIMessage(
                 content=f"Switched active dataset to `{label}` (`{requested_dataset_id}`).",
                 name="supervisor",
@@ -861,10 +899,19 @@ Examples:
                 "workflow_plan": state_plan,
             }
 
-        data_ready = _get_active_data(
-            state_with_datasets,
-            ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
-        ) is not None
+        data_ready = (
+            _get_active_data(
+                state_with_datasets,
+                [
+                    "data_cleaned",
+                    "data_wrangled",
+                    "data_sql",
+                    "data_raw",
+                    "feature_data",
+                ],
+            )
+            is not None
+        )
         last_worker = state.get("last_worker")
 
         def _loader_loaded_dataset(loader_artifacts: Any) -> bool:
@@ -876,7 +923,10 @@ Examples:
                 return False
             if isinstance(loader_artifacts, dict):
                 # Single load_file artifact shape: {"status":"ok","data":{...},...}
-                if loader_artifacts.get("status") == "ok" and loader_artifacts.get("data") is not None:
+                if (
+                    loader_artifacts.get("status") == "ok"
+                    and loader_artifacts.get("data") is not None
+                ):
                     return True
                 for key, val in loader_artifacts.items():
                     tool_name = str(key)
@@ -915,27 +965,57 @@ Examples:
                     handled_steps["load"] = True
                 if _loader_listed_directory(loader_art):
                     handled_steps["list_files"] = True
-            elif last_worker == "Data_Merge_Agent" and (state.get("artifacts") or {}).get("merge") is not None:
+            elif (
+                last_worker == "Data_Merge_Agent"
+                and (state.get("artifacts") or {}).get("merge") is not None
+            ):
                 handled_steps["merge"] = True
-            elif last_worker == "SQL_Database_Agent" and state.get("data_sql") is not None:
+            elif (
+                last_worker == "SQL_Database_Agent"
+                and state.get("data_sql") is not None
+            ):
                 handled_steps["sql"] = True
-            elif last_worker == "Data_Wrangling_Agent" and state.get("data_wrangled") is not None:
+            elif (
+                last_worker == "Data_Wrangling_Agent"
+                and state.get("data_wrangled") is not None
+            ):
                 handled_steps["wrangle"] = True
-            elif last_worker == "Data_Cleaning_Agent" and state.get("data_cleaned") is not None:
+            elif (
+                last_worker == "Data_Cleaning_Agent"
+                and state.get("data_cleaned") is not None
+            ):
                 handled_steps["clean"] = True
-            elif last_worker == "EDA_Tools_Agent" and state.get("eda_artifacts") is not None:
+            elif (
+                last_worker == "EDA_Tools_Agent"
+                and state.get("eda_artifacts") is not None
+            ):
                 handled_steps["eda"] = True
-            elif last_worker == "Data_Visualization_Agent" and state.get("viz_graph") is not None:
+            elif (
+                last_worker == "Data_Visualization_Agent"
+                and state.get("viz_graph") is not None
+            ):
                 handled_steps["viz"] = True
-            elif last_worker == "Feature_Engineering_Agent" and state.get("feature_data") is not None:
+            elif (
+                last_worker == "Feature_Engineering_Agent"
+                and state.get("feature_data") is not None
+            ):
                 handled_steps["feature"] = True
             elif last_worker == "H2O_ML_Agent" and state.get("model_info") is not None:
                 handled_steps["model"] = True
-            elif last_worker == "Model_Evaluation_Agent" and state.get("eval_artifacts") is not None:
+            elif (
+                last_worker == "Model_Evaluation_Agent"
+                and state.get("eval_artifacts") is not None
+            ):
                 handled_steps["evaluate"] = True
-            elif last_worker == "MLflow_Logging_Agent" and state.get("mlflow_artifacts") is not None:
+            elif (
+                last_worker == "MLflow_Logging_Agent"
+                and state.get("mlflow_artifacts") is not None
+            ):
                 handled_steps["mlflow_log"] = True
-            elif last_worker == "MLflow_Tools_Agent" and state.get("mlflow_artifacts") is not None:
+            elif (
+                last_worker == "MLflow_Tools_Agent"
+                and state.get("mlflow_artifacts") is not None
+            ):
                 handled_steps["mlflow_tools"] = True
 
         step_to_worker = {
@@ -991,11 +1071,27 @@ Examples:
         plan_notes: list[str] = []
         planner_messages: list[BaseMessage] = []
         planned_target: Optional[str] = state.get("target_variable")
-        if use_planner and workflow_planner_agent is not None and current_request_id is not None:
+        if (
+            use_planner
+            and workflow_planner_agent is not None
+            and current_request_id is not None
+        ):
             if state_plan_req == current_request_id and isinstance(state_plan, dict):
-                planned_steps = state_plan.get("steps") if isinstance(state_plan.get("steps"), list) else None
-                plan_questions = state_plan.get("questions") if isinstance(state_plan.get("questions"), list) else []
-                plan_notes = state_plan.get("notes") if isinstance(state_plan.get("notes"), list) else []
+                planned_steps = (
+                    state_plan.get("steps")
+                    if isinstance(state_plan.get("steps"), list)
+                    else None
+                )
+                plan_questions = (
+                    state_plan.get("questions")
+                    if isinstance(state_plan.get("questions"), list)
+                    else []
+                )
+                plan_notes = (
+                    state_plan.get("notes")
+                    if isinstance(state_plan.get("notes"), list)
+                    else []
+                )
             else:
                 # Provide a minimal context snapshot to help planning.
                 context = {
@@ -1017,9 +1113,17 @@ Examples:
                     plan = workflow_planner_agent.response or {}
                 except Exception:
                     plan = {}
-                planned_steps = plan.get("steps") if isinstance(plan.get("steps"), list) else None
-                plan_questions = plan.get("questions") if isinstance(plan.get("questions"), list) else []
-                plan_notes = plan.get("notes") if isinstance(plan.get("notes"), list) else []
+                planned_steps = (
+                    plan.get("steps") if isinstance(plan.get("steps"), list) else None
+                )
+                plan_questions = (
+                    plan.get("questions")
+                    if isinstance(plan.get("questions"), list)
+                    else []
+                )
+                plan_notes = (
+                    plan.get("notes") if isinstance(plan.get("notes"), list) else []
+                )
                 planned_target = plan.get("target_variable") or planned_target
                 state_plan_req = current_request_id
                 state_plan = {
@@ -1030,16 +1134,22 @@ Examples:
                 }
                 if planned_steps:
                     pretty_steps = " → ".join(str(s) for s in planned_steps)
-                    note_text = "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                    note_text = (
+                        "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                    )
                     msg = f"Planned workflow: {pretty_steps}"
                     if note_text:
                         msg = msg + "\n\nNotes:\n" + note_text
-                    planner_messages = [AIMessage(content=msg, name="workflow_planner_agent")]
+                    planner_messages = [
+                        AIMessage(content=msg, name="workflow_planner_agent")
+                    ]
 
             # If the planner needs user input, ask and stop.
             if plan_questions and not (planned_steps and len(planned_steps) > 0):
                 question_text = "\n".join(f"- {q}" for q in plan_questions)
-                note_text = "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                note_text = (
+                    "\n".join(f"- {n}" for n in plan_notes) if plan_notes else ""
+                )
                 msg = "To run the workflow, I need:\n" + question_text
                 if note_text:
                     msg = msg + "\n\nNotes:\n" + note_text
@@ -1112,8 +1222,14 @@ Examples:
                         intents.get("evaluate"),
                     ]
                 )
-                if not data_ready and needs_data and not (
-                    intents.get("load") or intents.get("load_only") or intents.get("sql")
+                if (
+                    not data_ready
+                    and needs_data
+                    and not (
+                        intents.get("load")
+                        or intents.get("load_only")
+                        or intents.get("sql")
+                    )
                 ):
                     steps.insert(0, "load")
 
@@ -1165,7 +1281,11 @@ Examples:
                     if attempted_steps.get(step) and not handled_steps.get(step):
                         print(f"  step '{step}' already attempted -> FINISH")
                         return {
-                            **({"messages": planner_messages} if planner_messages else {}),
+                            **(
+                                {"messages": planner_messages}
+                                if planner_messages
+                                else {}
+                            ),
                             "next": "FINISH",
                             "active_data_key": active_data_key,
                             "datasets": datasets,
@@ -1179,11 +1299,30 @@ Examples:
                         }
 
                     # Guard data-dependent steps.
-                    if step in ("merge", "wrangle", "clean", "eda", "viz", "feature", "model", "evaluate") and not data_ready:
-                        print(f"  step '{step}' requires data but none is ready -> Data_Loader_Tools_Agent")
+                    if (
+                        step
+                        in (
+                            "merge",
+                            "wrangle",
+                            "clean",
+                            "eda",
+                            "viz",
+                            "feature",
+                            "model",
+                            "evaluate",
+                        )
+                        and not data_ready
+                    ):
+                        print(
+                            f"  step '{step}' requires data but none is ready -> Data_Loader_Tools_Agent"
+                        )
                         attempted_steps["load"] = True
                         return {
-                            **({"messages": planner_messages} if planner_messages else {}),
+                            **(
+                                {"messages": planner_messages}
+                                if planner_messages
+                                else {}
+                            ),
                             "next": "Data_Loader_Tools_Agent",
                             "active_data_key": active_data_key,
                             "datasets": datasets,
@@ -1231,7 +1370,9 @@ Examples:
             {"messages": clean_msgs, "last_worker": state.get("last_worker")}
         )
         next_worker = result.get("next")
-        print(f"  data_ready={data_ready}, last_worker={last_worker}, router_next={next_worker}")
+        print(
+            f"  data_ready={data_ready}, last_worker={last_worker}, router_next={next_worker}"
+        )
 
         # Intent-aware override when data is present
         if data_ready:
@@ -1277,7 +1418,9 @@ Examples:
         }
 
     def _trim_messages(
-        msgs: Sequence[BaseMessage], max_messages: int = TEAM_MAX_MESSAGES, max_chars: int = TEAM_MAX_MESSAGE_CHARS
+        msgs: Sequence[BaseMessage],
+        max_messages: int = TEAM_MAX_MESSAGES,
+        max_chars: int = TEAM_MAX_MESSAGE_CHARS,
     ) -> list[BaseMessage]:
         trimmed: list[BaseMessage] = []
         for m in list(msgs or [])[-max_messages:]:
@@ -1297,9 +1440,7 @@ Examples:
             trimmed.append(m)
         return trimmed
 
-    def _merge_messages(
-        before_messages: Sequence[BaseMessage], response: dict
-    ) -> dict:
+    def _merge_messages(before_messages: Sequence[BaseMessage], response: dict) -> dict:
         response_msgs = list(response.get("messages") or [])
         if not response_msgs:
             return {"messages": []}
@@ -1390,7 +1531,9 @@ Examples:
         except Exception:
             return None
 
-    def _format_dataset_with_llm(df_dict: dict, last_human: str, max_rows: int = 10, max_cols: int = 6):
+    def _format_dataset_with_llm(
+        df_dict: dict, last_human: str, max_rows: int = 10, max_cols: int = 6
+    ):
         """
         Ask the supervisor llm to summarize a dataset and include a small markdown table preview.
         df_dict is expected to be a column-oriented dict (like DataFrame.to_dict()).
@@ -1521,7 +1664,9 @@ Examples:
 
     def _dataset_meta(
         data: Any,
-    ) -> tuple[Any, list[str] | None, list[dict[str, str]] | None, str | None, str | None]:
+    ) -> tuple[
+        Any, list[str] | None, list[dict[str, str]] | None, str | None, str | None
+    ]:
         df = _ensure_df(data)
         shape = _shape(df)
         cols = None
@@ -1546,10 +1691,18 @@ Examples:
                     for c in col_order[:DATASET_SCHEMA_MAX_COLS]
                 ]
                 schema_str = "|".join(f"{r['name']}:{r['dtype']}" for r in schema)
-                schema_hash = hashlib.sha256(schema_str.encode("utf-8")).hexdigest() if schema_str else None
+                schema_hash = (
+                    hashlib.sha256(schema_str.encode("utf-8")).hexdigest()
+                    if schema_str
+                    else None
+                )
 
                 # Fingerprint: stable hash over a capped row sample
-                df_sample = df.reindex(columns=col_order).head(DATASET_FINGERPRINT_MAX_ROWS).reset_index(drop=True)
+                df_sample = (
+                    df.reindex(columns=col_order)
+                    .head(DATASET_FINGERPRINT_MAX_ROWS)
+                    .reset_index(drop=True)
+                )
                 try:
                     from pandas.util import hash_pandas_object
 
@@ -1598,7 +1751,9 @@ Examples:
         keep = {did for _ts, did in items[:DATASET_REGISTRY_MAX]}
         return {did: datasets[did] for did in keep if did in datasets}
 
-    def _ensure_dataset_registry(state: SupervisorDSState) -> tuple[dict[str, Any], str | None]:
+    def _ensure_dataset_registry(
+        state: SupervisorDSState,
+    ) -> tuple[dict[str, Any], str | None]:
         datasets = state.get("datasets")
         datasets = datasets if isinstance(datasets, dict) else {}
         active_id = state.get("active_dataset_id")
@@ -1713,7 +1868,9 @@ Examples:
         ts = time.time()
         normalized_parents: list[str] = []
         if isinstance(parent_ids, (list, tuple)):
-            normalized_parents = [str(p) for p in parent_ids if isinstance(p, str) and p]
+            normalized_parents = [
+                str(p) for p in parent_ids if isinstance(p, str) and p
+            ]
         if parent_id and parent_id not in normalized_parents:
             normalized_parents = [parent_id, *normalized_parents]
         normalized_parents = [p for p in normalized_parents if p]
@@ -1863,7 +2020,9 @@ Examples:
             try:
                 print(f"  loader load_file_ok_items={len(load_file_ok_items)}")
                 for name, data in load_file_ok_items[:3]:
-                    print(f"    - ok {name}: data_type={type(data)} shape={_shape(data)}")
+                    print(
+                        f"    - ok {name}: data_type={type(data)} shape={_shape(data)}"
+                    )
             except Exception:
                 pass
 
@@ -1885,7 +2044,9 @@ Examples:
                 )
 
                 last_human_lower = last_human.lower()
-                if any(w in last_human_lower for w in ("load", "read", "import", "open")):
+                if any(
+                    w in last_human_lower for w in ("load", "read", "import", "open")
+                ):
                     requested = re.findall(
                         r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
                         last_human,
@@ -1935,7 +2096,9 @@ Examples:
                                 "load_file_deterministic_fallback": marker,
                             }
                         elif loader_artifacts is None:
-                            loader_artifacts = {"load_file_deterministic_fallback": marker}
+                            loader_artifacts = {
+                                "load_file_deterministic_fallback": marker
+                            }
             except Exception:
                 pass
 
@@ -2000,7 +2163,9 @@ Examples:
                 last_human_text = _get_last_human(before_msgs) or ""
                 last_human_lower = last_human_text.lower()
 
-                if any(w in last_human_lower for w in ("load", "read", "import", "open")):
+                if any(
+                    w in last_human_lower for w in ("load", "read", "import", "open")
+                ):
                     m = re.search(
                         r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
                         last_human_text,
@@ -2086,18 +2251,25 @@ Examples:
                     "error": None,
                 }
                 if isinstance(loader_artifacts, dict):
-                    loader_artifacts = {**loader_artifacts, "load_file_fallback": marker}
+                    loader_artifacts = {
+                        **loader_artifacts,
+                        "load_file_fallback": marker,
+                    }
                 else:
                     loader_artifacts = {"load_file_fallback": marker}
 
-        print(f"  loader data_raw shape={_shape(data_raw)} active_data_key={active_data_key}")
+        print(
+            f"  loader data_raw shape={_shape(data_raw)} active_data_key={active_data_key}"
+        )
 
         datasets, active_dataset_id = _ensure_dataset_registry(state)
         # Register newly loaded datasets in the dataset registry.
         if multi_file_load and multiple_loaded_datasets:
             try:
                 import os
-                from ai_data_science_team.tools.data_loader import resolve_existing_file_path
+                from ai_data_science_team.tools.data_loader import (
+                    resolve_existing_file_path,
+                )
 
                 state_for_register = {
                     **state,
@@ -2149,9 +2321,14 @@ Examples:
                 source = loaded_dataset_label
                 try:
                     import re
-                    from ai_data_science_team.tools.data_loader import resolve_existing_file_path
+                    from ai_data_science_team.tools.data_loader import (
+                        resolve_existing_file_path,
+                    )
 
-                    if not (isinstance(source, str) and ("." in source and os.path.sep in source)):
+                    if not (
+                        isinstance(source, str)
+                        and ("." in source and os.path.sep in source)
+                    ):
                         m = re.search(
                             r"(?:`|\"|')?([^\s'\"`]+\.(?:csv|tsv|parquet|xlsx?|jsonl|ndjson|json)(?:\.gz)?)",
                             last_human or "",
@@ -2159,7 +2336,9 @@ Examples:
                         )
                         requested = (m.group(1) if m else "").strip()
                         if requested:
-                            resolved_path, _matches = resolve_existing_file_path(requested)
+                            resolved_path, _matches = resolve_existing_file_path(
+                                requested
+                            )
                             if resolved_path is not None:
                                 source = str(resolved_path)
                             else:
@@ -2178,12 +2357,19 @@ Examples:
                 provenance = {
                     "source_type": "file",
                     "source": source or loaded_dataset_label,
-                    "original_name": os.path.basename(str(source or loaded_dataset_label or "")) or None,
+                    "original_name": os.path.basename(
+                        str(source or loaded_dataset_label or "")
+                    )
+                    or None,
                     "user_request": last_human,
                     "fallback_loader": bool(fallback_loaded_dataset),
                 }
                 datasets, active_dataset_id, _did = _register_dataset(
-                    {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
+                    {
+                        **state,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
+                    },
                     data=data_raw,
                     stage="raw",
                     label=str(label),
@@ -2198,9 +2384,15 @@ Examples:
         elif multiple_loaded_datasets:
             # Keep the already-loaded datasets available for explicit selection, but do not auto-switch.
             try:
-                state_for_register = {**state, "datasets": datasets, "active_dataset_id": active_dataset_id}
+                state_for_register = {
+                    **state,
+                    "datasets": datasets,
+                    "active_dataset_id": active_dataset_id,
+                }
                 # Register only the most recent N to avoid unbounded growth.
-                for fname, data in list(multiple_loaded_datasets)[-DATASET_REGISTRY_MAX:]:
+                for fname, data in list(multiple_loaded_datasets)[
+                    -DATASET_REGISTRY_MAX:
+                ]:
                     datasets, active_dataset_id, _did = _register_dataset(
                         state_for_register,
                         data=data,
@@ -2246,14 +2438,17 @@ Examples:
                 )
                 preview_txt = ""
                 try:
-                    df_active = pd.DataFrame(data_raw) if isinstance(data_raw, dict) else None
+                    df_active = (
+                        pd.DataFrame(data_raw) if isinstance(data_raw, dict) else None
+                    )
                     if df_active is not None:
                         preview_df = df_active.head(5)
                         max_cols = 10
                         if preview_df.shape[1] > max_cols:
                             preview_df = preview_df.iloc[:, :max_cols]
-                        preview_txt = "\n\nPreview (first 5 rows):\n\n" + preview_df.to_markdown(
-                            index=False
+                        preview_txt = (
+                            "\n\nPreview (first 5 rows):\n\n"
+                            + preview_df.to_markdown(index=False)
                         )
                 except Exception:
                     pass
@@ -2262,7 +2457,11 @@ Examples:
                     content=(
                         f"Loaded {len(multiple_loaded_datasets)} datasets:\n\n"
                         + "\n".join(lines)
-                        + (f"\n\nActive dataset: {active_label}." if active_label else "")
+                        + (
+                            f"\n\nActive dataset: {active_label}."
+                            if active_label
+                            else ""
+                        )
                         + preview_txt
                         + "\n\nUse the sidebar dataset selector to switch the active dataset, or use Pipeline Studio to merge them."
                     ),
@@ -2305,7 +2504,8 @@ Examples:
                                     {
                                         "filename": item.get("filename"),
                                         "type": item.get("type"),
-                                        "path": item.get("path") or item.get("filepath"),
+                                        "path": item.get("path")
+                                        or item.get("filepath"),
                                     }
                                 )
                                 continue
@@ -2313,18 +2513,32 @@ Examples:
                                 fp = item.get("file_path")
                                 import os
 
-                                fn = os.path.basename(fp) if isinstance(fp, str) else str(fp)
+                                fn = (
+                                    os.path.basename(fp)
+                                    if isinstance(fp, str)
+                                    else str(fp)
+                                )
                                 names.append(fn)
-                                rows.append({"filename": fn, "type": "file", "path": fp})
+                                rows.append(
+                                    {"filename": fn, "type": "file", "path": fp}
+                                )
                                 continue
                             if "absolute_path" in item or "name" in item:
                                 ap = item.get("absolute_path")
                                 import os
 
-                                fn = item.get("name") or (os.path.basename(ap) if isinstance(ap, str) else str(ap))
+                                fn = item.get("name") or (
+                                    os.path.basename(ap)
+                                    if isinstance(ap, str)
+                                    else str(ap)
+                                )
                                 names.append(fn)
                                 rows.append(
-                                    {"filename": fn, "type": item.get("type"), "path": ap}
+                                    {
+                                        "filename": fn,
+                                        "type": item.get("type"),
+                                        "path": ap,
+                                    }
                                 )
                                 continue
 
@@ -2347,14 +2561,24 @@ Examples:
                                 fp = v.get("file_path")
                                 import os
 
-                                fn = os.path.basename(fp) if isinstance(fp, str) else str(fp)
+                                fn = (
+                                    os.path.basename(fp)
+                                    if isinstance(fp, str)
+                                    else str(fp)
+                                )
                                 names.append(fn)
-                                rows.append({"filename": fn, "type": "file", "path": fp})
+                                rows.append(
+                                    {"filename": fn, "type": "file", "path": fp}
+                                )
                             elif "absolute_path" in v or "name" in v:
                                 ap = v.get("absolute_path")
                                 import os
 
-                                fn = v.get("name") or (os.path.basename(ap) if isinstance(ap, str) else str(ap))
+                                fn = v.get("name") or (
+                                    os.path.basename(ap)
+                                    if isinstance(ap, str)
+                                    else str(ap)
+                                )
                                 names.append(fn)
                                 rows.append(
                                     {"filename": fn, "type": v.get("type"), "path": ap}
@@ -2367,7 +2591,9 @@ Examples:
                             rows.append({"filename": str(v)})
 
                 last_human = _get_last_human(before_msgs).lower()
-                wants_csv_only = "csv" in last_human and ("list" in last_human or "files" in last_human)
+                wants_csv_only = "csv" in last_human and (
+                    "list" in last_human or "files" in last_human
+                )
                 if wants_csv_only and rows:
                     rows = [
                         r
@@ -2394,22 +2620,32 @@ Examples:
 
                         df_listing = pd.DataFrame(rows)
                         table_cols = [
-                            c for c in ["filename", "type", "path"] if c in df_listing.columns
+                            c
+                            for c in ["filename", "type", "path"]
+                            if c in df_listing.columns
                         ]
                         table_text = df_listing[table_cols].to_markdown(index=False)
                     # If the user asked for a table or better formatting, try a tiny LLM summary
-                    llm_text = _format_listing_with_llm(rows, last_human) if rows else None
+                    llm_text = (
+                        _format_listing_with_llm(rows, last_human) if rows else None
+                    )
                     if llm_text:
-                        summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
+                        summary_msg = AIMessage(
+                            content=llm_text, name="data_loader_agent"
+                        )
                     elif table_text:
                         summary_msg = AIMessage(
                             content=f"{msg_text}\n\n{table_text}",
                             name="data_loader_agent",
                         )
                     else:
-                        summary_msg = AIMessage(content=msg_text, name="data_loader_agent")
+                        summary_msg = AIMessage(
+                            content=msg_text, name="data_loader_agent"
+                        )
             except Exception:
-                summary_msg = AIMessage(content="Listed directory contents.", name="data_loader_agent")
+                summary_msg = AIMessage(
+                    content="Listed directory contents.", name="data_loader_agent"
+                )
         elif loaded_dataset is not None and isinstance(data_raw, dict):
             try:
                 import pandas as pd
@@ -2451,7 +2687,9 @@ Examples:
                         _get_last_human(before_msgs),
                     )
                     if llm_text:
-                        summary_msg = AIMessage(content=llm_text, name="data_loader_agent")
+                        summary_msg = AIMessage(
+                            content=llm_text, name="data_loader_agent"
+                        )
                     else:
                         summary_msg = AIMessage(
                             content=f"Loaded dataset with shape {df.shape}.{col_note}\n\n{table_md}",
@@ -2545,7 +2783,11 @@ Examples:
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
         datasets, active_dataset_id = _ensure_dataset_registry(state)
-        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        state_with_datasets = {
+            **(state or {}),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+        }
 
         cfg = (state.get("artifacts") or {}).get("config") or {}
         merge_cfg = cfg.get("merge") if isinstance(cfg, dict) else None
@@ -2580,7 +2822,11 @@ Examples:
                 if not isinstance(entry, dict):
                     continue
                 label = str(entry.get("label") or "").lower()
-                prov = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
+                prov = (
+                    entry.get("provenance")
+                    if isinstance(entry.get("provenance"), dict)
+                    else {}
+                )
                 original = str(prov.get("original_name") or "").lower()
                 source = str(prov.get("source") or "").lower()
                 if did.lower() in t:
@@ -2606,7 +2852,11 @@ Examples:
             selected_ids = [*selected_ids, *inferred]
 
         # Fallback: if only one is identified, use the active dataset plus the newest other dataset
-        if len(selected_ids) < 2 and isinstance(active_dataset_id, str) and active_dataset_id in datasets:
+        if (
+            len(selected_ids) < 2
+            and isinstance(active_dataset_id, str)
+            and active_dataset_id in datasets
+        ):
             selected_ids = [active_dataset_id]
             ordered = sorted(
                 datasets.items(),
@@ -2682,7 +2932,9 @@ Examples:
             except Exception:
                 axis = 0
             ignore_index = bool(merge_cfg.get("ignore_index", True))
-            merged_df = pd.concat(dfs, axis=axis, ignore_index=(ignore_index if axis == 0 else False))
+            merged_df = pd.concat(
+                dfs, axis=axis, ignore_index=(ignore_index if axis == 0 else False)
+            )
             merge_meta.update({"axis": axis, "ignore_index": ignore_index})
             merge_code_lines.append(
                 f"df = pd.concat([{', '.join([f'df_{i}' for i in range(len(dfs))])}], axis={axis}, ignore_index={ignore_index if axis == 0 else False})"
@@ -2710,7 +2962,10 @@ Examples:
                 if common:
                     preferred = sorted(
                         list(common),
-                        key=lambda c: (0 if "id" in str(c).lower() else 1, str(c).lower()),
+                        key=lambda c: (
+                            0 if "id" in str(c).lower() else 1,
+                            str(c).lower(),
+                        ),
                     )
                     on_cols = [preferred[0]]
 
@@ -2801,7 +3056,14 @@ Examples:
             f"Result shape: {getattr(merged_df, 'shape', None)}.",
             f"Active dataset id: `{merged_id}`.",
         ]
-        merged = {"messages": [AIMessage(content=" ".join([m for m in msg_lines if m]), name="data_merge_agent")]}
+        merged = {
+            "messages": [
+                AIMessage(
+                    content=" ".join([m for m in msg_lines if m]),
+                    name="data_merge_agent",
+                )
+            ]
+        }
         merged["messages"] = _tag_messages(merged.get("messages"), "data_merge_agent")
         downstream_resets = {
             "data_cleaned": None,
@@ -2835,11 +3097,21 @@ Examples:
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
         datasets, active_dataset_id = _ensure_dataset_registry(state)
-        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        state_with_datasets = {
+            **(state or {}),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+        }
         active_df = _ensure_df(
             _get_active_data(
                 state_with_datasets,
-                ["data_raw", "data_sql", "data_wrangled", "data_cleaned", "feature_data"],
+                [
+                    "data_raw",
+                    "data_sql",
+                    "data_wrangled",
+                    "data_cleaned",
+                    "feature_data",
+                ],
             )
         )
         if _is_empty_df(active_df):
@@ -2888,14 +3160,20 @@ Examples:
                         "user_request": last_human,
                         "transform": {
                             "kind": "python_function",
-                            "function_name": response.get("data_wrangler_function_name"),
-                            "function_path": response.get("data_wrangler_function_path"),
+                            "function_name": response.get(
+                                "data_wrangler_function_name"
+                            ),
+                            "function_path": response.get(
+                                "data_wrangler_function_path"
+                            ),
                             "function_code": _truncate_text(wrangler_code, 12000),
                             "code_sha256": wrangler_code_hash,
                             "recommended_steps": response.get("recommended_steps"),
                             "summary": response.get("data_wrangling_summary"),
                             "error": response.get("data_wrangler_error"),
-                            "error_log_path": response.get("data_wrangler_error_log_path"),
+                            "error_log_path": response.get(
+                                "data_wrangler_error_log_path"
+                            ),
                         },
                     },
                     parent_id=active_dataset_id,
@@ -2918,7 +3196,9 @@ Examples:
         return {
             **merged,
             "data_wrangled": data_wrangled,
-            "active_data_key": "data_wrangled" if data_wrangled is not None else state.get("active_data_key"),
+            "active_data_key": "data_wrangled"
+            if data_wrangled is not None
+            else state.get("active_data_key"),
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
             "artifacts": {
@@ -2934,11 +3214,21 @@ Examples:
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
         datasets, active_dataset_id = _ensure_dataset_registry(state)
-        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        state_with_datasets = {
+            **(state or {}),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+        }
         active_df = _ensure_df(
             _get_active_data(
                 state_with_datasets,
-                ["data_wrangled", "data_raw", "data_sql", "data_cleaned", "feature_data"],
+                [
+                    "data_wrangled",
+                    "data_raw",
+                    "data_sql",
+                    "data_cleaned",
+                    "feature_data",
+                ],
             )
         )
         if _is_empty_df(active_df):
@@ -2994,7 +3284,9 @@ Examples:
                             "recommended_steps": response.get("recommended_steps"),
                             "summary": response.get("data_cleaning_summary"),
                             "error": response.get("data_cleaner_error"),
-                            "error_log_path": response.get("data_cleaner_error_log_path"),
+                            "error_log_path": response.get(
+                                "data_cleaner_error_log_path"
+                            ),
                         },
                     },
                     parent_id=active_dataset_id,
@@ -3016,7 +3308,9 @@ Examples:
         return {
             **merged,
             "data_cleaned": data_cleaned,
-            "active_data_key": "data_cleaned" if data_cleaned is not None else state.get("active_data_key"),
+            "active_data_key": "data_cleaned"
+            if data_cleaned is not None
+            else state.get("active_data_key"),
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
             "artifacts": {
@@ -3059,7 +3353,11 @@ Examples:
                 sql_fn_hash = _sha256_text(sql_fn_full)
                 sql_fn = _truncate_text(sql_fn_full, 6000)
                 datasets, active_dataset_id, _did = _register_dataset(
-                    {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
+                    {
+                        **state,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
+                    },
                     data=data_sql,
                     stage="sql",
                     label="data_sql",
@@ -3073,8 +3371,12 @@ Examples:
                             "sql_sha256": sql_code_hash,
                             "sql_database_function": sql_fn,
                             "sql_database_function_sha256": sql_fn_hash,
-                            "sql_database_function_path": response.get("sql_database_function_path"),
-                            "sql_database_function_name": response.get("sql_database_function_name"),
+                            "sql_database_function_path": response.get(
+                                "sql_database_function_path"
+                            ),
+                            "sql_database_function_name": response.get(
+                                "sql_database_function_name"
+                            ),
                         },
                     },
                     parent_id=None,
@@ -3085,7 +3387,9 @@ Examples:
         return {
             **merged,
             "data_sql": data_sql,
-            "active_data_key": "data_sql" if data_sql is not None else state.get("active_data_key"),
+            "active_data_key": "data_sql"
+            if data_sql is not None
+            else state.get("active_data_key"),
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
             "artifacts": {
@@ -3093,8 +3397,12 @@ Examples:
                 "sql": {
                     "sql_query_code": response.get("sql_query_code"),
                     "sql_database_function": response.get("sql_database_function"),
-                    "sql_database_function_path": response.get("sql_database_function_path"),
-                    "sql_database_function_name": response.get("sql_database_function_name"),
+                    "sql_database_function_path": response.get(
+                        "sql_database_function_path"
+                    ),
+                    "sql_database_function_name": response.get(
+                        "sql_database_function_name"
+                    ),
                     "data_sql": data_sql,
                 },
             },
@@ -3108,12 +3416,22 @@ Examples:
         feature_df = _ensure_df(state.get("feature_data"))
         wants_feature_engineered_report = (
             ("feature-engineered" in last_human or "feature engineered" in last_human)
-            and ("data" in last_human or "dataset" in last_human or "features" in last_human)
+            and (
+                "data" in last_human
+                or "dataset" in last_human
+                or "features" in last_human
+            )
         ) or ("engineered features" in last_human)
         active_df = _ensure_df(
             _get_active_data(
                 state,
-                ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
+                [
+                    "data_cleaned",
+                    "data_wrangled",
+                    "data_sql",
+                    "data_raw",
+                    "feature_data",
+                ],
             )
         )
         # If the user explicitly references feature-engineered data, prefer it for EDA/reporting.
@@ -3169,7 +3487,13 @@ Examples:
         active_df = _ensure_df(
             _get_active_data(
                 state,
-                ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
+                [
+                    "data_cleaned",
+                    "data_wrangled",
+                    "data_sql",
+                    "data_raw",
+                    "feature_data",
+                ],
             )
         )
         if _is_empty_df(active_df):
@@ -3198,7 +3522,13 @@ Examples:
 
             fig = plotly_from_dict(plotly_graph) if plotly_graph else None
             trace_types = (
-                sorted({getattr(t, "type", None) for t in getattr(fig, "data", []) if getattr(t, "type", None)})
+                sorted(
+                    {
+                        getattr(t, "type", None)
+                        for t in getattr(fig, "data", [])
+                        if getattr(t, "type", None)
+                    }
+                )
                 if fig is not None
                 else []
             )
@@ -3208,7 +3538,9 @@ Examples:
                     title = getattr(getattr(fig.layout, "title", None), "text", None)
                 except Exception:
                     title = None
-            viz_summary = response.get("data_visualization_summary") or "Visualization generated."
+            viz_summary = (
+                response.get("data_visualization_summary") or "Visualization generated."
+            )
             if trace_types:
                 viz_summary = f"{viz_summary} Trace types: {', '.join(trace_types)}."
             if title:
@@ -3238,11 +3570,21 @@ Examples:
         before_msgs = list(state.get("messages", []) or [])
         last_human = _get_last_human(before_msgs)
         datasets, active_dataset_id = _ensure_dataset_registry(state)
-        state_with_datasets = {**(state or {}), "datasets": datasets, "active_dataset_id": active_dataset_id}
+        state_with_datasets = {
+            **(state or {}),
+            "datasets": datasets,
+            "active_dataset_id": active_dataset_id,
+        }
         active_df = _ensure_df(
             _get_active_data(
                 state_with_datasets,
-                ["data_cleaned", "data_wrangled", "data_sql", "data_raw", "feature_data"],
+                [
+                    "data_cleaned",
+                    "data_wrangled",
+                    "data_sql",
+                    "data_raw",
+                    "feature_data",
+                ],
             )
         )
         if _is_empty_df(active_df):
@@ -3291,13 +3633,19 @@ Examples:
                         "user_request": last_human,
                         "transform": {
                             "kind": "python_function",
-                            "function_name": response.get("feature_engineer_function_name"),
-                            "function_path": response.get("feature_engineer_function_path"),
+                            "function_name": response.get(
+                                "feature_engineer_function_name"
+                            ),
+                            "function_path": response.get(
+                                "feature_engineer_function_path"
+                            ),
                             "function_code": _truncate_text(fe_code, 12000),
                             "code_sha256": fe_code_hash,
                             "recommended_steps": response.get("recommended_steps"),
                             "error": response.get("feature_engineer_error"),
-                            "error_log_path": response.get("feature_engineer_error_log_path"),
+                            "error_log_path": response.get(
+                                "feature_engineer_error_log_path"
+                            ),
                         },
                     },
                     parent_id=active_dataset_id,
@@ -3318,7 +3666,9 @@ Examples:
         return {
             **merged,
             "feature_data": feature_data,
-            "active_data_key": "feature_data" if feature_data is not None else state.get("active_data_key"),
+            "active_data_key": "feature_data"
+            if feature_data is not None
+            else state.get("active_data_key"),
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
             "artifacts": {
@@ -3338,7 +3688,13 @@ Examples:
         active_df = _ensure_df(
             _get_active_data(
                 state,
-                ["feature_data", "data_cleaned", "data_wrangled", "data_sql", "data_raw"],
+                [
+                    "feature_data",
+                    "data_cleaned",
+                    "data_wrangled",
+                    "data_sql",
+                    "data_raw",
+                ],
             )
         )
         if _is_empty_df(active_df):
@@ -3355,7 +3711,8 @@ Examples:
         # If user asks for prediction/scoring, use an existing model in the H2O cluster
         # instead of retraining AutoML.
         if isinstance(last_human, str) and any(
-            w in last_human.lower() for w in ("predict", "prediction", "score", "scoring", "inference")
+            w in last_human.lower()
+            for w in ("predict", "prediction", "score", "scoring", "inference")
         ):
             import re
 
@@ -3416,14 +3773,20 @@ Examples:
 
                             def _run_has_model_artifact(rid: str) -> bool:
                                 try:
-                                    return bool(client.list_artifacts(rid, path="model"))
+                                    return bool(
+                                        client.list_artifacts(rid, path="model")
+                                    )
                                 except Exception:
                                     return False
 
                             # Prefer the newest run that actually contains a logged model.
                             for r in runs or []:
                                 rid = getattr(getattr(r, "info", None), "run_id", None)
-                                if isinstance(rid, str) and rid and _run_has_model_artifact(rid):
+                                if (
+                                    isinstance(rid, str)
+                                    and rid
+                                    and _run_has_model_artifact(rid)
+                                ):
                                     run_id = rid
                                     break
                     except Exception:
@@ -3454,7 +3817,9 @@ Examples:
                             client = MlflowClient()
                             has_model = any(
                                 getattr(item, "path", None) == "model"
-                                for item in client.list_artifacts(run_id.strip(), path="")
+                                for item in client.list_artifacts(
+                                    run_id.strip(), path=""
+                                )
                             )
                         except Exception:
                             has_model = True
@@ -3480,7 +3845,9 @@ Examples:
                         except Exception:
                             model = mlflow.pyfunc.load_model(model_uri)
 
-                        if hasattr(model, "predict") and not hasattr(model, "_model_json"):
+                        if hasattr(model, "predict") and not hasattr(
+                            model, "_model_json"
+                        ):
                             # Likely a pyfunc wrapper; predict directly.
                             raw_preds = model.predict(x_df)
                             if isinstance(raw_preds, pd.DataFrame):
@@ -3494,10 +3861,24 @@ Examples:
                             # Coerce expected categorical columns to factor.
                             try:
                                 out_json = getattr(model, "_model_json", {}) or {}
-                                output = out_json.get("output") if isinstance(out_json, dict) else {}
-                                names = output.get("names") if isinstance(output, dict) else None
-                                domains = output.get("domains") if isinstance(output, dict) else None
-                                if isinstance(names, list) and isinstance(domains, list):
+                                output = (
+                                    out_json.get("output")
+                                    if isinstance(out_json, dict)
+                                    else {}
+                                )
+                                names = (
+                                    output.get("names")
+                                    if isinstance(output, dict)
+                                    else None
+                                )
+                                domains = (
+                                    output.get("domains")
+                                    if isinstance(output, dict)
+                                    else None
+                                )
+                                if isinstance(names, list) and isinstance(
+                                    domains, list
+                                ):
                                     for col, dom in zip(names, domains):
                                         if dom is None:
                                             continue
@@ -3571,9 +3952,7 @@ Examples:
 
                     try:
                         preview_md = preds_df.head(5).to_markdown(index=False)
-                        msg = (
-                            f"Scored dataset with MLflow run `{run_id}`. Predictions shape: {preds_df.shape}.\n\n{preview_md}"
-                        )
+                        msg = f"Scored dataset with MLflow run `{run_id}`. Predictions shape: {preds_df.shape}.\n\n{preview_md}"
                     except Exception:
                         msg = f"Scored dataset with MLflow run `{run_id}`."
 
@@ -3608,7 +3987,11 @@ Examples:
 
             # Best-effort: drop target column if present so we score only features.
             target = state.get("target_variable")
-            target = target if isinstance(target, str) and target in active_df.columns else None
+            target = (
+                target
+                if isinstance(target, str) and target in active_df.columns
+                else None
+            )
             x_df = active_df.drop(columns=[target]) if target else active_df
 
             try:
@@ -3622,7 +4005,11 @@ Examples:
                 try:
                     preds_df.insert(0, "row_id", range(len(preds_df)))
                     if target:
-                        preds_df.insert(1, f"actual_{target}", active_df[target].reset_index(drop=True))
+                        preds_df.insert(
+                            1,
+                            f"actual_{target}",
+                            active_df[target].reset_index(drop=True),
+                        )
                 except Exception:
                     pass
                 preds_data = preds_df.to_dict()
@@ -3646,7 +4033,11 @@ Examples:
             try:
                 label = f"predictions_{model_id}"[:80]
                 datasets, active_dataset_id, pred_id = _register_dataset(
-                    {**state, "datasets": datasets, "active_dataset_id": active_dataset_id},
+                    {
+                        **state,
+                        "datasets": datasets,
+                        "active_dataset_id": active_dataset_id,
+                    },
                     data=preds_data,
                     stage="wrangled",
                     label=label,
@@ -3779,8 +4170,14 @@ Examples:
         print("---MODEL EVALUATION---")
         before_msgs = list(state.get("messages", []) or [])
         feature_df = _ensure_df(state.get("feature_data"))
-        active_df = feature_df if not _is_empty_df(feature_df) else _ensure_df(
-            _get_active_data(state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"])
+        active_df = (
+            feature_df
+            if not _is_empty_df(feature_df)
+            else _ensure_df(
+                _get_active_data(
+                    state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"]
+                )
+            )
         )
         if _is_empty_df(active_df):
             return {
@@ -3802,7 +4199,9 @@ Examples:
         )
         response = model_evaluation_agent.response or {}
         merged = _merge_messages(before_msgs, response)
-        merged["messages"] = _tag_messages(merged.get("messages"), "model_evaluation_agent")
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "model_evaluation_agent"
+        )
         eval_artifacts = response.get("eval_artifacts")
         plotly_graph = response.get("plotly_graph")
         return {
@@ -3830,7 +4229,9 @@ Examples:
             cfg = {}
 
         tracking_uri = cfg.get("mlflow_tracking_uri") if isinstance(cfg, dict) else None
-        artifact_root = cfg.get("mlflow_artifact_root") if isinstance(cfg, dict) else None
+        artifact_root = (
+            cfg.get("mlflow_artifact_root") if isinstance(cfg, dict) else None
+        )
         experiment_name = (
             cfg.get("mlflow_experiment_name") if isinstance(cfg, dict) else None
         )
@@ -3846,8 +4247,14 @@ Examples:
                 run_id = h2o_art["model_results"].get("mlflow_run_id")
 
         feature_df = _ensure_df(state.get("feature_data"))
-        active_df = feature_df if not _is_empty_df(feature_df) else _ensure_df(
-            _get_active_data(state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"])
+        active_df = (
+            feature_df
+            if not _is_empty_df(feature_df)
+            else _ensure_df(
+                _get_active_data(
+                    state, ["data_cleaned", "data_wrangled", "data_sql", "data_raw"]
+                )
+            )
         )
         viz_graph = state.get("viz_graph")
         eval_payload = (state.get("artifacts") or {}).get("eval")
@@ -3876,7 +4283,9 @@ Examples:
                     if isinstance(artifact_root, str) and artifact_root.strip():
                         root = Path(artifact_root).expanduser().resolve()
                         root.mkdir(parents=True, exist_ok=True)
-                        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(experiment_name)).strip("_")
+                        safe = re.sub(
+                            r"[^A-Za-z0-9._-]+", "_", str(experiment_name)
+                        ).strip("_")
                         safe = safe or "experiment"
                         artifact_location = (root / safe).as_uri()
                         client = MlflowClient(tracking_uri=tracking_uri)
@@ -3909,7 +4318,10 @@ Examples:
                 # Log a small dataset preview + schema
                 if active_df is not None and not _is_empty_df(active_df):
                     try:
-                        mlflow.log_table(active_df.head(200), artifact_file="tables/data_preview.json")
+                        mlflow.log_table(
+                            active_df.head(200),
+                            artifact_file="tables/data_preview.json",
+                        )
                         logged["tables"].append("tables/data_preview.json")
                     except Exception:
                         pass
@@ -3928,7 +4340,9 @@ Examples:
 
                 # Log pipeline (dataset lineage + reproduction script)
                 try:
-                    from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
+                    from ai_data_science_team.utils.pipeline import (
+                        build_pipeline_snapshot,
+                    )
 
                     ds = state.get("datasets")
                     ds = ds if isinstance(ds, dict) else {}
@@ -3938,11 +4352,15 @@ Examples:
                     if isinstance(pipe, dict) and pipe.get("lineage"):
                         pipe_spec = dict(pipe)
                         script = pipe_spec.pop("script", None)
-                        mlflow.log_dict(pipe_spec, artifact_file="pipeline/pipeline_spec.json")
+                        mlflow.log_dict(
+                            pipe_spec, artifact_file="pipeline/pipeline_spec.json"
+                        )
                         logged["dicts"].append("pipeline/pipeline_spec.json")
                         if isinstance(script, str) and script.strip():
                             if hasattr(mlflow, "log_text"):
-                                mlflow.log_text(script, artifact_file="pipeline/pipeline_repro.py")
+                                mlflow.log_text(
+                                    script, artifact_file="pipeline/pipeline_repro.py"
+                                )
                                 logged["dicts"].append("pipeline/pipeline_repro.py")
                             else:
                                 mlflow.log_dict(
@@ -3952,7 +4370,9 @@ Examples:
                                 logged["dicts"].append("pipeline/pipeline_repro.json")
                         try:
                             if pipe.get("pipeline_hash"):
-                                mlflow.set_tag("pipeline_hash", str(pipe.get("pipeline_hash")))
+                                mlflow.set_tag(
+                                    "pipeline_hash", str(pipe.get("pipeline_hash"))
+                                )
                         except Exception:
                             pass
                 except Exception:
@@ -3977,12 +4397,19 @@ Examples:
                 # Log evaluation artifacts + metrics + plot
                 if eval_artifacts:
                     try:
-                        mlflow.log_dict(eval_artifacts, artifact_file="evaluation/eval_artifacts.json")
+                        mlflow.log_dict(
+                            eval_artifacts,
+                            artifact_file="evaluation/eval_artifacts.json",
+                        )
                         logged["dicts"].append("evaluation/eval_artifacts.json")
                     except Exception:
                         pass
                     try:
-                        metrics = eval_artifacts.get("metrics") if isinstance(eval_artifacts, dict) else None
+                        metrics = (
+                            eval_artifacts.get("metrics")
+                            if isinstance(eval_artifacts, dict)
+                            else None
+                        )
                         if isinstance(metrics, dict):
                             safe = {}
                             for k, v in metrics.items():
@@ -3997,7 +4424,9 @@ Examples:
                         pass
                 if eval_plot:
                     try:
-                        mlflow.log_dict(eval_plot, artifact_file="evaluation/eval_plot.json")
+                        mlflow.log_dict(
+                            eval_plot, artifact_file="evaluation/eval_plot.json"
+                        )
                         logged["dicts"].append("evaluation/eval_plot.json")
                     except Exception:
                         pass
@@ -4005,7 +4434,9 @@ Examples:
                         import plotly.io as pio
 
                         fig = pio.from_json(json.dumps(eval_plot))
-                        mlflow.log_figure(fig, artifact_file="evaluation/eval_plot.html")
+                        mlflow.log_figure(
+                            fig, artifact_file="evaluation/eval_plot.html"
+                        )
                         logged["figures"].append("evaluation/eval_plot.html")
                     except Exception:
                         pass
@@ -4020,10 +4451,26 @@ Examples:
                 "Logged: "
                 + ", ".join(
                     [
-                        *([f"{len(logged['tables'])} table(s)"] if logged["tables"] else []),
-                        *([f"{len(logged['figures'])} figure(s)"] if logged["figures"] else []),
-                        *([f"{len(logged['dicts'])} json artifact(s)"] if logged["dicts"] else []),
-                        *([f"{len(logged['metrics'])} metric(s)"] if logged["metrics"] else []),
+                        *(
+                            [f"{len(logged['tables'])} table(s)"]
+                            if logged["tables"]
+                            else []
+                        ),
+                        *(
+                            [f"{len(logged['figures'])} figure(s)"]
+                            if logged["figures"]
+                            else []
+                        ),
+                        *(
+                            [f"{len(logged['dicts'])} json artifact(s)"]
+                            if logged["dicts"]
+                            else []
+                        ),
+                        *(
+                            [f"{len(logged['metrics'])} metric(s)"]
+                            if logged["metrics"]
+                            else []
+                        ),
                     ]
                 )
                 + "."
@@ -4035,7 +4482,9 @@ Examples:
 
         msg = "\n".join(message_lines)
         merged = {"messages": [AIMessage(content=msg, name="mlflow_logging_agent")]}
-        merged["messages"] = _tag_messages(merged.get("messages"), "mlflow_logging_agent")
+        merged["messages"] = _tag_messages(
+            merged.get("messages"), "mlflow_logging_agent"
+        )
         return {
             **merged,
             "mlflow_artifacts": {"run_id": run_id, "logged": logged},
@@ -4101,7 +4550,7 @@ class SupervisorDSTeam:
         model_evaluation_agent,
         workflow_planner_agent=None,
         checkpointer: Optional[Checkpointer] = None,
-        temperature: float = 0.0,
+        temperature: float = 1.0,
     ):
         self._params = {
             "model": model,

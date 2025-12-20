@@ -1,6 +1,6 @@
-# Supervisor Data Science Team App
+# AI Pipeline Studio App
 
-Streamlit chat app to exercise the new supervisor-led data science team.
+Streamlit chat app to exercise a data pipeline workflow with AI assistance.
 
 ## Requirements
 - Python 3.10+
@@ -14,7 +14,7 @@ pip install -e .
 
 ## Run
 ```bash
-streamlit run apps/supervisor-ds-team-app/app.py
+streamlit run apps/ai-pipeline-studio-app/app.py
 ```
 
 ## Notes

@@ -46,7 +46,7 @@ from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluatio
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
 from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
 
-TITLE = "AI Data Pipeline Studio"
+TITLE = "AI Pipeline Studio"
 st.set_page_config(page_title=TITLE, page_icon=":bar_chart:", layout="wide")
 st.title(TITLE)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
@@ -1184,11 +1184,17 @@ def _pipeline_studio_load_project(*, project_dir: str, rehydrate: bool = True) -
         metadata_only = str(data_mode).lower() == "metadata_only"
 
         datasets: dict[str, dict] = {}
+        missing_files: list[dict] = []
+        loaded_data_files = 0
         for did, meta in datasets_meta.items():
             if not isinstance(did, str) or not did or not isinstance(meta, dict):
                 continue
             entry = dict(meta)
             entry["id"] = did
+            if metadata_only:
+                entry["data"] = None
+                datasets[did] = entry
+                continue
             rel_path = meta.get("data_path")
             rel_path = rel_path if isinstance(rel_path, str) and rel_path else None
             fmt = meta.get("data_format")
@@ -1206,7 +1212,13 @@ def _pipeline_studio_load_project(*, project_dir: str, rehydrate: bool = True) -
                             df = pd.read_csv(abs_path)
                     except Exception:
                         df = None
+                else:
+                    missing_files.append(
+                        {"dataset_id": did, "data_path": rel_path, "format": fmt}
+                    )
             entry["data"] = df
+            if isinstance(df, pd.DataFrame):
+                loaded_data_files += 1
             datasets[did] = entry
 
         def _entry_parent_ids(entry_obj: dict) -> list[str]:
@@ -1603,6 +1615,8 @@ def _pipeline_studio_load_project(*, project_dir: str, rehydrate: bool = True) -
             "data_mode": "metadata_only" if metadata_only else "full",
             "rehydrate_stats": rehydrate_stats,
             "missing_sources": missing_sources,
+            "missing_files": missing_files,
+            "data_files_loaded": loaded_data_files,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -4052,9 +4066,10 @@ with st.sidebar:
                 "gpt-4.1",
                 "gpt-4o-mini",
                 "gpt-4o",
-                "gpt-5.2",
-                "gpt-5.1-mini",
+                "gpt-5-mini",
                 "gpt-5.1",
+                # "gpt-5.1-codex-mini",
+                "gpt-5.2",
             ],
             key="openai_model_choice",
         )
@@ -4497,7 +4512,23 @@ def build_team(
                 kwargs["base_url"] = base_url
         llm = ChatOllama(**kwargs)
     else:
-        llm = ChatOpenAI(model=model_name, api_key=openai_api_key)
+
+        def _openai_requires_responses(model: str | None) -> bool:
+            model = model.strip().lower() if isinstance(model, str) else ""
+            if not model:
+                return False
+            if "codex" in model:
+                return True
+            return model in {"gpt-5.1-codex-mini"}
+
+        llm_kwargs: dict[str, object] = {
+            "model": model_name,
+            "api_key": openai_api_key,
+        }
+        if _openai_requires_responses(model_name):
+            llm_kwargs["use_responses_api"] = True
+            llm_kwargs["output_version"] = "responses/v1"
+        llm = ChatOpenAI(**llm_kwargs)
     workflow_planner_agent = WorkflowPlannerAgent(llm)
     data_loader_agent = DataLoaderToolsAgent(
         llm, invoke_react_agent_kwargs={"recursion_limit": 4}
@@ -8577,35 +8608,61 @@ def _render_pipeline_studio() -> None:
                         data_mode = str(res.get("data_mode") or "full")
                         stats = res.get("rehydrate_stats")
                         stats = stats if isinstance(stats, dict) else {}
+                        missing_files = res.get("missing_files")
+                        missing_files = (
+                            missing_files if isinstance(missing_files, list) else []
+                        )
+                        data_files_loaded = int(res.get("data_files_loaded") or 0)
                         if data_mode == "metadata_only":
                             roots_loaded = int(stats.get("roots_loaded") or 0)
                             transforms_run = int(stats.get("transforms_run") or 0)
                             missing_sources = int(stats.get("missing_sources") or 0)
                             failures = int(stats.get("transform_failures") or 0)
                             suffix_bits = []
-                            if roots_loaded or transforms_run:
-                                suffix_bits.append(
-                                    f"rehydrated {roots_loaded + transforms_run}"
+                            if bool(rehydrate):
+                                if roots_loaded or transforms_run:
+                                    suffix_bits.append(
+                                        f"rehydrated {roots_loaded + transforms_run}"
+                                    )
+                                if missing_sources:
+                                    suffix_bits.append(
+                                        f"missing sources: {missing_sources}"
+                                    )
+                                if failures:
+                                    suffix_bits.append(f"transform errors: {failures}")
+                                suffix = (
+                                    f" ({', '.join(suffix_bits)})"
+                                    if suffix_bits
+                                    else ""
                                 )
-                            if missing_sources:
-                                suffix_bits.append(
-                                    f"missing sources: {missing_sources}"
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s){suffix}."
                                 )
-                            if failures:
-                                suffix_bits.append(f"transform errors: {failures}")
+                            else:
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s) (data not rehydrated)."
+                                )
+                        else:
+                            suffix_bits = []
+                            if data_files_loaded:
+                                suffix_bits.append(
+                                    f"loaded {data_files_loaded} data file(s)"
+                                )
+                            if missing_files:
+                                suffix_bits.append(
+                                    f"missing data files: {len(missing_files)}"
+                                )
                             suffix = (
                                 f" ({', '.join(suffix_bits)})" if suffix_bits else ""
                             )
                             st.session_state["pipeline_studio_project_notice"] = (
-                                f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s){suffix}."
-                            )
-                        else:
-                            st.session_state["pipeline_studio_project_notice"] = (
-                                f"Loaded project: {int(loaded_n or 0)} dataset(s)."
+                                f"Loaded project: {int(loaded_n or 0)} dataset(s){suffix}."
                             )
                         st.session_state["pipeline_studio_last_load_summary"] = {
                             "data_mode": data_mode,
                             "rehydrate_stats": stats,
+                            "data_files_loaded": data_files_loaded,
+                            "missing_files": missing_files,
                         }
                         st.session_state["pipeline_studio_loaded_project_dir"] = (
                             project_dir
@@ -8694,9 +8751,38 @@ def _render_pipeline_studio() -> None:
                             format_func=_fmt_project,
                             key="pipeline_studio_project_select",
                         )
+                        selected_manifest = None
+                        selected_project_dir = None
+                        if isinstance(selected_project, str) and selected_project:
+                            selected_project_dir = os.path.join(
+                                PIPELINE_STUDIO_PROJECTS_DIR, selected_project
+                            )
+                            selected_manifest = _pipeline_studio_load_project_manifest(
+                                project_dir=selected_project_dir
+                            )
+                        selected_mode = (
+                            str((selected_manifest or {}).get("data_mode") or "full")
+                            .strip()
+                            .lower()
+                        )
+                        selected_mode_label = (
+                            "metadata-only"
+                            if selected_mode == "metadata_only"
+                            else "full"
+                        )
+                        prev_selected = st.session_state.get(
+                            "pipeline_studio_project_select_prev"
+                        )
+                        if selected_project != prev_selected:
+                            st.session_state["pipeline_studio_project_select_prev"] = (
+                                selected_project
+                            )
+                            st.session_state["pipeline_studio_project_rehydrate"] = (
+                                selected_mode == "metadata_only"
+                            )
+                        st.caption(f"Project mode: **{selected_mode_label}**")
                         rehydrate = st.checkbox(
                             "Rebuild datasets from sources (metadata-only)",
-                            value=True,
                             key="pipeline_studio_project_rehydrate",
                             help="Attempts to reload source files and replay transforms when the project contains metadata only.",
                         )
@@ -8733,6 +8819,13 @@ def _render_pipeline_studio() -> None:
                         )
                         stats = load_summary.get("rehydrate_stats")
                         stats = stats if isinstance(stats, dict) else {}
+                        missing_files = load_summary.get("missing_files")
+                        missing_files = (
+                            missing_files if isinstance(missing_files, list) else []
+                        )
+                        data_files_loaded = int(
+                            load_summary.get("data_files_loaded") or 0
+                        )
                         stat_bits = []
                         if stats:
                             roots = int(stats.get("roots_loaded") or 0)
@@ -8745,6 +8838,15 @@ def _render_pipeline_studio() -> None:
                                 stat_bits.append(f"missing sources: {misses}")
                             if fails:
                                 stat_bits.append(f"transform errors: {fails}")
+                        if mode != "metadata-only":
+                            if data_files_loaded:
+                                stat_bits.append(
+                                    f"loaded data files: {data_files_loaded}"
+                                )
+                            if missing_files:
+                                stat_bits.append(
+                                    f"missing data files: {len(missing_files)}"
+                                )
                         badge = f"Last load: {mode}"
                         if stat_bits:
                             badge = f"{badge} · {', '.join(stat_bits)}"
@@ -8832,10 +8934,11 @@ def _render_pipeline_studio() -> None:
                         rows = []
                         for rec in filtered_projects:
                             mode = str(rec.get("data_mode") or "full").replace("_", "-")
+                            mode_badge = "META" if mode == "metadata-only" else "FULL"
                             rows.append(
                                 {
                                     "name": rec.get("name") or rec.get("dir_name"),
-                                    "data_mode": mode,
+                                    "mode": mode_badge,
                                     "datasets": int(rec.get("datasets_total") or 0),
                                     "saved": _pipeline_studio_format_ts(
                                         rec.get("saved_ts")
@@ -8858,8 +8961,22 @@ def _render_pipeline_studio() -> None:
                                     else "-",
                                 }
                             )
+                        df_rows = pd.DataFrame(rows)
+
+                        def _style_mode(val: object) -> str:
+                            val_str = str(val).strip().upper()
+                            if val_str == "META":
+                                return (
+                                    "background-color: rgba(88, 166, 255, 0.15);"
+                                    "color: #9cc9ff; font-weight: 600;"
+                                )
+                            return (
+                                "background-color: rgba(46, 160, 67, 0.15);"
+                                "color: #7ee787; font-weight: 600;"
+                            )
+
                         st.dataframe(
-                            rows,
+                            df_rows.style.applymap(_style_mode, subset=["mode"]),
                             use_container_width=True,
                             hide_index=True,
                         )
@@ -10961,6 +11078,96 @@ def _render_pipeline_studio() -> None:
                 }
                 if isinstance(pending_view, str) and pending_view in valid_views:
                     st.session_state["pipeline_studio_view"] = pending_view
+                entry = (
+                    studio_datasets.get(selected_node_id)
+                    if isinstance(studio_datasets, dict)
+                    else None
+                )
+                entry = entry if isinstance(entry, dict) else {}
+                df_sel = _dataset_entry_to_df(entry)
+                idx_map = st.session_state.get("pipeline_studio_artifacts")
+                idx_map = idx_map if isinstance(idx_map, dict) else {}
+                entry_art = idx_map.get(selected_node_id)
+                entry_art = entry_art if isinstance(entry_art, dict) else {}
+                fp = entry.get("fingerprint")
+                fp = fp if isinstance(fp, str) and fp else None
+                persisted_art = (
+                    _get_persisted_pipeline_studio_artifacts(fingerprint=fp)
+                    if fp
+                    else {}
+                )
+
+                def _artifact_payload(
+                    key: str, *, detail_key: str | None = None, field: str | None = None
+                ) -> object | None:
+                    rec = entry_art.get(key) if isinstance(entry_art, dict) else None
+                    rec = rec if isinstance(rec, dict) else {}
+                    if field and isinstance(rec.get(field), (dict, list, str)):
+                        return rec.get(field)
+                    if detail_key:
+                        detail = _latest_detail_for_dataset_id(
+                            selected_node_id, require_key=detail_key
+                        )
+                        if (
+                            isinstance(detail, dict)
+                            and detail.get(detail_key) is not None
+                        ):
+                            return detail.get(detail_key)
+                    persisted = (
+                        persisted_art.get(key)
+                        if isinstance(persisted_art, dict)
+                        else None
+                    )
+                    persisted = persisted if isinstance(persisted, dict) else {}
+                    if field and persisted.get(field) is not None:
+                        return persisted.get(field)
+                    return None
+
+                chart_json = _artifact_payload(
+                    "plotly_graph", detail_key="plotly_graph", field="json"
+                )
+                chart_count = 1 if chart_json else 0
+                eda_reports = _artifact_payload(
+                    "eda_reports", detail_key="eda_reports", field="reports"
+                )
+                if isinstance(eda_reports, dict):
+                    eda_count = sum(1 for v in eda_reports.values() if v)
+                else:
+                    eda_count = 1 if eda_reports else 0
+                model_info = _artifact_payload(
+                    "model_info", detail_key="model_info", field="info"
+                )
+                eval_art = _artifact_payload("eval_artifacts", field="artifacts")
+                eval_graph = _artifact_payload("eval_plotly_graph", field="json")
+                model_count = sum(1 for v in (model_info, eval_art, eval_graph) if v)
+                mlflow_art = _artifact_payload(
+                    "mlflow_artifacts", detail_key="mlflow_artifacts", field="artifacts"
+                )
+                mlflow_count = 1 if mlflow_art else 0
+                prov = (
+                    entry.get("provenance")
+                    if isinstance(entry.get("provenance"), dict)
+                    else {}
+                )
+                transform = (
+                    prov.get("transform")
+                    if isinstance(prov.get("transform"), dict)
+                    else {}
+                )
+                kind = str(transform.get("kind") or "")
+                pred_count = 1 if kind in {"mlflow_predict", "h2o_predict"} else 0
+                view_badges = {
+                    "Chart": int(chart_count),
+                    "EDA": int(eda_count),
+                    "Model": int(model_count),
+                    "Predictions": int(pred_count),
+                    "MLflow": int(mlflow_count),
+                }
+
+                def _view_label(view_name: str) -> str:
+                    count = view_badges.get(view_name, 0)
+                    return f"{view_name} ({count})" if count else view_name
+
                 view = st.radio(
                     "Workspace",
                     [
@@ -10974,16 +11181,9 @@ def _render_pipeline_studio() -> None:
                         "Visual Editor",
                     ],
                     horizontal=True,
+                    format_func=_view_label,
                     key="pipeline_studio_view",
                 )
-
-                entry = (
-                    studio_datasets.get(selected_node_id)
-                    if isinstance(studio_datasets, dict)
-                    else None
-                )
-                entry = entry if isinstance(entry, dict) else {}
-                df_sel = _dataset_entry_to_df(entry)
 
                 if view == "Table":
                     if df_sel is None:
@@ -14108,54 +14308,6 @@ open_studio_requested = bool(
 )
 if open_studio_requested:
     _open_pipeline_studio_dialog()
-drawer_open = bool(st.session_state.get("pipeline_studio_drawer_open", False))
-if not _pipeline_studio_is_docked():
-    drawer_open = False
-    st.session_state["pipeline_studio_drawer_open"] = False
-if drawer_open and _pipeline_studio_is_docked():
-    with drawer_placeholder.container():
-        st.markdown(
-            "\n".join(
-                [
-                    "<style>",
-                    "div[data-testid=\"stVerticalBlock\"]:has(#pipeline-studio-drawer-marker) {",
-                    "  height: calc(100vh - 220px);",
-                    "  max-height: 900px;",
-                    "  min-height: 320px;",
-                    "  overflow-y: auto;",
-                    "  padding: 0.75rem 0.75rem 1rem 0.75rem;",
-                    "  border: 1px solid rgba(255,255,255,0.08);",
-                    "  border-radius: 12px;",
-                    "  background: rgba(15, 15, 15, 0.45);",
-                    "}",
-                    "#pipeline-studio-drawer-marker {",
-                    "  display: none;",
-                    "}",
-                    "</style>",
-                ]
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<span id="pipeline-studio-drawer-marker"></span>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("### Pipeline Studio (Docked)")
-        c_drawer_close, _c_drawer_hint = st.columns(
-            [0.18, 0.82], vertical_alignment="center"
-        )
-        with c_drawer_close:
-            if st.button(
-                "Close Studio",
-                key="pipeline_studio_drawer_close",
-                use_container_width=True,
-            ):
-                st.session_state["pipeline_studio_drawer_open"] = False
-        with _c_drawer_hint:
-            st.caption("Docked view keeps Studio inline while you chat.")
-        _render_pipeline_studio_fragment()
-else:
-    drawer_placeholder.empty()
 
 st.markdown("---")
 st.subheader("Analysis Details")
@@ -14178,6 +14330,55 @@ else:
     except Exception as e:
         st.warning(f"Could not render analysis details: {e}")
 # Note: analysis details rendering is best-effort; errors should not break the app.
+
+drawer_open = bool(st.session_state.get("pipeline_studio_drawer_open", False))
+if not _pipeline_studio_is_docked():
+    drawer_open = False
+    st.session_state["pipeline_studio_drawer_open"] = False
+if drawer_open and _pipeline_studio_is_docked():
+    with drawer_placeholder.container():
+        st.markdown(
+            "\n".join(
+                [
+                    "<style>",
+                    'div[data-testid="stExpanderDetails"]:has(#pipeline-studio-drawer-marker) {',
+                    "  height: calc(100vh - 220px);",
+                    "  max-height: none;",
+                    "  min-height: 320px;",
+                    "  overflow-y: auto;",
+                    "  padding: 0.75rem 0.75rem 1rem 0.75rem;",
+                    "  border: 1px solid rgba(255,255,255,0.08);",
+                    "  border-radius: 12px;",
+                    "  background: rgba(15, 15, 15, 0.45);",
+                    "}",
+                    "#pipeline-studio-drawer-marker {",
+                    "  display: none;",
+                    "}",
+                    "</style>",
+                ]
+            ),
+            unsafe_allow_html=True,
+        )
+        with st.expander("Pipeline Studio (Docked)", expanded=True):
+            st.markdown(
+                '<span id="pipeline-studio-drawer-marker"></span>',
+                unsafe_allow_html=True,
+            )
+            c_drawer_close, _c_drawer_hint = st.columns(
+                [0.18, 0.82], vertical_alignment="center"
+            )
+            with c_drawer_close:
+                if st.button(
+                    "Close Studio",
+                    key="pipeline_studio_drawer_close",
+                    use_container_width=True,
+                ):
+                    st.session_state["pipeline_studio_drawer_open"] = False
+            with _c_drawer_hint:
+                st.caption("Docked view keeps Studio inline while you chat.")
+            _render_pipeline_studio_fragment()
+else:
+    drawer_placeholder.empty()
 
 st.markdown('<span id="pipeline-studio-fab-anchor"></span>', unsafe_allow_html=True)
 if st.button(

@@ -66,10 +66,12 @@ This plan proposes a **Pipeline Studio** experience that:
 - Project management + footprint controls:
   - Metadata-only project saves with preview samples + rehydrate from source
   - “Save project with data” (Parquet preferred; pickle fallback)
-  - Project dashboard (search/sort, tags/notes/archive, rename/duplicate, bulk delete)
+  - Project dashboard (search/sort, tags/notes/archive, rename/duplicate, bulk delete, mode badges)
   - Relink missing sources UI + rehydrate status summary
+  - Last-load status includes missing data files for full-data projects
   - Dataset cache controls (persist/restore off by default, cache limits, parquet/pickle)
   - Factory reset + start-new-project flow
+- Workspace tab badges indicate available artifacts per node (charts/EDA/model/predictions/MLflow)
 
 ## Proposed UX
 
@@ -358,8 +360,8 @@ Persist two files (or SQLite tables):
 - **Code execution safety**: “edit code + rerun” requires clear guardrails (local-only, confirmations, and a limited execution model).
 
 ## Release Checklist (Remaining to Ship)
-- Validate project load/rehydrate against older manifests (migrate missing fields safely).
 - Smoke-test metadata-only save → reload → rehydrate flow (including missing-source relink).
+- Smoke-test full-data save/load (missing data files should surface clearly).
 - Smoke-test cache pruning + Parquet fallback + factory reset/start-new-project.
 - Add short user-facing docs or README snippet describing:
   - Metadata-only vs full-data saves
