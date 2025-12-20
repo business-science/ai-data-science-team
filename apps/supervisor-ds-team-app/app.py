@@ -54,6 +54,8 @@ UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
 DEFAULT_SQL_URL = "sqlite:///:memory:"
 SQL_URL_INPUT_KEY = "sql_url_input"
 SQL_URL_SYNC_FLAG = "_sync_sql_url_input"
+ACTIVE_DATASET_OVERRIDE_SYNC_FLAG = "_sync_active_dataset_override"
+ACTIVE_DATASET_OVERRIDE_PENDING_KEY = "active_dataset_id_override_pending"
 
 APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PIPELINE_STUDIO_ARTIFACT_STORE_VERSION = 1
@@ -2160,21 +2162,22 @@ def _pipeline_studio_chat_context(*, include_code: bool = False) -> str:
     """
     try:
         sel = st.session_state.get("pipeline_studio_node_id")
-        if not isinstance(sel, str) or not sel.strip():
-            return ""
+        sel = sel.strip() if isinstance(sel, str) and sel.strip() else None
         team_state = st.session_state.get("team_state", {})
         team_state = team_state if isinstance(team_state, dict) else {}
         datasets = team_state.get("datasets")
         datasets = datasets if isinstance(datasets, dict) else {}
-        entry = datasets.get(sel)
+        entry = datasets.get(sel) if sel else {}
         entry = entry if isinstance(entry, dict) else {}
+        if not datasets and not entry:
+            return ""
 
         label = entry.get("label") if isinstance(entry.get("label"), str) else None
         stage = entry.get("stage") if isinstance(entry.get("stage"), str) else None
         shape = entry.get("shape")
         shape_str = None
         if isinstance(shape, (list, tuple)) and len(shape) == 2:
-            shape_str = f"{shape[0]}×{shape[1]}"
+            shape_str = f"{shape[0]}x{shape[1]}"
 
         prov = (
             entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
@@ -2197,7 +2200,7 @@ def _pipeline_studio_chat_context(*, include_code: bool = False) -> str:
             "[Pipeline Studio context]",
             f"pipeline_target: {st.session_state.get('pipeline_studio_target')}",
             f"active_dataset_id: {team_state.get('active_dataset_id')}",
-            f"selected_node_id: {sel}",
+            f"selected_node_id: {sel}" if sel else None,
             f"label: {label}" if label else None,
             f"stage: {stage}" if stage else None,
             f"transform_kind: {kind}" if kind else None,
@@ -2209,6 +2212,28 @@ def _pipeline_studio_chat_context(*, include_code: bool = False) -> str:
             f"locked_node_ids: {', '.join(locked_ids[:10])}" if locked_ids else None,
         ]
         lines = [x for x in lines if isinstance(x, str) and x.strip()]
+
+        if len(datasets) > 1:
+            ordered = sorted(
+                datasets.items(),
+                key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                if isinstance(kv[1], dict)
+                else 0.0,
+                reverse=True,
+            )
+            lines.append(f"available_datasets: {len(datasets)}")
+            for did, ent in ordered[:8]:
+                if not isinstance(ent, dict):
+                    continue
+                dlabel = ent.get("label") if isinstance(ent.get("label"), str) else did
+                dstage = ent.get("stage") if isinstance(ent.get("stage"), str) else None
+                dshape = ent.get("shape")
+                dshape_str = None
+                if isinstance(dshape, (list, tuple)) and len(dshape) == 2:
+                    dshape_str = f"{dshape[0]}x{dshape[1]}"
+                meta_bits = [x for x in (dstage, dshape_str) if x]
+                meta_txt = f" ({', '.join(meta_bits)})" if meta_bits else ""
+                lines.append(f"- {did}: {dlabel}{meta_txt}")
 
         if include_code and isinstance(code_text, str) and code_text.strip():
             max_chars = 4000
@@ -2250,6 +2275,30 @@ def _redact_sqlalchemy_url(url: str) -> str:
         return parsed.render_as_string(hide_password=True)
     except Exception:
         return url.strip()
+
+
+def _queue_active_dataset_override(value: str | None) -> None:
+    st.session_state[ACTIVE_DATASET_OVERRIDE_PENDING_KEY] = value or ""
+    st.session_state[ACTIVE_DATASET_OVERRIDE_SYNC_FLAG] = True
+
+
+def _safe_rerun() -> None:
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
+
+def _keep_pipeline_studio_open() -> None:
+    st.session_state["pipeline_studio_manual_node_open"] = True
+    st.session_state["pipeline_studio_view_pending"] = "Visual Editor"
+    if _pipeline_studio_is_docked():
+        st.session_state["pipeline_studio_drawer_open"] = True
+    else:
+        st.session_state["pipeline_studio_open_requested"] = True
 
 
 def _extract_db_target_from_prompt(
@@ -2800,7 +2849,7 @@ def _sync_pipeline_targets_after_ui_change() -> None:
                 st.session_state["pipeline_studio_node_id"] = fallback
         override = st.session_state.get("active_dataset_id_override")
         if isinstance(override, str) and override and override not in visible_set:
-            st.session_state["active_dataset_id_override"] = ""
+            _queue_active_dataset_override("")
     except Exception:
         pass
 
@@ -3049,6 +3098,13 @@ with st.sidebar:
     elif current_active_key:
         st.caption(f"Current active dataset: `{current_active_key}`")
 
+    if st.session_state.pop(ACTIVE_DATASET_OVERRIDE_SYNC_FLAG, False):
+        pending_override = st.session_state.pop(
+            ACTIVE_DATASET_OVERRIDE_PENDING_KEY, None
+        )
+        pending_override = pending_override if pending_override is not None else ""
+        st.session_state["active_dataset_id_override"] = pending_override
+
     if datasets:
         ordered = sorted(
             [(did, ent) for did, ent in datasets.items() if did in visible_set],
@@ -3081,74 +3137,9 @@ with st.sidebar:
             help="Overrides which dataset is considered active for downstream steps (EDA/viz/wrangle/clean).",
             key="active_dataset_id_override",
         )
-
-        st.markdown("**Merge options**")
-        merge_default_ids = st.session_state.get("merge_dataset_ids") or []
-        merge_ids = st.multiselect(
-            "Datasets to merge/join",
-            options=[did for did, _e in ordered],
-            default=[d for d in merge_default_ids if d in datasets],
-            format_func=_fmt_dataset,
-            help="Select 2+ datasets to merge. Then ask in chat to merge (or describe how to join).",
-            key="merge_dataset_ids",
-        )
-        merge_operation = st.selectbox(
-            "Merge operation",
-            options=["join", "concat"],
-            index=0,
-            help="Use join for relational merges (SQL-like). Use concat to stack or combine columns by index.",
-            key="merge_operation",
-        )
-        if merge_operation == "join":
-            st.selectbox(
-                "Join type",
-                options=["inner", "left", "right", "outer"],
-                index=0,
-                help="How to join datasets when using 'join'.",
-                key="merge_how",
-            )
-            st.text_input(
-                "Join keys (optional, comma-separated)",
-                value=st.session_state.get("merge_on", ""),
-                help="Example: customerID. If blank, the team will try to infer common keys or ask.",
-                key="merge_on",
-            )
-            with st.expander("Advanced join options", expanded=False):
-                st.text_input(
-                    "Left keys (optional, comma-separated)",
-                    value=st.session_state.get("merge_left_on", ""),
-                    help="Use when left/right key names differ.",
-                    key="merge_left_on",
-                )
-                st.text_input(
-                    "Right keys (optional, comma-separated)",
-                    value=st.session_state.get("merge_right_on", ""),
-                    help="Use when left/right key names differ.",
-                    key="merge_right_on",
-                )
-                st.text_input(
-                    "Suffixes (optional, comma-separated)",
-                    value=st.session_state.get("merge_suffixes", "_x,_y"),
-                    help="Example: _left,_right",
-                    key="merge_suffixes",
-                )
-        else:
-            st.selectbox(
-                "Concat axis",
-                options=[0, 1],
-                index=0,
-                help="axis=0 stacks rows; axis=1 concatenates columns by index.",
-                key="merge_axis",
-            )
-            st.checkbox(
-                "Ignore index (axis=0)",
-                value=True,
-                help="When stacking rows, reset the index for a clean result.",
-                key="merge_ignore_index",
-            )
+        st.caption("For merges, use Pipeline Studio (create a node with multiple parents).")
     else:
         st.session_state["active_dataset_id_override"] = ""
-        st.session_state["merge_dataset_ids"] = []
         st.selectbox(
             "Active dataset (override)",
             options=[""],
@@ -3165,48 +3156,49 @@ with st.sidebar:
         key="pipeline_persist_dir",
         help="When enabled, writes `pipeline_spec.json` and `pipeline_repro.py` to this folder for reproducibility.",
     )
-    st.checkbox(
-        "Auto-save pipeline files",
-        value=True,
-        key="pipeline_persist_enabled",
-        help="Saves the latest pipeline on each new pipeline hash.",
-    )
-    st.checkbox(
-        "Overwrite existing pipeline files",
-        value=False,
-        key="pipeline_persist_overwrite",
-        help="If off, existing files are left untouched.",
-    )
-    st.checkbox(
-        "Also save SQL artifacts",
-        value=True,
-        key="pipeline_persist_include_sql",
-        help="If SQL is generated, also saves `sql/query.sql` and `sql/sql_executor.py` under the pipeline folder.",
-    )
-    st.checkbox(
-        "Preserve all nodes on AI runs",
-        value=bool(st.session_state.get("pipeline_preserve_all_nodes", True)),
-        key="pipeline_preserve_all_nodes",
-        help="When enabled, agent updates never drop existing nodes (append-only graph unless you delete nodes manually).",
-    )
-    st.checkbox(
-        "Preserve Pipeline Studio nodes on AI runs",
-        value=bool(st.session_state.get("pipeline_preserve_studio_nodes", True)),
-        key="pipeline_preserve_studio_nodes",
-        help="Keeps Pipeline Studio-created nodes (manual/edited) and their parents when agent results arrive.",
-    )
-    st.checkbox(
-        "Persist pipeline nodes to disk",
-        value=bool(st.session_state.get("pipeline_dataset_persist_enabled", True)),
-        key="pipeline_dataset_persist_enabled",
-        help="Stores datasets under `pipeline_store/` for recovery across sessions (uses pandas pickles).",
-    )
-    st.checkbox(
-        "Restore pipeline nodes on start",
-        value=bool(st.session_state.get("pipeline_dataset_restore_enabled", True)),
-        key="pipeline_dataset_restore_enabled",
-        help="Restores persisted datasets into the current session when available.",
-    )
+    with st.expander("Pipeline behaviors", expanded=False):
+        st.checkbox(
+            "Auto-save pipeline files",
+            value=True,
+            key="pipeline_persist_enabled",
+            help="Saves the latest pipeline on each new pipeline hash.",
+        )
+        st.checkbox(
+            "Overwrite existing pipeline files",
+            value=False,
+            key="pipeline_persist_overwrite",
+            help="If off, existing files are left untouched.",
+        )
+        st.checkbox(
+            "Also save SQL artifacts",
+            value=True,
+            key="pipeline_persist_include_sql",
+            help="If SQL is generated, also saves `sql/query.sql` and `sql/sql_executor.py` under the pipeline folder.",
+        )
+        st.checkbox(
+            "Preserve all nodes on AI runs",
+            value=bool(st.session_state.get("pipeline_preserve_all_nodes", True)),
+            key="pipeline_preserve_all_nodes",
+            help="When enabled, agent updates never drop existing nodes (append-only graph unless you delete nodes manually).",
+        )
+        st.checkbox(
+            "Preserve Pipeline Studio nodes on AI runs",
+            value=bool(st.session_state.get("pipeline_preserve_studio_nodes", True)),
+            key="pipeline_preserve_studio_nodes",
+            help="Keeps Pipeline Studio-created nodes (manual/edited) and their parents when agent results arrive.",
+        )
+        st.checkbox(
+            "Persist pipeline nodes to disk",
+            value=bool(st.session_state.get("pipeline_dataset_persist_enabled", True)),
+            key="pipeline_dataset_persist_enabled",
+            help="Stores datasets under `pipeline_store/` for recovery across sessions (uses pandas pickles).",
+        )
+        st.checkbox(
+            "Restore pipeline nodes on start",
+            value=bool(st.session_state.get("pipeline_dataset_restore_enabled", True)),
+            key="pipeline_dataset_restore_enabled",
+            help="Restores persisted datasets into the current session when available.",
+        )
     if st.session_state.get("last_pipeline_persist_dir"):
         st.caption(
             f"Last saved pipeline: `{st.session_state.get('last_pipeline_persist_dir')}`"
@@ -3325,7 +3317,7 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.session_state.details = []
         st.session_state.team_state = {}
-        st.session_state["active_dataset_id_override"] = ""
+        _queue_active_dataset_override("")
         st.session_state.selected_data_provenance = None
         st.session_state.last_pipeline_persist_dir = None
         msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
@@ -3647,6 +3639,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 ("Model (latest feature)", "model"),
                 ("Active dataset", "active"),
                 ("Latest dataset", "latest"),
+                ("All datasets", "all"),
             ]
             target = st.radio(
                 "Pipeline target",
@@ -3660,6 +3653,96 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 pipe = detail.get("pipeline") or pipelines.get("model") or pipe
             else:
                 pipe = pipelines.get(target_key) or pipe
+        team_state_now = st.session_state.get("team_state", {})
+        team_state_now = team_state_now if isinstance(team_state_now, dict) else {}
+        datasets_now = team_state_now.get("datasets")
+        datasets_now = datasets_now if isinstance(datasets_now, dict) else {}
+        active_now = team_state_now.get("active_dataset_id")
+        active_now = active_now if isinstance(active_now, str) else None
+        if datasets_now:
+            ordered_now = sorted(
+                datasets_now.items(),
+                key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                if isinstance(kv[1], dict)
+                else 0.0,
+                reverse=True,
+            )
+            options_now = [did for did, _e in ordered_now if isinstance(did, str)]
+            if active_now not in options_now:
+                active_now = options_now[0] if options_now else None
+
+            def _fmt_dataset_now(did: str) -> str:
+                e = datasets_now.get(did)
+                if not isinstance(e, dict):
+                    return str(did)
+                label = e.get("label") or did
+                stage = e.get("stage") or "dataset"
+                shape = e.get("shape")
+                shape_txt = f" {shape}" if shape else ""
+                return f"{stage}: {label}{shape_txt} ({did})"
+
+            def _set_active_dataset_now(dataset_id: str | None) -> None:
+                dataset_id = (
+                    dataset_id.strip()
+                    if isinstance(dataset_id, str) and dataset_id.strip()
+                    else None
+                )
+                notice_key = f"pipeline_active_dataset_notice_{key_suffix}"
+                if not dataset_id or dataset_id not in datasets_now:
+                    st.session_state[notice_key] = "Select a valid dataset id."
+                    return
+                updated = dict(team_state_now)
+                updated["active_dataset_id"] = dataset_id
+                st.session_state["team_state"] = updated
+                _queue_active_dataset_override("")
+                _persist_pipeline_studio_team_state(team_state=updated)
+                _sync_pipeline_targets_after_ui_change()
+                st.session_state[notice_key] = (
+                    f"Active dataset set to `{dataset_id}`."
+                )
+                _safe_rerun()
+
+            cols = st.columns([0.64, 0.18, 0.18], gap="small")
+            with cols[0]:
+                selected_now = st.selectbox(
+                    "Set active dataset",
+                    options=options_now,
+                    index=options_now.index(active_now) if active_now in options_now else 0,
+                    format_func=_fmt_dataset_now,
+                    key=f"pipeline_active_pick_{key_suffix}",
+                )
+            with cols[1]:
+                if st.button(
+                    "Set active",
+                    key=f"pipeline_active_set_{key_suffix}",
+                    use_container_width=True,
+                ):
+                    _set_active_dataset_now(selected_now)
+            with cols[2]:
+                target_id = pipe.get("target_dataset_id") if isinstance(pipe, dict) else None
+                if isinstance(target_id, str) and target_id in datasets_now:
+                    if st.button(
+                        "Use target",
+                        key=f"pipeline_active_target_{key_suffix}",
+                        use_container_width=True,
+                    ):
+                        _set_active_dataset_now(target_id)
+                else:
+                    st.button(
+                        "Use target",
+                        key=f"pipeline_active_target_{key_suffix}",
+                        use_container_width=True,
+                        disabled=True,
+                    )
+            if st.session_state.get("active_dataset_id_override"):
+                st.caption(
+                    "Active dataset override is set in the sidebar and may supersede this selection."
+                )
+            notice = st.session_state.pop(
+                f"pipeline_active_dataset_notice_{key_suffix}", None
+            )
+            if isinstance(notice, str) and notice.strip():
+                st.success(notice)
         if isinstance(pipe, dict) and pipe.get("lineage"):
             inputs = pipe.get("inputs") or []
             inputs_txt = ""
@@ -3667,9 +3750,14 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 inputs_txt = (
                     f"  \n**Inputs:** {', '.join([f'`{i}`' for i in inputs if i])}"
                 )
+            target_display = (
+                "all"
+                if str(pipe.get("target") or "").strip().lower() == "all"
+                else pipe.get("target_dataset_id")
+            )
             st.markdown(
                 f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
-                f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
+                f"**Target dataset id:** `{target_display}`  \n"
                 f"**Model dataset id:** `{pipe.get('model_dataset_id')}`  \n"
                 f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 f"{inputs_txt}"
@@ -4274,22 +4362,6 @@ if prompt:
                             "use_llm_intent_parser", True
                         ),
                         "debug": bool(st.session_state.get("debug_mode", False)),
-                        "merge": {
-                            "dataset_ids": st.session_state.get("merge_dataset_ids")
-                            or [],
-                            "operation": st.session_state.get("merge_operation")
-                            or "join",
-                            "how": st.session_state.get("merge_how") or "inner",
-                            "on": st.session_state.get("merge_on") or "",
-                            "left_on": st.session_state.get("merge_left_on") or "",
-                            "right_on": st.session_state.get("merge_right_on") or "",
-                            "suffixes": st.session_state.get("merge_suffixes")
-                            or "_x,_y",
-                            "axis": st.session_state.get("merge_axis", 0),
-                            "ignore_index": bool(
-                                st.session_state.get("merge_ignore_index", True)
-                            ),
-                        },
                         "sql_url": _redact_sqlalchemy_url(
                             st.session_state.get("sql_url", DEFAULT_SQL_URL)
                         ),
@@ -4853,6 +4925,9 @@ if prompt:
                 ),
                 "latest": build_pipeline_snapshot(
                     datasets_dict, active_dataset_id=active_dataset_id, target="latest"
+                ),
+                "all": build_pipeline_snapshot(
+                    datasets_dict, active_dataset_id=active_dataset_id, target="all"
                 ),
             }
             if isinstance(datasets_dict, dict) and datasets_dict
@@ -6110,7 +6185,9 @@ def _render_pipeline_studio() -> None:
             exec_locals: dict[str, object] = {}
             exec(code, exec_globals, exec_locals)
 
-            out = exec_locals.get("df") or exec_globals.get("df")
+            out = (
+                exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
+            )
             if isinstance(out, tuple) and out:
                 out = out[0]
             if not isinstance(out, pd.DataFrame):
@@ -6249,7 +6326,9 @@ def _render_pipeline_studio() -> None:
             exec_locals: dict[str, object] = {}
             exec(draft_code, exec_globals, exec_locals)
 
-            out = exec_locals.get("df") or exec_globals.get("df")
+            out = (
+                exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
+            )
             if isinstance(out, tuple) and out:
                 out = out[0]
             if not isinstance(out, pd.DataFrame):
@@ -6563,7 +6642,11 @@ def _render_pipeline_studio() -> None:
                     exec_globals[f"df_{i}"] = df_i
                 exec_locals: dict[str, object] = {}
                 exec(code, exec_globals, exec_locals)
-                out = exec_locals.get("df") or exec_globals.get("df")
+                out = (
+                    exec_locals["df"]
+                    if "df" in exec_locals
+                    else exec_globals.get("df")
+                )
                 if isinstance(out, tuple) and out:
                     out = out[0]
                 if not isinstance(out, pd.DataFrame):
@@ -6974,6 +7057,7 @@ def _render_pipeline_studio() -> None:
             ("Model (latest feature)", "model"),
             ("Active dataset", "active"),
             ("Latest dataset", "latest"),
+            ("All datasets", "all"),
         ]
         pending_target = st.session_state.pop("pipeline_studio_target_pending", None)
         if isinstance(pending_target, str):
@@ -7049,11 +7133,136 @@ def _render_pipeline_studio() -> None:
                         deleted_ids=set(ui_deleted_ids),
                     )
                 )
+                target_display = (
+                    f"all ({len(studio_datasets)} datasets)"
+                    if str(pipe.get("target") or "").strip().lower() == "all"
+                    else pipe.get("target_dataset_id")
+                )
                 st.markdown(
                     f"**Pipeline hash:** `{pipe.get('pipeline_hash')}`  \n"
-                    f"**Target dataset id:** `{pipe.get('target_dataset_id')}`  \n"
+                    f"**Target dataset id:** `{target_display}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
+                show_hidden_pick = bool(
+                    st.session_state.get("pipeline_studio_show_hidden", False)
+                )
+                show_deleted_pick = bool(
+                    st.session_state.get("pipeline_studio_show_deleted", False)
+                )
+                ordered_ids = sorted(
+                    studio_datasets.items(),
+                    key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                    if isinstance(kv[1], dict)
+                    else 0.0,
+                    reverse=True,
+                )
+                pick_ids = [
+                    did
+                    for did, _e in ordered_ids
+                    if isinstance(did, str)
+                    and (show_hidden_pick or did not in ui_hidden_ids)
+                    and (show_deleted_pick or did not in ui_deleted_ids)
+                ]
+                if not pick_ids:
+                    pick_ids = [did for did, _e in ordered_ids if isinstance(did, str)]
+
+                def _fmt_studio_dataset(did: str) -> str:
+                    e = studio_datasets.get(did)
+                    if not isinstance(e, dict):
+                        return str(did)
+                    label = e.get("label") or did
+                    stage = e.get("stage") or "dataset"
+                    shape = e.get("shape")
+                    shape_txt = f" {shape}" if shape else ""
+                    status = []
+                    if did in ui_deleted_ids:
+                        status.append("deleted")
+                    elif did in ui_hidden_ids:
+                        status.append("hidden")
+                    status_txt = f" ({', '.join(status)})" if status else ""
+                    return f"{stage}: {label}{shape_txt} ({did}){status_txt}"
+
+                def _set_active_dataset_studio(dataset_id: str | None) -> None:
+                    dataset_id = (
+                        dataset_id.strip()
+                        if isinstance(dataset_id, str) and dataset_id.strip()
+                        else None
+                    )
+                    if not dataset_id or dataset_id not in studio_datasets:
+                        st.session_state["pipeline_studio_active_notice"] = (
+                            "Select a valid dataset id."
+                        )
+                        return
+                    team_state = st.session_state.get("team_state", {})
+                    team_state = team_state if isinstance(team_state, dict) else {}
+                    updated = dict(team_state)
+                    updated["active_dataset_id"] = dataset_id
+                    st.session_state["team_state"] = updated
+                    _queue_active_dataset_override("")
+                    st.session_state["pipeline_studio_node_id_pending"] = dataset_id
+                    _persist_pipeline_studio_team_state(team_state=updated)
+                    _sync_pipeline_targets_after_ui_change()
+                    st.session_state["pipeline_studio_active_notice"] = (
+                        f"Active dataset set to `{dataset_id}`."
+                    )
+                    _safe_rerun()
+
+                if pick_ids:
+                    default_pick = st.session_state.get("pipeline_studio_node_id")
+                    if not isinstance(default_pick, str) or default_pick not in pick_ids:
+                        default_pick = (
+                            studio_active_id
+                            if isinstance(studio_active_id, str)
+                            and studio_active_id in pick_ids
+                            else pick_ids[0]
+                        )
+                    pick_cols = st.columns([0.64, 0.18, 0.18], gap="small")
+                    with pick_cols[0]:
+                        picked_id = st.selectbox(
+                            "Set active dataset",
+                            options=pick_ids,
+                            index=pick_ids.index(default_pick)
+                            if default_pick in pick_ids
+                            else 0,
+                            format_func=_fmt_studio_dataset,
+                            key="pipeline_studio_active_picker",
+                        )
+                    with pick_cols[1]:
+                        if st.button(
+                            "Set active",
+                            key="pipeline_studio_active_set",
+                            use_container_width=True,
+                        ):
+                            _set_active_dataset_studio(picked_id)
+                    with pick_cols[2]:
+                        target_id = (
+                            pipe.get("target_dataset_id")
+                            if isinstance(pipe, dict)
+                            else None
+                        )
+                        if isinstance(target_id, str) and target_id in studio_datasets:
+                            if st.button(
+                                "Use target",
+                                key="pipeline_studio_active_target",
+                                use_container_width=True,
+                            ):
+                                _set_active_dataset_studio(target_id)
+                        else:
+                            st.button(
+                                "Use target",
+                                key="pipeline_studio_active_target",
+                                use_container_width=True,
+                                disabled=True,
+                            )
+                    if st.session_state.get("active_dataset_id_override"):
+                        st.caption(
+                            "Active dataset override is set in the sidebar and may supersede this selection."
+                        )
+                    notice = st.session_state.pop(
+                        "pipeline_studio_active_notice", None
+                    )
+                    if isinstance(notice, str) and notice.strip():
+                        st.success(notice)
                 if (
                     target_key == "model"
                     and isinstance(studio_active_id, str)
@@ -7063,6 +7272,14 @@ def _render_pipeline_studio() -> None:
                     st.info(
                         "Your *active dataset* is not part of the current **Model (latest feature)** pipeline view. "
                         "Switch **Pipeline target → Active dataset** (or set stage to `feature`) to see the newest node."
+                    )
+                if (
+                    target_key != "all"
+                    and isinstance(studio_datasets, dict)
+                    and len(studio_datasets) > len(node_ids)
+                ):
+                    st.info(
+                        "Showing only the target lineage. Switch **Pipeline target → All datasets** to see every dataset."
                     )
                 run_err = st.session_state.pop("pipeline_studio_run_error", None)
                 if isinstance(run_err, str) and run_err.strip():
@@ -9649,6 +9866,30 @@ def _render_pipeline_studio() -> None:
                     if not all_node_ids:
                         st.info("No pipeline nodes available to render.")
                         return
+                    show_hidden_pick = bool(
+                        st.session_state.get("pipeline_studio_show_hidden", False)
+                    )
+                    show_deleted_pick = bool(
+                        st.session_state.get("pipeline_studio_show_deleted", False)
+                    )
+                    ordered_dataset_ids = sorted(
+                        studio_datasets.items(),
+                        key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                        if isinstance(kv[1], dict)
+                        else 0.0,
+                        reverse=True,
+                    )
+                    all_dataset_ids = [
+                        did for did, _e in ordered_dataset_ids if isinstance(did, str)
+                    ]
+                    dataset_ids = [
+                        did
+                        for did in all_dataset_ids
+                        if (show_hidden_pick or did not in ui_hidden_ids)
+                        and (show_deleted_pick or did not in ui_deleted_ids)
+                    ]
+                    if not dataset_ids:
+                        dataset_ids = list(all_dataset_ids)
 
                     pipeline_hash = (
                         pipe.get("pipeline_hash") if isinstance(pipe, dict) else None
@@ -10221,30 +10462,36 @@ def _render_pipeline_studio() -> None:
                             default_parent = (
                                 selected_default
                                 if isinstance(selected_default, str)
-                                and selected_default in all_node_ids
+                                and selected_default in dataset_ids
                                 else (
                                     active_id
                                     if isinstance(active_id, str)
-                                    and active_id in all_node_ids
-                                    else (all_node_ids[0] if all_node_ids else None)
+                                    and active_id in dataset_ids
+                                    else (dataset_ids[0] if dataset_ids else None)
                                 )
                             )
                             parent_index = (
-                                int(all_node_ids.index(default_parent))
-                                if default_parent in all_node_ids
+                                int(dataset_ids.index(default_parent))
+                                if default_parent in dataset_ids
                                 else 0
                             )
 
                             def _parent_fmt(did: str) -> str:
+                                entry = (
+                                    studio_datasets.get(did)
+                                    if isinstance(studio_datasets, dict)
+                                    else None
+                                )
+                                entry = entry if isinstance(entry, dict) else {}
                                 m = (
                                     meta_by_id.get(did)
                                     if isinstance(meta_by_id, dict)
                                     else {}
                                 )
                                 m = m if isinstance(m, dict) else {}
-                                lbl = m.get("label") or did
-                                stg = str(m.get("stage") or "")
-                                shp = m.get("shape")
+                                lbl = entry.get("label") or m.get("label") or did
+                                stg = str(entry.get("stage") or m.get("stage") or "")
+                                shp = entry.get("shape") or m.get("shape")
                                 shp_str = ""
                                 if isinstance(shp, (list, tuple)) and len(shp) == 2:
                                     shp_str = f"{shp[0]}×{shp[1]}"
@@ -10255,28 +10502,158 @@ def _render_pipeline_studio() -> None:
                             parent_id_new = ""
                             parent_ids_new: list[str] = []
                             if manual_kind == "python_merge":
+                                pending_parent_ids = st.session_state.pop(
+                                    "pipeline_studio_manual_parent_ids_pending", None
+                                )
+                                if isinstance(pending_parent_ids, list):
+                                    pending_clean = [
+                                        did
+                                        for did in pending_parent_ids
+                                        if isinstance(did, str) and did in dataset_ids
+                                    ]
+                                    if pending_clean:
+                                        st.session_state[
+                                            "pipeline_studio_manual_parent_ids"
+                                        ] = pending_clean
+
+                                def _queue_manual_merge_parents(
+                                    ids: list[str], *, notice: str | None = None
+                                ) -> None:
+                                    cleaned: list[str] = []
+                                    seen: set[str] = set()
+                                    for did in ids:
+                                        if not isinstance(did, str) or did not in dataset_ids:
+                                            continue
+                                        if did in seen:
+                                            continue
+                                        seen.add(did)
+                                        cleaned.append(did)
+                                    if len(cleaned) < 2:
+                                        st.session_state[
+                                            "pipeline_studio_manual_parent_notice"
+                                        ] = "Select at least two datasets."
+                                        return
+                                    st.session_state[
+                                        "pipeline_studio_manual_parent_ids_pending"
+                                    ] = cleaned
+                                    st.session_state[
+                                        "pipeline_studio_manual_parent_notice"
+                                    ] = notice or "Updated parent datasets."
+                                    _keep_pipeline_studio_open()
+                                    _safe_rerun()
+
+                                def _parse_parent_hint(text: str) -> list[str]:
+                                    text = text if isinstance(text, str) else ""
+                                    tokens = [t.strip() for t in re.split(r"[,\n]+", text) if t.strip()]
+                                    if len(tokens) <= 1:
+                                        tokens = [t.strip() for t in re.split(r"\s+", text) if t.strip()]
+                                    if not tokens:
+                                        return []
+                                    resolved: list[str] = []
+                                    for tok in tokens:
+                                        if tok in dataset_ids:
+                                            resolved.append(tok)
+                                            continue
+                                        tok_lower = tok.lower()
+                                        match_id = None
+                                        if tok_lower:
+                                            for did in dataset_ids:
+                                                did_lower = did.lower()
+                                                if tok_lower == did_lower or tok_lower in did_lower:
+                                                    match_id = did
+                                                    break
+                                        if match_id:
+                                            resolved.append(match_id)
+                                            continue
+                                        for did in dataset_ids:
+                                            entry = studio_datasets.get(did)
+                                            entry = entry if isinstance(entry, dict) else {}
+                                            label = entry.get("label") or ""
+                                            prov = entry.get("provenance")
+                                            prov = prov if isinstance(prov, dict) else {}
+                                            candidates = [
+                                                str(label),
+                                                str(prov.get("original_name") or ""),
+                                                str(prov.get("source") or ""),
+                                            ]
+                                            if any(tok_lower in c.lower() for c in candidates if c):
+                                                match_id = did
+                                                break
+                                        if match_id:
+                                            resolved.append(match_id)
+                                    return resolved
+
+                                hint_cols = st.columns([0.62, 0.19, 0.19], gap="small")
+                                with hint_cols[0]:
+                                    hint_text = st.text_input(
+                                        "Quick parent select (ids or labels)",
+                                        key="pipeline_studio_manual_parent_hint",
+                                        help="Paste dataset ids or labels (comma/space separated). Example: raw_abcd, raw_efgh.",
+                                    )
+                                with hint_cols[1]:
+                                    if st.button(
+                                        "Use IDs",
+                                        key="pipeline_studio_manual_parent_apply",
+                                        use_container_width=True,
+                                    ):
+                                        resolved = _parse_parent_hint(hint_text)
+                                        notice = (
+                                            f"Matched {len(resolved)} dataset(s)."
+                                            if resolved
+                                            else "No matches found."
+                                        )
+                                        _queue_manual_merge_parents(
+                                            resolved,
+                                            notice=notice,
+                                        )
+                                with hint_cols[2]:
+                                    if st.button(
+                                        "Auto pick",
+                                        key="pipeline_studio_manual_parent_auto",
+                                        use_container_width=True,
+                                    ):
+                                        auto_ids: list[str] = []
+                                        if isinstance(active_id, str) and active_id in dataset_ids:
+                                            auto_ids.append(active_id)
+                                        for did in dataset_ids:
+                                            if did not in auto_ids:
+                                                auto_ids.append(did)
+                                            if len(auto_ids) >= 2:
+                                                break
+                                        _queue_manual_merge_parents(
+                                            auto_ids, notice="Auto-picked parent datasets."
+                                        )
+
                                 default_merge = (
                                     [default_parent] if default_parent else []
                                 )
-                                for pid in all_node_ids:
+                                for pid in dataset_ids:
                                     if pid != default_parent:
                                         default_merge.append(pid)
                                         break
                                 parent_ids_new = st.multiselect(
                                     "Parent datasets (2+ required)",
-                                    options=all_node_ids,
+                                    options=dataset_ids,
                                     default=default_merge[:2],
                                     format_func=_parent_fmt,
                                     key="pipeline_studio_manual_parent_ids",
                                     help="Ordered parent datasets available as df_0, df_1, ... in the merge code.",
                                 )
+                                st.caption(
+                                    "Parent options include all loaded datasets. Switch Pipeline target → All datasets to visualize them."
+                                )
+                                hint_notice = st.session_state.pop(
+                                    "pipeline_studio_manual_parent_notice", None
+                                )
+                                if isinstance(hint_notice, str) and hint_notice.strip():
+                                    st.success(hint_notice)
                                 parent_id_new = (
                                     parent_ids_new[0] if parent_ids_new else ""
                                 )
                             else:
                                 parent_id_new = st.selectbox(
                                     "Parent dataset",
-                                    options=all_node_ids,
+                                    options=dataset_ids,
                                     index=parent_index,
                                     format_func=_parent_fmt,
                                     key="pipeline_studio_manual_parent_id",

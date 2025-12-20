@@ -2264,7 +2264,7 @@ Examples:
                         + "\n".join(lines)
                         + (f"\n\nActive dataset: {active_label}." if active_label else "")
                         + preview_txt
-                        + "\n\nUse the sidebar dataset selector to switch the active dataset or pick both under Merge options."
+                        + "\n\nUse the sidebar dataset selector to switch the active dataset, or use Pipeline Studio to merge them."
                     ),
                     name="data_loader_agent",
                 )
@@ -2272,7 +2272,7 @@ Examples:
                 summary_msg = AIMessage(
                     content=(
                         f"Loaded {len(multiple_loaded_datasets)} datasets. "
-                        "Use the sidebar dataset selector to switch the active dataset or merge them."
+                        "Use the sidebar dataset selector to switch the active dataset, or use Pipeline Studio to merge them."
                     ),
                     name="data_loader_agent",
                 )
@@ -2639,8 +2639,7 @@ Examples:
             except Exception:
                 pass
             msg = (
-                "To merge datasets, select 2+ dataset IDs in the sidebar under **Merge options**, "
-                "or mention them in your request.\n\n"
+                "To merge datasets, mention 2+ dataset IDs in your request (or use Pipeline Studio to create a merge node).\n\n"
                 + ("Available datasets:\n" + "\n".join(available) if available else "")
             ).strip()
             return {
@@ -2721,8 +2720,8 @@ Examples:
                         AIMessage(
                             content=(
                                 "I couldn't infer join keys for the selected datasets. "
-                                "Specify join keys in the sidebar (Merge options → Join keys), "
-                                "or ask like: `join on customerID`."
+                                "Specify join keys in your request (e.g., `join on customerID`), "
+                                "or configure them in Pipeline Studio."
                             ),
                             name="data_merge_agent",
                         )
