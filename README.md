@@ -1,7 +1,7 @@
 <div align="center">
   <a href="https://github.com/business-science/ai-data-science-team">
     <picture>
-      <img src="/img/ai_data_science_team_logo.png" alt="AI Data Science Team" width="360">
+      <img src="./img/ai_data_science_team_logo.png" alt="AI Data Science Team" width="360">
     </picture>
   </a>
 </div>
@@ -26,8 +26,6 @@ AI Data Science Team is a Python library of specialized agents for common data s
 ## AI Pipeline Studio (Flagship App)
 
 AI Pipeline Studio is the main example of the AI Data Science Team in action.
-
-![AI Pipeline Studio Logo](/img/ai_pipeline_studio_logo.png)
 
 ![AI Pipeline Studio](/img/apps/ai_pipeline_studio_app.jpg)
 
