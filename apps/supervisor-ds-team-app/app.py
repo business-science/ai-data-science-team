@@ -46,7 +46,7 @@ from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluatio
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
 from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
 
-TITLE = "AI Data Science & Pipeline Studio"
+TITLE = "AI Data Pipeline Studio"
 st.set_page_config(page_title=TITLE, page_icon=":bar_chart:", layout="wide")
 st.title(TITLE)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
@@ -90,6 +90,10 @@ PIPELINE_STUDIO_DATASET_STORE_DIR = os.path.join(
     APP_ROOT, "pipeline_store", "pipeline_datasets"
 )
 PIPELINE_STUDIO_DATASET_STORE_MAX_ITEMS = 0
+PIPELINE_STUDIO_DATASET_CACHE_MAX_ITEMS_DEFAULT = 5
+PIPELINE_STUDIO_DATASET_CACHE_MAX_MB_DEFAULT = 500
+PIPELINE_STUDIO_PROJECT_PREVIEW_MAX_ROWS = 20
+PIPELINE_STUDIO_PROJECT_PREVIEW_MAX_COLS = 50
 PIPELINE_STUDIO_PROJECTS_VERSION = 1
 PIPELINE_STUDIO_PROJECTS_DIR = os.path.join(
     APP_ROOT, "pipeline_store", "pipeline_projects"
@@ -549,6 +553,322 @@ def _pipeline_studio_project_slug(name: str) -> str:
     return name.lower() if name else "project"
 
 
+def _pipeline_studio_load_project_manifest(*, project_dir: str) -> dict | None:
+    project_dir = project_dir.strip() if isinstance(project_dir, str) else ""
+    if not project_dir:
+        return None
+    manifest_path = os.path.join(project_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception:
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _pipeline_studio_write_project_manifest(
+    *, project_dir: str, manifest: dict
+) -> bool:
+    try:
+        import tempfile
+
+        project_dir = project_dir.strip() if isinstance(project_dir, str) else ""
+        if not project_dir or not isinstance(manifest, dict):
+            return False
+        manifest_path = os.path.join(project_dir, "manifest.json")
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="._manifest_", suffix=".json", dir=project_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2, default=str)
+            os.replace(tmp_path, manifest_path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _pipeline_studio_update_project_manifest(
+    *,
+    project_dir: str,
+    updates: dict | None = None,
+    dataset_source_updates: dict[str, str] | None = None,
+) -> dict | None:
+    manifest = _pipeline_studio_load_project_manifest(project_dir=project_dir)
+    if not isinstance(manifest, dict):
+        return None
+    updates = updates if isinstance(updates, dict) else {}
+    if updates:
+        manifest.update(updates)
+    if isinstance(dataset_source_updates, dict) and dataset_source_updates:
+        team = manifest.get("team_state")
+        team = team if isinstance(team, dict) else {}
+        datasets_meta = team.get("datasets")
+        datasets_meta = datasets_meta if isinstance(datasets_meta, dict) else {}
+        for did, new_source in dataset_source_updates.items():
+            if not isinstance(did, str) or not did:
+                continue
+            if not isinstance(new_source, str) or not new_source.strip():
+                continue
+            entry = datasets_meta.get(did)
+            entry = entry if isinstance(entry, dict) else {}
+            prov = entry.get("provenance")
+            prov = prov if isinstance(prov, dict) else {}
+            prov["source"] = new_source.strip()
+            prov["source_type"] = prov.get("source_type") or "file"
+            entry["provenance"] = prov
+            datasets_meta[did] = entry
+        team["datasets"] = datasets_meta
+        manifest["team_state"] = team
+    _pipeline_studio_write_project_manifest(project_dir=project_dir, manifest=manifest)
+    return manifest
+
+
+def _pipeline_studio_project_disk_usage(dir_path: str) -> int:
+    total = 0
+    dir_path = dir_path.strip() if isinstance(dir_path, str) else ""
+    if not dir_path or not os.path.isdir(dir_path):
+        return 0
+    for root, _dirs, files in os.walk(dir_path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except Exception:
+                pass
+    return total
+
+
+def _pipeline_studio_format_bytes(value: int | float | None) -> str:
+    try:
+        size = float(value or 0.0)
+    except Exception:
+        return "0 B"
+    if size <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    return f"{size:.1f} {units[idx]}"
+
+
+def _pipeline_studio_dataset_cache_usage() -> int:
+    total = 0
+    cache_dir = PIPELINE_STUDIO_DATASET_STORE_DIR
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return 0
+    for root, _dirs, files in os.walk(cache_dir):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except Exception:
+                pass
+    return total
+
+
+def _pipeline_studio_format_ts(value: float | int | None) -> str:
+    try:
+        ts = float(value or 0.0)
+    except Exception:
+        return "-"
+    if ts <= 0:
+        return "-"
+    try:
+        from datetime import datetime
+
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(int(ts))
+
+
+def _pipeline_studio_rename_project(*, dir_name: str, new_name: str) -> dict:
+    import time
+
+    dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+    new_name = new_name.strip() if isinstance(new_name, str) else ""
+    if not dir_name or not new_name:
+        return {"error": "Select a project and enter a new name."}
+    project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+    if not os.path.isdir(project_dir):
+        return {"error": "Project not found on disk."}
+    slug = _pipeline_studio_project_slug(new_name)
+    suffix = ""
+    if "_" in dir_name:
+        suffix = dir_name.split("_")[-1]
+    if not suffix.isdigit():
+        suffix = str(int(time.time()))
+    new_dir_name = f"{slug}_{suffix}"
+    new_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, new_dir_name)
+    if os.path.exists(new_dir):
+        new_dir_name = f"{slug}_{suffix}_{uuid.uuid4().hex[:6]}"
+        new_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, new_dir_name)
+    try:
+        os.rename(project_dir, new_dir)
+    except Exception as exc:
+        return {"error": str(exc)}
+    _pipeline_studio_update_project_manifest(
+        project_dir=new_dir,
+        updates={"name": new_name, "dir_name": new_dir_name},
+    )
+    return {"dir_name": new_dir_name, "dir_path": new_dir}
+
+
+def _pipeline_studio_duplicate_project(*, dir_name: str, new_name: str) -> dict:
+    import shutil
+    import time
+
+    dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+    new_name = new_name.strip() if isinstance(new_name, str) else ""
+    if not dir_name or not new_name:
+        return {"error": "Select a project and enter a name."}
+    project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+    if not os.path.isdir(project_dir):
+        return {"error": "Project not found on disk."}
+    slug = _pipeline_studio_project_slug(new_name)
+    ts = str(int(time.time()))
+    new_dir_name = f"{slug}_{ts}"
+    new_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, new_dir_name)
+    if os.path.exists(new_dir):
+        new_dir_name = f"{slug}_{ts}_{uuid.uuid4().hex[:6]}"
+        new_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, new_dir_name)
+    try:
+        shutil.copytree(project_dir, new_dir)
+    except Exception as exc:
+        return {"error": str(exc)}
+    _pipeline_studio_update_project_manifest(
+        project_dir=new_dir,
+        updates={
+            "name": new_name,
+            "dir_name": new_dir_name,
+            "saved_ts": time.time(),
+            "last_opened_ts": None,
+            "archived": False,
+        },
+    )
+    return {"dir_name": new_dir_name, "dir_path": new_dir}
+
+
+def _pipeline_studio_save_project_metadata(
+    *, dir_name: str, tags: list[str], notes: str, archived: bool
+) -> None:
+    dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+    if not dir_name:
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Select a project to update."
+        )
+        return
+    project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+    if not os.path.isdir(project_dir):
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Project not found on disk."
+        )
+        return
+    clean_tags = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
+    _pipeline_studio_update_project_manifest(
+        project_dir=project_dir,
+        updates={
+            "tags": clean_tags,
+            "notes": notes if isinstance(notes, str) else "",
+            "archived": bool(archived),
+        },
+    )
+    st.session_state["pipeline_studio_project_notice"] = (
+        f"Updated project metadata for `{dir_name}`."
+    )
+
+
+def _pipeline_studio_convert_project_to_metadata_only(*, dir_name: str) -> None:
+    dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+    if not dir_name:
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Select a project to convert."
+        )
+        return
+    project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+    if not os.path.isdir(project_dir):
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Project not found on disk."
+        )
+        return
+    manifest = _pipeline_studio_load_project_manifest(project_dir=project_dir)
+    if not isinstance(manifest, dict):
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Manifest not found."
+        )
+        return
+    team = manifest.get("team_state")
+    team = team if isinstance(team, dict) else {}
+    datasets_meta = team.get("datasets")
+    datasets_meta = datasets_meta if isinstance(datasets_meta, dict) else {}
+
+    removed_files = 0
+    for did, meta in datasets_meta.items():
+        if not isinstance(did, str) or not did or not isinstance(meta, dict):
+            continue
+        rel_path = meta.get("data_path")
+        rel_path = rel_path if isinstance(rel_path, str) and rel_path else None
+        if rel_path:
+            abs_path = os.path.join(project_dir, rel_path)
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+                    removed_files += 1
+            except Exception:
+                pass
+        meta.pop("data_path", None)
+        meta.pop("data_format", None)
+        meta.pop("data_bytes", None)
+        meta["data_saved"] = False
+        datasets_meta[did] = meta
+
+    team["datasets"] = datasets_meta
+    manifest["team_state"] = team
+    manifest["data_mode"] = "metadata_only"
+    manifest["datasets_saved"] = 0
+    _pipeline_studio_write_project_manifest(project_dir=project_dir, manifest=manifest)
+    st.session_state["pipeline_studio_project_notice"] = (
+        f"Converted project to metadata-only (removed {removed_files} data file(s))."
+    )
+
+
+def _pipeline_studio_bulk_delete_projects(dir_names: list[str]) -> None:
+    dir_names = [d for d in (dir_names or []) if isinstance(d, str) and d.strip()]
+    if not dir_names:
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Select project(s) to delete."
+        )
+        return
+    deleted = 0
+    errors: list[str] = []
+    for dir_name in dir_names:
+        project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+        if not os.path.isdir(project_dir):
+            errors.append(f"{dir_name}: not found")
+            continue
+        try:
+            shutil.rmtree(project_dir)
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{dir_name}: {exc}")
+    if errors:
+        st.session_state["pipeline_studio_project_notice"] = (
+            f"Deleted {deleted} project(s). Errors: {', '.join(errors)}"
+        )
+    else:
+        st.session_state["pipeline_studio_project_notice"] = (
+            f"Deleted {deleted} project(s)."
+        )
+
+
 def _pipeline_studio_list_projects() -> list[dict]:
     """
     Best-effort list of Pipeline Studio projects saved under `pipeline_store/pipeline_projects/`.
@@ -564,33 +884,59 @@ def _pipeline_studio_list_projects() -> list[dict]:
             dir_path = os.path.join(root, dir_name)
             if not os.path.isdir(dir_path):
                 continue
-            manifest_path = os.path.join(dir_path, "manifest.json")
-            if not os.path.exists(manifest_path):
+            manifest = _pipeline_studio_load_project_manifest(project_dir=dir_path)
+            if not isinstance(manifest, dict):
                 continue
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
-            except Exception:
-                continue
-            manifest = manifest if isinstance(manifest, dict) else {}
             try:
                 saved_ts = float(
                     manifest.get("saved_ts") or manifest.get("created_ts") or 0.0
                 )
             except Exception:
                 saved_ts = 0.0
+            try:
+                last_opened_ts = float(manifest.get("last_opened_ts") or 0.0)
+            except Exception:
+                last_opened_ts = 0.0
+            datasets_total = manifest.get("datasets_total")
+            if not datasets_total:
+                team_state = manifest.get("team_state")
+                team_state = team_state if isinstance(team_state, dict) else {}
+                ds_meta = team_state.get("datasets")
+                ds_meta = ds_meta if isinstance(ds_meta, dict) else {}
+                datasets_total = len(ds_meta)
+            data_mode = manifest.get("data_mode")
+            if not data_mode:
+                team_state = manifest.get("team_state")
+                team_state = team_state if isinstance(team_state, dict) else {}
+                ds_meta = team_state.get("datasets")
+                ds_meta = ds_meta if isinstance(ds_meta, dict) else {}
+                data_mode = (
+                    "full"
+                    if any(
+                        isinstance(rec, dict) and rec.get("data_path")
+                        for rec in ds_meta.values()
+                    )
+                    else "metadata_only"
+                )
             items.append(
                 {
                     "dir_name": dir_name,
                     "dir_path": dir_path,
-                    "manifest_path": manifest_path,
+                    "manifest_path": os.path.join(dir_path, "manifest.json"),
                     "saved_ts": saved_ts,
+                    "last_opened_ts": last_opened_ts,
                     "name": manifest.get("name")
                     if isinstance(manifest.get("name"), str)
                     else dir_name,
                     "pipeline_hash": manifest.get("pipeline_hash")
                     if isinstance(manifest.get("pipeline_hash"), str)
                     else "",
+                    "data_mode": data_mode or "full",
+                    "datasets_total": datasets_total or 0,
+                    "datasets_saved": manifest.get("datasets_saved") or 0,
+                    "tags": manifest.get("tags") or [],
+                    "notes": manifest.get("notes") or "",
+                    "archived": bool(manifest.get("archived", False)),
                     "manifest": manifest,
                 }
             )
@@ -618,13 +964,15 @@ def _pipeline_studio_prune_projects(*, max_items: int) -> None:
         pass
 
 
-def _pipeline_studio_save_project(*, name: str, team_state: dict) -> dict:
+def _pipeline_studio_save_project(
+    *, name: str, team_state: dict, include_data: bool = False
+) -> dict:
     """
     Save a best-effort, local "project" bundle:
-    - dataset frames (pickle) + dataset metadata (manifest.json)
+    - dataset frames (pickle) + dataset metadata (manifest.json), or metadata-only
     - pipeline registry + flow layout + code drafts (scoped) for portability
 
-    Note: this stores pandas pickles; do not load untrusted project files.
+    Note: full-data saves store Parquet when available (fallback to pickle); do not load untrusted project files.
     """
     try:
         import tempfile
@@ -645,11 +993,13 @@ def _pipeline_studio_save_project(*, name: str, team_state: dict) -> dict:
             dir_name = f"{slug}_{ts}_{uuid.uuid4().hex[:6]}"
             project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
         os.makedirs(project_dir, exist_ok=True)
-        ds_dir = os.path.join(project_dir, "datasets")
-        os.makedirs(ds_dir, exist_ok=True)
+        if include_data:
+            ds_dir = os.path.join(project_dir, "datasets")
+            os.makedirs(ds_dir, exist_ok=True)
 
         datasets_out: dict[str, dict] = {}
         fingerprints: set[str] = set()
+        saved_count = 0
         for did, entry in datasets.items():
             if not isinstance(did, str) or not did:
                 continue
@@ -665,16 +1015,62 @@ def _pipeline_studio_save_project(*, name: str, team_state: dict) -> dict:
                     df = pd.DataFrame(data)
             except Exception:
                 df = None
-            if df is None:
-                continue
-
-            rel_path = os.path.join("datasets", f"{did}.pkl")
-            abs_path = os.path.join(project_dir, rel_path)
-            df.to_pickle(abs_path)
-
             meta = {k: v for k, v in entry.items() if k != "data"}
-            meta["data_path"] = rel_path
-            meta["data_format"] = "pickle"
+            if not include_data:
+                meta.pop("data_path", None)
+                meta.pop("data_format", None)
+                meta.pop("data_bytes", None)
+            meta["data_saved"] = False
+            if include_data and df is not None:
+                rel_path = os.path.join("datasets", f"{did}.parquet")
+                abs_path = os.path.join(project_dir, rel_path)
+
+                def _write_parquet(path: str) -> bool:
+                    try:
+                        for compression in ("zstd", "snappy", "gzip", None):
+                            try:
+                                df.to_parquet(
+                                    path,
+                                    index=False,
+                                    compression=compression,
+                                )
+                                return True
+                            except Exception:
+                                continue
+                    except Exception:
+                        return False
+                    return False
+
+                if _write_parquet(abs_path):
+                    meta["data_path"] = rel_path
+                    meta["data_format"] = "parquet"
+                    meta["data_saved"] = True
+                    saved_count += 1
+                else:
+                    rel_path = os.path.join("datasets", f"{did}.pkl")
+                    abs_path = os.path.join(project_dir, rel_path)
+                    df.to_pickle(abs_path)
+                    meta["data_path"] = rel_path
+                    meta["data_format"] = "pickle"
+                    meta["data_saved"] = True
+                    saved_count += 1
+            elif df is not None:
+                max_rows = int(PIPELINE_STUDIO_PROJECT_PREVIEW_MAX_ROWS)
+                max_cols = int(PIPELINE_STUDIO_PROJECT_PREVIEW_MAX_COLS)
+                try:
+                    df_preview = df.iloc[:max_rows, :max_cols].copy()
+                    meta["preview_rows"] = int(df_preview.shape[0])
+                    meta["preview_cols"] = [str(c) for c in df_preview.columns]
+                    meta["preview_data"] = df_preview.to_dict(orient="records")
+                    meta["preview_truncated"] = bool(
+                        df.shape[0] > max_rows or df.shape[1] > max_cols
+                    )
+                except Exception:
+                    pass
+            elif include_data:
+                meta.pop("data_path", None)
+                meta.pop("data_format", None)
+                meta.pop("data_bytes", None)
             datasets_out[did] = meta
 
             fp = entry.get("fingerprint")
@@ -722,6 +1118,13 @@ def _pipeline_studio_save_project(*, name: str, team_state: dict) -> dict:
             else dir_name,
             "saved_ts": time.time(),
             "dir_name": dir_name,
+            "data_mode": "full" if include_data else "metadata_only",
+            "datasets_saved": int(saved_count),
+            "datasets_total": int(len(datasets_out)),
+            "tags": [],
+            "notes": "",
+            "archived": False,
+            "last_opened_ts": None,
             "pipeline_hashes": pipeline_hashes,
             "team_state": {
                 "active_dataset_id": active_id,
@@ -757,7 +1160,7 @@ def _pipeline_studio_save_project(*, name: str, team_state: dict) -> dict:
         return {"error": str(e)}
 
 
-def _pipeline_studio_load_project(*, project_dir: str) -> dict:
+def _pipeline_studio_load_project(*, project_dir: str, rehydrate: bool = True) -> dict:
     """
     Load a previously saved project bundle into the current session_state `team_state`.
     """
@@ -767,55 +1170,356 @@ def _pipeline_studio_load_project(*, project_dir: str) -> dict:
         project_dir = project_dir.strip() if isinstance(project_dir, str) else ""
         if not project_dir:
             return {"error": "Missing project_dir."}
-        manifest_path = os.path.join(project_dir, "manifest.json")
-        if not os.path.exists(manifest_path):
+        manifest = _pipeline_studio_load_project_manifest(project_dir=project_dir)
+        if not isinstance(manifest, dict):
+            manifest_path = os.path.join(project_dir, "manifest.json")
             return {"error": f"Project manifest not found: {manifest_path}"}
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        manifest = manifest if isinstance(manifest, dict) else {}
         team = manifest.get("team_state")
         team = team if isinstance(team, dict) else {}
         datasets_meta = team.get("datasets")
         datasets_meta = datasets_meta if isinstance(datasets_meta, dict) else {}
         active_id = team.get("active_dataset_id")
         active_id = active_id if isinstance(active_id, str) and active_id else None
+        data_mode = manifest.get("data_mode") or "full"
+        metadata_only = str(data_mode).lower() == "metadata_only"
 
         datasets: dict[str, dict] = {}
         for did, meta in datasets_meta.items():
             if not isinstance(did, str) or not did or not isinstance(meta, dict):
                 continue
+            entry = dict(meta)
+            entry["id"] = did
             rel_path = meta.get("data_path")
             rel_path = rel_path if isinstance(rel_path, str) and rel_path else None
             fmt = meta.get("data_format")
             fmt = fmt if isinstance(fmt, str) and fmt else "pickle"
-            if not rel_path:
-                continue
-            abs_path = os.path.join(project_dir, rel_path)
-            if not os.path.exists(abs_path):
-                continue
             df = None
-            try:
-                if fmt == "pickle":
-                    df = pd.read_pickle(abs_path)
-                elif fmt == "csv":
-                    df = pd.read_csv(abs_path)
-            except Exception:
-                df = None
-            if not isinstance(df, pd.DataFrame):
-                continue
-            entry = dict(meta)
-            entry["id"] = did
+            if rel_path:
+                abs_path = os.path.join(project_dir, rel_path)
+                if os.path.exists(abs_path):
+                    try:
+                        if fmt == "parquet":
+                            df = pd.read_parquet(abs_path)
+                        elif fmt == "pickle":
+                            df = pd.read_pickle(abs_path)
+                        elif fmt == "csv":
+                            df = pd.read_csv(abs_path)
+                    except Exception:
+                        df = None
             entry["data"] = df
             datasets[did] = entry
+
+        def _entry_parent_ids(entry_obj: dict) -> list[str]:
+            entry_obj = entry_obj if isinstance(entry_obj, dict) else {}
+            parents: list[str] = []
+            pids = entry_obj.get("parent_ids")
+            if isinstance(pids, list):
+                parents.extend([str(p) for p in pids if isinstance(p, str) and p])
+            pid = entry_obj.get("parent_id")
+            if isinstance(pid, str) and pid and pid not in parents:
+                parents.insert(0, pid)
+            return [p for p in parents if p]
+
+        def _coerce_entry_df(entry_obj: dict) -> pd.DataFrame | None:
+            if not isinstance(entry_obj, dict):
+                return None
+            data = entry_obj.get("data")
+            if isinstance(data, pd.DataFrame):
+                return data
+            try:
+                if isinstance(data, dict):
+                    return pd.DataFrame.from_dict(data)
+                if isinstance(data, list):
+                    return pd.DataFrame(data)
+            except Exception:
+                return None
+            return None
+
+        rehydrate_stats = {
+            "roots_loaded": 0,
+            "transforms_run": 0,
+            "missing_sources": 0,
+            "transform_failures": 0,
+        }
+        missing_sources: list[dict] = []
+
+        def _load_root_data(entry_obj: dict) -> pd.DataFrame | None:
+            prov = entry_obj.get("provenance")
+            prov = prov if isinstance(prov, dict) else {}
+            source_type = str(prov.get("source_type") or "")
+            source = prov.get("source")
+            if source_type not in {"file", "directory_load"}:
+                return None
+            if not isinstance(source, str) or not source:
+                return None
+            try:
+                from ai_data_science_team.tools.data_loader import auto_load_file
+            except Exception:
+                return None
+            try:
+                df = auto_load_file(source, max_rows=None)
+            except Exception:
+                df = None
+            return df if isinstance(df, pd.DataFrame) else None
+
+        def _infer_first_def_name(code: str) -> str | None:
+            if not isinstance(code, str) or not code:
+                return None
+            m = re.search(
+                r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+                code,
+                flags=re.MULTILINE,
+            )
+            return m.group(1) if m else None
+
+        def _read_text_file(path: object, *, max_bytes: int = 500_000) -> str | None:
+            try:
+                if not isinstance(path, str) or not path:
+                    return None
+                if not os.path.exists(path):
+                    return None
+                if os.path.getsize(path) > max_bytes:
+                    return None
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                return None
+
+        def _exec_python_function(
+            *, code: str, df_in: pd.DataFrame, fn_name_hint: str | None
+        ) -> pd.DataFrame | None:
+            code = code if isinstance(code, str) else ""
+            code = code.strip()
+            if not code:
+                return None
+            inferred = _infer_first_def_name(code)
+            fn_name_hint = (
+                fn_name_hint.strip() if isinstance(fn_name_hint, str) else None
+            )
+            exec_env: dict[str, object] = {"pd": pd}
+            try:
+                import numpy as np  # type: ignore
+
+                exec_env["np"] = np
+            except Exception:
+                pass
+            exec(code, exec_env, exec_env)
+            fn = None
+            for candidate in [fn_name_hint, inferred]:
+                if not candidate:
+                    continue
+                obj = exec_env.get(candidate)
+                if callable(obj):
+                    fn = obj
+                    break
+            if fn is None:
+                for name, obj in exec_env.items():
+                    if callable(obj):
+                        fn = obj
+                        break
+            if fn is None:
+                return None
+            out = fn(df_in)
+            if isinstance(out, tuple) and out:
+                out = out[0]
+            if isinstance(out, pd.DataFrame):
+                return out
+            try:
+                if isinstance(out, dict):
+                    return pd.DataFrame.from_dict(out)
+                if isinstance(out, list):
+                    return pd.DataFrame(out)
+            except Exception:
+                return None
+            return None
+
+        def _exec_merge(
+            *, code: str, parents: list[pd.DataFrame]
+        ) -> pd.DataFrame | None:
+            code = code if isinstance(code, str) else ""
+            code = code.strip()
+            if not code:
+                return None
+            exec_env: dict[str, object] = {"pd": pd}
+            for idx, df in enumerate(parents):
+                exec_env[f"df_{idx}"] = df
+            exec(code, exec_env, exec_env)
+            df_out = exec_env.get("df")
+            if isinstance(df_out, pd.DataFrame):
+                return df_out
+            try:
+                if isinstance(df_out, dict):
+                    return pd.DataFrame.from_dict(df_out)
+                if isinstance(df_out, list):
+                    return pd.DataFrame(df_out)
+            except Exception:
+                return None
+            return None
+
+        def _exec_sql_query(*, sql_code: str, sql_url: str) -> pd.DataFrame | None:
+            sql_code = sql_code if isinstance(sql_code, str) else ""
+            sql_code = sql_code.strip()
+            if not sql_code:
+                return None
+            try:
+                engine = sql.create_engine(sql_url)
+                return pd.read_sql_query(sql_code, engine)
+            except Exception:
+                return None
+
+        def _rehydrate_datasets(
+            datasets_map: dict[str, dict],
+        ) -> tuple[dict[str, dict], dict]:
+            datasets_map = datasets_map if isinstance(datasets_map, dict) else {}
+            parents_map: dict[str, list[str]] = {}
+            children_map: dict[str, set[str]] = {}
+            for did, entry_obj in datasets_map.items():
+                if not isinstance(did, str) or not did:
+                    continue
+                parents = _entry_parent_ids(entry_obj)
+                parents_map[did] = parents
+                for pid in parents:
+                    children_map.setdefault(pid, set()).add(did)
+
+            # Load root datasets from source.
+            for did, entry_obj in datasets_map.items():
+                if parents_map.get(did):
+                    continue
+                if _coerce_entry_df(entry_obj) is not None:
+                    continue
+                prov = entry_obj.get("provenance")
+                prov = prov if isinstance(prov, dict) else {}
+                source = prov.get("source")
+                if isinstance(source, str) and source and not os.path.exists(source):
+                    missing_sources.append(
+                        {
+                            "dataset_id": did,
+                            "label": entry_obj.get("label") or did,
+                            "source": source,
+                            "source_type": prov.get("source_type"),
+                            "original_name": prov.get("original_name"),
+                        }
+                    )
+                    rehydrate_stats["missing_sources"] += 1
+                    continue
+                df_root = _load_root_data(entry_obj)
+                if df_root is None:
+                    rehydrate_stats["missing_sources"] += 1
+                    continue
+                entry_obj["data"] = df_root
+                shape, cols, schema, schema_hash, fingerprint = (
+                    _pipeline_studio_dataset_meta(df_root)
+                )
+                entry_obj["shape"] = shape
+                entry_obj["columns"] = cols
+                entry_obj["schema"] = schema
+                entry_obj["schema_hash"] = schema_hash
+                entry_obj["fingerprint"] = fingerprint
+                datasets_map[did] = entry_obj
+                rehydrate_stats["roots_loaded"] += 1
+
+            # Topological replay (best effort).
+            in_degree: dict[str, int] = {
+                did: len(parents_map.get(did) or []) for did in datasets_map.keys()
+            }
+            queue: list[str] = [did for did, deg in in_degree.items() if deg == 0]
+            order: list[str] = []
+            while queue:
+                cur = queue.pop(0)
+                order.append(cur)
+                for child in children_map.get(cur, set()):
+                    if child not in in_degree:
+                        continue
+                    in_degree[child] -= 1
+                    if in_degree[child] <= 0:
+                        queue.append(child)
+
+            sql_url = st.session_state.get("sql_url") or DEFAULT_SQL_URL
+            for did in order:
+                entry_obj = datasets_map.get(did)
+                if not isinstance(entry_obj, dict):
+                    continue
+                if _coerce_entry_df(entry_obj) is not None:
+                    continue
+                parents = parents_map.get(did) or []
+                if not parents:
+                    continue
+                parent_dfs: list[pd.DataFrame] = []
+                for pid in parents:
+                    parent_entry = datasets_map.get(pid)
+                    parent_df = _coerce_entry_df(parent_entry) if parent_entry else None
+                    if parent_df is None:
+                        parent_dfs = []
+                        break
+                    parent_dfs.append(parent_df)
+                if not parent_dfs:
+                    continue
+                prov = entry_obj.get("provenance")
+                prov = prov if isinstance(prov, dict) else {}
+                transform = prov.get("transform")
+                transform = transform if isinstance(transform, dict) else {}
+                kind = str(transform.get("kind") or "")
+                out_df = None
+                if kind == "python_function":
+                    fn_code = transform.get("function_code")
+                    if not isinstance(fn_code, str) or not fn_code.strip():
+                        fn_code = _read_text_file(transform.get("function_path"))
+                    out_df = _exec_python_function(
+                        code=fn_code,
+                        df_in=parent_dfs[0],
+                        fn_name_hint=transform.get("function_name"),
+                    )
+                elif kind == "python_merge":
+                    merge_code = transform.get("merge_code")
+                    if not isinstance(merge_code, str) or not merge_code.strip():
+                        merge_code = _read_text_file(transform.get("merge_path"))
+                    out_df = _exec_merge(code=merge_code, parents=parent_dfs)
+                elif kind == "sql_query":
+                    sql_code = transform.get("sql_query_code")
+                    if not isinstance(sql_code, str) or not sql_code.strip():
+                        sql_code = _read_text_file(transform.get("sql_query_path"))
+                    out_df = _exec_sql_query(sql_code=sql_code, sql_url=sql_url)
+                if not isinstance(out_df, pd.DataFrame):
+                    rehydrate_stats["transform_failures"] += 1
+                    continue
+                entry_obj["data"] = out_df
+                shape, cols, schema, schema_hash, fingerprint = (
+                    _pipeline_studio_dataset_meta(out_df)
+                )
+                entry_obj["shape"] = shape
+                entry_obj["columns"] = cols
+                entry_obj["schema"] = schema
+                entry_obj["schema_hash"] = schema_hash
+                entry_obj["fingerprint"] = fingerprint
+                datasets_map[did] = entry_obj
+                rehydrate_stats["transforms_run"] += 1
+
+            return datasets_map, rehydrate_stats
+
+        missing_data = any(
+            _coerce_entry_df(entry_obj) is None for entry_obj in datasets.values()
+        )
+        if bool(rehydrate) and (metadata_only or missing_data):
+            datasets, rehydrate_stats = _rehydrate_datasets(datasets)
 
         prev = st.session_state.get("team_state", {})
         prev = prev if isinstance(prev, dict) else {}
         new_team_state = dict(prev)
         new_team_state["datasets"] = datasets
+        data_ids = [
+            did
+            for did, entry_obj in datasets.items()
+            if _coerce_entry_df(entry_obj) is not None
+        ]
         if active_id and active_id in datasets:
-            new_team_state["active_dataset_id"] = active_id
+            if data_ids and active_id not in data_ids:
+                new_team_state["active_dataset_id"] = data_ids[0]
+            else:
+                new_team_state["active_dataset_id"] = active_id
         else:
-            new_team_state["active_dataset_id"] = next(iter(datasets.keys()), None)
+            new_team_state["active_dataset_id"] = (
+                data_ids[0] if data_ids else next(iter(datasets.keys()), None)
+            )
         st.session_state["team_state"] = new_team_state
 
         # Restore code drafts (merge).
@@ -886,9 +1590,19 @@ def _pipeline_studio_load_project(*, project_dir: str) -> dict:
         st.session_state["pipeline_studio_flow_fit_view_pending"] = True
         st.session_state["pipeline_studio_flow_ts"] = int(_time.time() * 1000)
 
+        try:
+            _pipeline_studio_update_project_manifest(
+                project_dir=project_dir, updates={"last_opened_ts": _time.time()}
+            )
+        except Exception:
+            pass
+
         return {
             "loaded_datasets": len(datasets),
             "active_dataset_id": new_team_state.get("active_dataset_id"),
+            "data_mode": "metadata_only" if metadata_only else "full",
+            "rehydrate_stats": rehydrate_stats,
+            "missing_sources": missing_sources,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1680,29 +2394,7 @@ def _save_pipeline_studio_dataset_store(store: dict) -> None:
 
         if not isinstance(store, dict):
             return
-        by_id = store.get("by_dataset_id")
-        by_id = by_id if isinstance(by_id, dict) else {}
-
-        max_items = int(PIPELINE_STUDIO_DATASET_STORE_MAX_ITEMS)
-        if max_items > 0 and len(by_id) > max_items:
-            items: list[tuple[float, str]] = []
-            for did, rec in by_id.items():
-                ts = 0.0
-                if isinstance(rec, dict):
-                    try:
-                        ts = float(
-                            rec.get("saved_ts")
-                            or rec.get("created_ts")
-                            or rec.get("created_at")
-                            or 0.0
-                        )
-                    except Exception:
-                        ts = 0.0
-                items.append((ts, did))
-            items.sort(reverse=True)
-            keep = {did for _ts, did in items[:max_items]}
-            by_id = {did: by_id[did] for did in keep if did in by_id}
-            store["by_dataset_id"] = by_id
+        store = _pipeline_studio_prune_dataset_cache(store)
 
         store["version"] = PIPELINE_STUDIO_DATASET_STORE_VERSION
         store["updated_ts"] = time.time()
@@ -1726,11 +2418,89 @@ def _save_pipeline_studio_dataset_store(store: dict) -> None:
         pass
 
 
+def _pipeline_studio_prune_dataset_cache(store: dict) -> dict:
+    try:
+        store = store if isinstance(store, dict) else {}
+        by_id = store.get("by_dataset_id")
+        by_id = by_id if isinstance(by_id, dict) else {}
+        max_items = int(
+            st.session_state.get(
+                "pipeline_dataset_cache_max_items",
+                PIPELINE_STUDIO_DATASET_CACHE_MAX_ITEMS_DEFAULT,
+            )
+        )
+        max_mb = float(
+            st.session_state.get(
+                "pipeline_dataset_cache_max_mb",
+                PIPELINE_STUDIO_DATASET_CACHE_MAX_MB_DEFAULT,
+            )
+        )
+        max_bytes = int(max_mb * 1024 * 1024) if max_mb > 0 else 0
+        if max_items <= 0 and max_bytes <= 0:
+            return store
+
+        items: list[tuple[float, str, int, str | None]] = []
+        for did, rec in by_id.items():
+            if not isinstance(did, str) or not did:
+                continue
+            rec = rec if isinstance(rec, dict) else {}
+            ts = 0.0
+            try:
+                ts = float(
+                    rec.get("saved_ts")
+                    or rec.get("created_ts")
+                    or rec.get("created_at")
+                    or 0.0
+                )
+            except Exception:
+                ts = 0.0
+            rel_path = rec.get("data_path")
+            rel_path = rel_path if isinstance(rel_path, str) and rel_path else None
+            abs_path = os.path.join(APP_ROOT, rel_path) if rel_path else None
+            size = 0
+            if abs_path and os.path.exists(abs_path):
+                try:
+                    size = int(os.path.getsize(abs_path))
+                except Exception:
+                    size = 0
+            items.append((ts, did, size, abs_path))
+
+        items.sort(reverse=True)
+        keep: set[str] = set()
+        kept_bytes = 0
+        for _ts, did, size, _abs in items:
+            if max_items > 0 and len(keep) >= max_items:
+                continue
+            if max_bytes > 0 and size > 0 and (kept_bytes + size) > max_bytes:
+                continue
+            keep.add(did)
+            kept_bytes += size
+
+        remove_ids = set(by_id.keys()) - keep
+        if remove_ids:
+            for did in list(remove_ids):
+                rec = by_id.pop(did, None)
+                rec = rec if isinstance(rec, dict) else {}
+                rel_path = rec.get("data_path")
+                rel_path = rel_path if isinstance(rel_path, str) and rel_path else None
+                if rel_path:
+                    abs_path = os.path.join(APP_ROOT, rel_path)
+                    try:
+                        if os.path.exists(abs_path):
+                            os.remove(abs_path)
+                    except Exception:
+                        pass
+            store["by_dataset_id"] = by_id
+        return store
+    except Exception:
+        return store
+
+
 def _persist_pipeline_studio_dataset_entry(
     *, dataset_id: str, entry: dict, store: dict | None = None
 ) -> None:
     try:
-        if not bool(st.session_state.get("pipeline_dataset_persist_enabled", True)):
+        if not bool(st.session_state.get("pipeline_dataset_persist_enabled", False)):
             return
         dataset_id = dataset_id.strip() if isinstance(dataset_id, str) else ""
         if not dataset_id:
@@ -1751,34 +2521,120 @@ def _persist_pipeline_studio_dataset_entry(
         prev_fp = prev.get("fingerprint") or prev.get("schema_hash")
         cur_fp = entry.get("fingerprint") or entry.get("schema_hash")
         if prev_fp and cur_fp and str(prev_fp) == str(cur_fp) and prev.get("data_path"):
-            return
+            rel_prev = prev.get("data_path")
+            rel_prev = rel_prev if isinstance(rel_prev, str) and rel_prev else None
+            abs_prev = os.path.join(APP_ROOT, rel_prev) if rel_prev else None
+            if abs_prev and os.path.exists(abs_prev):
+                return
 
         os.makedirs(PIPELINE_STUDIO_DATASET_STORE_DIR, exist_ok=True)
+        cache_format = (
+            st.session_state.get("pipeline_dataset_cache_format") or "parquet"
+        )
+        cache_format = str(cache_format).strip().lower()
+
+        import tempfile
+        import time
+
+        data_format = "pickle"
         rel_path = os.path.join(
             "pipeline_store", "pipeline_datasets", f"{dataset_id}.pkl"
         )
         abs_path = os.path.join(APP_ROOT, rel_path)
 
-        import tempfile
-        import time
-
-        fd, tmp_path = tempfile.mkstemp(
-            prefix="._dataset_", suffix=".pkl", dir=PIPELINE_STUDIO_DATASET_STORE_DIR
-        )
-        try:
-            os.close(fd)
-            df.to_pickle(tmp_path)
-            os.replace(tmp_path, abs_path)
-        finally:
+        def _write_parquet(path: str) -> bool:
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                for compression in ("zstd", "snappy", "gzip", None):
+                    try:
+                        df.to_parquet(
+                            path,
+                            index=False,
+                            compression=compression,
+                        )
+                        return True
+                    except Exception:
+                        continue
             except Exception:
-                pass
+                return False
+            return False
+
+        if cache_format == "parquet":
+            rel_path = os.path.join(
+                "pipeline_store", "pipeline_datasets", f"{dataset_id}.parquet"
+            )
+            abs_path = os.path.join(APP_ROOT, rel_path)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="._dataset_",
+                suffix=".parquet",
+                dir=PIPELINE_STUDIO_DATASET_STORE_DIR,
+            )
+            try:
+                os.close(fd)
+                if _write_parquet(tmp_path):
+                    os.replace(tmp_path, abs_path)
+                    data_format = "parquet"
+                else:
+                    raise ValueError("Parquet write failed")
+            except Exception:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                rel_path = os.path.join(
+                    "pipeline_store", "pipeline_datasets", f"{dataset_id}.pkl"
+                )
+                abs_path = os.path.join(APP_ROOT, rel_path)
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix="._dataset_",
+                    suffix=".pkl",
+                    dir=PIPELINE_STUDIO_DATASET_STORE_DIR,
+                )
+                try:
+                    os.close(fd)
+                    df.to_pickle(tmp_path)
+                    os.replace(tmp_path, abs_path)
+                    data_format = "pickle"
+                finally:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+        else:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="._dataset_",
+                suffix=".pkl",
+                dir=PIPELINE_STUDIO_DATASET_STORE_DIR,
+            )
+            try:
+                os.close(fd)
+                df.to_pickle(tmp_path)
+                os.replace(tmp_path, abs_path)
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+
+        data_bytes = None
+        try:
+            if os.path.exists(abs_path):
+                data_bytes = int(os.path.getsize(abs_path))
+        except Exception:
+            data_bytes = None
 
         meta = {k: v for k, v in entry.items() if k != "data"}
         meta["data_path"] = rel_path
-        meta["data_format"] = "pickle"
+        meta["data_format"] = data_format
+        meta["data_bytes"] = data_bytes
         meta["saved_ts"] = time.time()
         by_id[dataset_id] = meta
         store["by_dataset_id"] = by_id
@@ -1789,7 +2645,7 @@ def _persist_pipeline_studio_dataset_entry(
 
 def _persist_pipeline_studio_team_state(*, team_state: dict) -> None:
     try:
-        if not bool(st.session_state.get("pipeline_dataset_persist_enabled", True)):
+        if not bool(st.session_state.get("pipeline_dataset_persist_enabled", False)):
             return
         team_state = team_state if isinstance(team_state, dict) else {}
         datasets = team_state.get("datasets")
@@ -1841,7 +2697,7 @@ def _persist_pipeline_studio_team_state(*, team_state: dict) -> None:
 
 def _maybe_restore_pipeline_studio_datasets() -> None:
     try:
-        if not bool(st.session_state.get("pipeline_dataset_restore_enabled", True)):
+        if not bool(st.session_state.get("pipeline_dataset_restore_enabled", False)):
             return
         restored_flag = "_pipeline_studio_dataset_store_restored"
         if bool(st.session_state.get(restored_flag)):
@@ -1870,8 +2726,15 @@ def _maybe_restore_pipeline_studio_datasets() -> None:
             abs_path = os.path.join(APP_ROOT, rel_path)
             if not os.path.exists(abs_path):
                 continue
+            fmt = meta.get("data_format")
+            fmt = fmt if isinstance(fmt, str) and fmt else "pickle"
             try:
-                df = pd.read_pickle(abs_path)
+                if fmt == "parquet":
+                    df = pd.read_parquet(abs_path)
+                elif fmt == "csv":
+                    df = pd.read_csv(abs_path)
+                else:
+                    df = pd.read_pickle(abs_path)
             except Exception:
                 continue
             if not isinstance(df, pd.DataFrame):
@@ -2393,7 +3256,6 @@ def _pipeline_studio_reset_project(*, clear_cache: bool, add_memory: bool) -> No
         "Started a new project (current session cleared)."
     )
     _keep_pipeline_studio_open()
-    _safe_rerun()
 
 
 def _pipeline_studio_delete_project(*, dir_name: str) -> None:
@@ -2419,12 +3281,57 @@ def _pipeline_studio_delete_project(*, dir_name: str) -> None:
     )
     st.session_state.pop("pipeline_studio_project_select", None)
     _keep_pipeline_studio_open()
-    _safe_rerun()
 
 
-def _parse_merge_shortcut(
-    prompt: str, *, datasets: dict
-) -> dict | None:
+def _pipeline_studio_factory_reset(add_memory: bool | None = None) -> None:
+    add_memory = bool(add_memory)
+    docked = bool(st.session_state.get("pipeline_studio_docked", False))
+    target_label = st.session_state.get("pipeline_studio_target")
+    show_hidden = bool(st.session_state.get("pipeline_studio_show_hidden", False))
+    show_deleted = bool(st.session_state.get("pipeline_studio_show_deleted", False))
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("pipeline_studio_") or key.startswith("_pipeline_studio_"):
+            st.session_state.pop(key, None)
+
+    st.session_state["pipeline_studio_docked"] = docked
+    if isinstance(target_label, str) and target_label:
+        st.session_state["pipeline_studio_target"] = target_label
+    st.session_state["pipeline_studio_show_hidden"] = show_hidden
+    st.session_state["pipeline_studio_show_deleted"] = show_deleted
+
+    st.session_state["team_state"] = {}
+    st.session_state["details"] = []
+    st.session_state["chat_history"] = []
+    st.session_state["selected_data_raw"] = None
+    st.session_state["selected_data_provenance"] = None
+    st.session_state["last_pipeline_persist_dir"] = None
+
+    _queue_active_dataset_override("")
+    st.session_state.pop("chat_dataset_selector", None)
+
+    msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
+    msgs.clear()
+    msgs.add_ai_message("How can the data science team help today?")
+    st.session_state["thread_id"] = str(uuid.uuid4())
+    st.session_state["checkpointer"] = get_checkpointer() if add_memory else None
+
+    pipeline_store_root = os.path.join(APP_ROOT, "pipeline_store")
+    pipeline_reports_root = os.path.join(APP_ROOT, "pipeline_reports")
+    for path in (pipeline_store_root, pipeline_reports_root):
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception:
+            pass
+
+    st.session_state["pipeline_studio_project_notice"] = (
+        "Factory reset complete. Removed `pipeline_store/` and `pipeline_reports/`."
+    )
+    _keep_pipeline_studio_open()
+
+
+def _parse_merge_shortcut(prompt: str, *, datasets: dict) -> dict | None:
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     text = prompt.strip()
@@ -2939,9 +3846,7 @@ def _pipeline_studio_ui_state(
     lineage = pipe.get("lineage") if isinstance(pipe, dict) else None
     lineage = lineage if isinstance(lineage, list) else []
     node_ids = [
-        str(x.get("id"))
-        for x in lineage
-        if isinstance(x, dict) and x.get("id")
+        str(x.get("id")) for x in lineage if isinstance(x, dict) and x.get("id")
     ]
     pipeline_hash = pipe.get("pipeline_hash") if isinstance(pipe, dict) else None
     pipeline_hash = (
@@ -3321,7 +4226,9 @@ with st.sidebar:
             help="Overrides which dataset is considered active for downstream steps (EDA/viz/wrangle/clean).",
             key="active_dataset_id_override",
         )
-        st.caption("For merges, use Pipeline Studio (create a node with multiple parents).")
+        st.caption(
+            "For merges, use Pipeline Studio (create a node with multiple parents)."
+        )
     else:
         st.session_state["active_dataset_id_override"] = ""
         st.selectbox(
@@ -3371,17 +4278,58 @@ with st.sidebar:
             key="pipeline_preserve_studio_nodes",
             help="Keeps Pipeline Studio-created nodes (manual/edited) and their parents when agent results arrive.",
         )
-        st.checkbox(
+        persist_enabled = st.checkbox(
             "Persist pipeline nodes to disk",
-            value=bool(st.session_state.get("pipeline_dataset_persist_enabled", True)),
+            value=bool(st.session_state.get("pipeline_dataset_persist_enabled", False)),
             key="pipeline_dataset_persist_enabled",
-            help="Stores datasets under `pipeline_store/` for recovery across sessions (uses pandas pickles).",
+            help="Stores datasets under `pipeline_store/` for recovery across sessions (Parquet when available, else pickle).",
         )
         st.checkbox(
             "Restore pipeline nodes on start",
-            value=bool(st.session_state.get("pipeline_dataset_restore_enabled", True)),
+            value=bool(st.session_state.get("pipeline_dataset_restore_enabled", False)),
             key="pipeline_dataset_restore_enabled",
             help="Restores persisted datasets into the current session when available.",
+            disabled=not bool(persist_enabled),
+        )
+        cache_format = st.session_state.get("pipeline_dataset_cache_format")
+        cache_format = (
+            cache_format if cache_format in {"parquet", "pickle"} else "parquet"
+        )
+        st.selectbox(
+            "Dataset cache format",
+            options=["parquet", "pickle"],
+            index=0 if cache_format == "parquet" else 1,
+            key="pipeline_dataset_cache_format",
+            help="Parquet is smaller; pickle is fastest but larger.",
+            disabled=not bool(persist_enabled),
+        )
+        st.number_input(
+            "Dataset cache max items",
+            min_value=0,
+            step=1,
+            value=int(
+                st.session_state.get(
+                    "pipeline_dataset_cache_max_items",
+                    PIPELINE_STUDIO_DATASET_CACHE_MAX_ITEMS_DEFAULT,
+                )
+            ),
+            key="pipeline_dataset_cache_max_items",
+            help="0 disables pruning; older items are removed first.",
+            disabled=not bool(persist_enabled),
+        )
+        st.number_input(
+            "Dataset cache max size (MB)",
+            min_value=0.0,
+            step=50.0,
+            value=float(
+                st.session_state.get(
+                    "pipeline_dataset_cache_max_mb",
+                    PIPELINE_STUDIO_DATASET_CACHE_MAX_MB_DEFAULT,
+                )
+            ),
+            key="pipeline_dataset_cache_max_mb",
+            help="0 disables pruning; older items are removed first.",
+            disabled=not bool(persist_enabled),
         )
     if st.session_state.get("last_pipeline_persist_dir"):
         st.caption(
@@ -3881,17 +4829,16 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 _queue_active_dataset_override("")
                 _persist_pipeline_studio_team_state(team_state=updated)
                 _sync_pipeline_targets_after_ui_change()
-                st.session_state[notice_key] = (
-                    f"Active dataset set to `{dataset_id}`."
-                )
-                _safe_rerun()
+                st.session_state[notice_key] = f"Active dataset set to `{dataset_id}`."
 
             cols = st.columns([0.64, 0.18, 0.18], gap="small")
             with cols[0]:
                 selected_now = st.selectbox(
                     "Set active dataset",
                     options=options_now,
-                    index=options_now.index(active_now) if active_now in options_now else 0,
+                    index=options_now.index(active_now)
+                    if active_now in options_now
+                    else 0,
                     format_func=_fmt_dataset_now,
                     key=f"pipeline_active_pick_{key_suffix}",
                 )
@@ -3903,7 +4850,9 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 ):
                     _set_active_dataset_now(selected_now)
             with cols[2]:
-                target_id = pipe.get("target_dataset_id") if isinstance(pipe, dict) else None
+                target_id = (
+                    pipe.get("target_dataset_id") if isinstance(pipe, dict) else None
+                )
                 if isinstance(target_id, str) and target_id in datasets_now:
                     if st.button(
                         "Use target",
@@ -4327,6 +5276,7 @@ if data_raw_dict is None:
 st.session_state.selected_data_raw = data_raw_dict
 st.session_state.selected_data_provenance = input_provenance
 
+
 # ---------------- User input ----------------
 def _resolve_chat_target_dataset() -> tuple[str | None, str | None, dict]:
     team_state = st.session_state.get("team_state", {})
@@ -4339,8 +5289,10 @@ def _resolve_chat_target_dataset() -> tuple[str | None, str | None, dict]:
     visible_set = set(visible_ids) if visible_ids else set(datasets.keys())
     if not visible_set:
         visible_set = set(datasets.keys())
+
     def _is_visible(did: str | None) -> bool:
         return isinstance(did, str) and did in visible_set
+
     active_override = st.session_state.get("active_dataset_id_override") or None
     if _is_visible(active_override):
         return active_override, "override", datasets
@@ -4370,9 +5322,7 @@ if chat_target_id and isinstance(chat_target_datasets, dict):
         meta_bits.append(f"{shape[0]}×{shape[1]}")
     meta_txt = f" ({', '.join(meta_bits)})" if meta_bits else ""
     source_txt = (
-        f" - {str(chat_target_source).replace('_', ' ')}"
-        if chat_target_source
-        else ""
+        f" - {str(chat_target_source).replace('_', ' ')}" if chat_target_source else ""
     )
     st.markdown(
         "\n".join(
@@ -4402,11 +5352,13 @@ else:
     st.caption("Chat target: Auto (supervisor active dataset)")
 
 team_state_for_chat = st.session_state.get("team_state", {})
-team_state_for_chat = team_state_for_chat if isinstance(team_state_for_chat, dict) else {}
+team_state_for_chat = (
+    team_state_for_chat if isinstance(team_state_for_chat, dict) else {}
+)
 datasets_for_chat = team_state_for_chat.get("datasets")
 datasets_for_chat = datasets_for_chat if isinstance(datasets_for_chat, dict) else {}
-visible_ids, ui_hidden_ids, ui_deleted_ids, _p_hash, _node_ids = _pipeline_studio_ui_state(
-    team_state=team_state_for_chat
+visible_ids, ui_hidden_ids, ui_deleted_ids, _p_hash, _node_ids = (
+    _pipeline_studio_ui_state(team_state=team_state_for_chat)
 )
 visible_set = set(visible_ids) if visible_ids else set(datasets_for_chat.keys())
 if ui_hidden_ids or ui_deleted_ids:
@@ -4448,7 +5400,6 @@ if chat_dataset_options:
         else:
             _queue_active_dataset_override(str(selected))
             st.session_state["pipeline_studio_node_id_pending"] = str(selected)
-        _safe_rerun()
 
     st.selectbox(
         "Chat dataset",
@@ -4498,9 +5449,7 @@ if prompt:
     if team_prompt:
         team_state_for_merge = st.session_state.get("team_state", {})
         team_state_for_merge = (
-            team_state_for_merge
-            if isinstance(team_state_for_merge, dict)
-            else {}
+            team_state_for_merge if isinstance(team_state_for_merge, dict) else {}
         )
         merge_shortcut = _parse_merge_shortcut(
             team_prompt, datasets=team_state_for_merge.get("datasets") or {}
@@ -4576,6 +5525,7 @@ if prompt:
             persisted = persisted if isinstance(persisted, dict) else {}
             if not active_dataset_override and chat_target_id:
                 active_dataset_override = chat_target_id
+
             def _payload_safe(obj):
                 try:
                     if isinstance(obj, pd.DataFrame):
@@ -4656,9 +5606,7 @@ if prompt:
                         "active_dataset_id"
                     )
                 if "active_data_key" in persisted:
-                    invoke_payload["active_data_key"] = persisted.get(
-                        "active_data_key"
-                    )
+                    invoke_payload["active_data_key"] = persisted.get("active_data_key")
             # Provide continuity when memory is disabled (no checkpointer).
             if not add_memory and persisted:
                 invoke_payload.update(
@@ -6454,9 +7402,7 @@ def _render_pipeline_studio() -> None:
             exec_locals: dict[str, object] = {}
             exec(code, exec_globals, exec_locals)
 
-            out = (
-                exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
-            )
+            out = exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
             if isinstance(out, tuple) and out:
                 out = out[0]
             if not isinstance(out, pd.DataFrame):
@@ -6595,9 +7541,7 @@ def _render_pipeline_studio() -> None:
             exec_locals: dict[str, object] = {}
             exec(draft_code, exec_globals, exec_locals)
 
-            out = (
-                exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
-            )
+            out = exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
             if isinstance(out, tuple) and out:
                 out = out[0]
             if not isinstance(out, pd.DataFrame):
@@ -6912,9 +7856,7 @@ def _render_pipeline_studio() -> None:
                 exec_locals: dict[str, object] = {}
                 exec(code, exec_globals, exec_locals)
                 out = (
-                    exec_locals["df"]
-                    if "df" in exec_locals
-                    else exec_globals.get("df")
+                    exec_locals["df"] if "df" in exec_locals else exec_globals.get("df")
                 )
                 if isinstance(out, tuple) and out:
                     out = out[0]
@@ -7377,10 +8319,9 @@ def _render_pipeline_studio() -> None:
                 )
                 if isinstance(pipe, dict):
                     target_id = pipe.get("target_dataset_id")
-                    if (
-                        isinstance(target_id, str)
-                        and target_id in set(ui_hidden_ids) | set(ui_deleted_ids)
-                    ):
+                    if isinstance(target_id, str) and target_id in set(
+                        ui_hidden_ids
+                    ) | set(ui_deleted_ids):
                         visible_ids = [
                             did
                             for did in node_ids
@@ -7412,149 +8353,6 @@ def _render_pipeline_studio() -> None:
                     f"**Target dataset id:** `{target_display}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
-                with st.expander("Merge wizard", expanded=False):
-                    if len(studio_datasets) < 2:
-                        st.info("Load at least two datasets to enable merges.")
-                    else:
-                        ordered_ids = sorted(
-                            studio_datasets.items(),
-                            key=lambda kv: float(kv[1].get("created_ts") or 0.0)
-                            if isinstance(kv[1], dict)
-                            else 0.0,
-                            reverse=True,
-                        )
-                        wizard_ids = [did for did, _e in ordered_ids if isinstance(did, str)]
-                        if not wizard_ids:
-                            st.info("No datasets available.")
-                        else:
-                            def _wiz_label(did: str) -> str:
-                                entry = studio_datasets.get(did)
-                                entry = entry if isinstance(entry, dict) else {}
-                                label = entry.get("label") or did
-                                stage = entry.get("stage") or "dataset"
-                                shape = entry.get("shape")
-                                shape_txt = f" {shape}" if shape else ""
-                                return f"{stage}: {label}{shape_txt} ({did})"
-
-                            default_left = (
-                                studio_active_id
-                                if isinstance(studio_active_id, str)
-                                and studio_active_id in wizard_ids
-                                else wizard_ids[0]
-                            )
-                            left_id = st.selectbox(
-                                "Left dataset",
-                                options=wizard_ids,
-                                index=wizard_ids.index(default_left)
-                                if default_left in wizard_ids
-                                else 0,
-                                format_func=_wiz_label,
-                                key="pipeline_studio_merge_left_id",
-                            )
-                            right_options = [did for did in wizard_ids if did != left_id]
-                            right_default = right_options[0] if right_options else left_id
-                            right_id = st.selectbox(
-                                "Right dataset",
-                                options=right_options or wizard_ids,
-                                index=right_options.index(right_default)
-                                if right_default in right_options
-                                else 0,
-                                format_func=_wiz_label,
-                                key="pipeline_studio_merge_right_id",
-                            )
-                            op = st.selectbox(
-                                "Merge operation",
-                                options=["join", "concat"],
-                                index=0,
-                                key="pipeline_studio_merge_op",
-                            )
-
-                            def _dataset_columns(did: str) -> list[str]:
-                                entry = studio_datasets.get(did)
-                                entry = entry if isinstance(entry, dict) else {}
-                                cols = entry.get("columns")
-                                if isinstance(cols, list):
-                                    return [str(c) for c in cols if str(c)]
-                                df = _dataset_entry_to_df(entry)
-                                if isinstance(df, pd.DataFrame):
-                                    return [str(c) for c in df.columns]
-                                return []
-
-                            join_keys: list[str] = []
-                            join_how = "left"
-                            concat_axis = 0
-                            concat_ignore_index = True
-                            if op == "join":
-                                left_cols = _dataset_columns(left_id)
-                                right_cols = _dataset_columns(right_id)
-                                common_cols = [c for c in left_cols if c in set(right_cols)]
-                                preferred = sorted(
-                                    common_cols,
-                                    key=lambda c: (0 if "id" in c.lower() else 1, c.lower()),
-                                )
-                                join_keys = st.multiselect(
-                                    "Join keys",
-                                    options=preferred,
-                                    default=preferred[:1],
-                                    key="pipeline_studio_merge_keys",
-                                )
-                                join_how = st.selectbox(
-                                    "Join type",
-                                    options=["inner", "left", "right", "outer"],
-                                    index=1,
-                                    key="pipeline_studio_merge_how",
-                                )
-                            else:
-                                concat_axis = st.selectbox(
-                                    "Concat axis",
-                                    options=[0, 1],
-                                    index=0,
-                                    key="pipeline_studio_merge_axis",
-                                )
-                                concat_ignore_index = st.checkbox(
-                                    "Ignore index (axis=0)",
-                                    value=True,
-                                    key="pipeline_studio_merge_ignore_index",
-                                )
-
-                            stage_default = "wrangled"
-                            label_default = "merge_wizard"
-                            stage = st.text_input(
-                                "Stage",
-                                value=stage_default,
-                                key="pipeline_studio_merge_stage",
-                            )
-                            label = st.text_input(
-                                "Label",
-                                value=label_default,
-                                key="pipeline_studio_merge_label",
-                            )
-
-                            if op == "join":
-                                key_expr = join_keys or ["id"]
-                                join_code = (
-                                    "import pandas as pd\n\n"
-                                    "# df_0, df_1, ... are available\n"
-                                    f"df = df_0.merge(df_1, on={key_expr!r}, how={join_how!r})\n"
-                                )
-                            else:
-                                join_code = (
-                                    "import pandas as pd\n\n"
-                                    "# df_0, df_1, ... are available\n"
-                                    f"df = pd.concat([df_0, df_1], axis={concat_axis}, ignore_index={concat_ignore_index if concat_axis == 0 else False})\n"
-                                )
-                            st.code(join_code, language="python")
-                            if st.button(
-                                "Create merge node",
-                                key="pipeline_studio_merge_create",
-                                use_container_width=True,
-                            ):
-                                _pipeline_studio_create_manual_merge_node(
-                                    parent_ids=[left_id, right_id],
-                                    stage=stage,
-                                    label=label,
-                                    code=join_code,
-                                )
                 show_hidden_pick = bool(
                     st.session_state.get("pipeline_studio_show_hidden", False)
                 )
@@ -7617,11 +8415,13 @@ def _render_pipeline_studio() -> None:
                     st.session_state["pipeline_studio_active_notice"] = (
                         f"Active dataset set to `{dataset_id}`."
                     )
-                    _safe_rerun()
 
                 if pick_ids:
                     default_pick = st.session_state.get("pipeline_studio_node_id")
-                    if not isinstance(default_pick, str) or default_pick not in pick_ids:
+                    if (
+                        not isinstance(default_pick, str)
+                        or default_pick not in pick_ids
+                    ):
                         default_pick = (
                             studio_active_id
                             if isinstance(studio_active_id, str)
@@ -7670,9 +8470,7 @@ def _render_pipeline_studio() -> None:
                         st.caption(
                             "Active dataset override is set in the sidebar and may supersede this selection."
                         )
-                    notice = st.session_state.pop(
-                        "pipeline_studio_active_notice", None
-                    )
+                    notice = st.session_state.pop("pipeline_studio_active_notice", None)
                     if isinstance(notice, str) and notice.strip():
                         st.success(notice)
                 if (
@@ -7724,14 +8522,18 @@ def _render_pipeline_studio() -> None:
 
                 with st.expander("Projects (save/load)", expanded=False):
                     st.caption(
-                        "Saves datasets + Pipeline Studio state to `pipeline_store/pipeline_projects/` "
-                        "(pickle; do not load untrusted files)."
+                        "Saves Pipeline Studio state to `pipeline_store/pipeline_projects/` "
+                        "(pickles optional; do not load untrusted files)."
                     )
 
-                    def _save_project_click(project_name: str) -> None:
+                    def _save_project_click(
+                        project_name: str, include_data: bool
+                    ) -> None:
                         team_state = st.session_state.get("team_state", {})
                         res = _pipeline_studio_save_project(
-                            name=project_name or "project", team_state=team_state
+                            name=project_name or "project",
+                            team_state=team_state,
+                            include_data=bool(include_data),
                         )
                         err = res.get("error")
                         if isinstance(err, str) and err:
@@ -7741,15 +8543,18 @@ def _render_pipeline_studio() -> None:
                             return
                         project_dir = res.get("project_dir")
                         if isinstance(project_dir, str) and project_dir:
+                            data_mode = (
+                                "metadata-only" if not bool(include_data) else "full"
+                            )
                             st.session_state["pipeline_studio_project_notice"] = (
-                                f"Saved project to `{project_dir}`."
+                                f"Saved {data_mode} project to `{project_dir}`."
                             )
                         else:
                             st.session_state["pipeline_studio_project_notice"] = (
                                 "Error: Project save failed (unknown error)."
                             )
 
-                    def _load_project_click(dir_name: str) -> None:
+                    def _load_project_click(dir_name: str, rehydrate: bool) -> None:
                         dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
                         if not dir_name:
                             st.session_state["pipeline_studio_project_notice"] = (
@@ -7759,7 +8564,9 @@ def _render_pipeline_studio() -> None:
                         project_dir = os.path.join(
                             PIPELINE_STUDIO_PROJECTS_DIR, dir_name
                         )
-                        res = _pipeline_studio_load_project(project_dir=project_dir)
+                        res = _pipeline_studio_load_project(
+                            project_dir=project_dir, rehydrate=bool(rehydrate)
+                        )
                         err = res.get("error")
                         if isinstance(err, str) and err:
                             st.session_state["pipeline_studio_project_notice"] = (
@@ -7767,8 +8574,48 @@ def _render_pipeline_studio() -> None:
                             )
                             return
                         loaded_n = res.get("loaded_datasets")
-                        st.session_state["pipeline_studio_project_notice"] = (
-                            f"Loaded project: {int(loaded_n or 0)} dataset(s)."
+                        data_mode = str(res.get("data_mode") or "full")
+                        stats = res.get("rehydrate_stats")
+                        stats = stats if isinstance(stats, dict) else {}
+                        if data_mode == "metadata_only":
+                            roots_loaded = int(stats.get("roots_loaded") or 0)
+                            transforms_run = int(stats.get("transforms_run") or 0)
+                            missing_sources = int(stats.get("missing_sources") or 0)
+                            failures = int(stats.get("transform_failures") or 0)
+                            suffix_bits = []
+                            if roots_loaded or transforms_run:
+                                suffix_bits.append(
+                                    f"rehydrated {roots_loaded + transforms_run}"
+                                )
+                            if missing_sources:
+                                suffix_bits.append(
+                                    f"missing sources: {missing_sources}"
+                                )
+                            if failures:
+                                suffix_bits.append(f"transform errors: {failures}")
+                            suffix = (
+                                f" ({', '.join(suffix_bits)})" if suffix_bits else ""
+                            )
+                            st.session_state["pipeline_studio_project_notice"] = (
+                                f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s){suffix}."
+                            )
+                        else:
+                            st.session_state["pipeline_studio_project_notice"] = (
+                                f"Loaded project: {int(loaded_n or 0)} dataset(s)."
+                            )
+                        st.session_state["pipeline_studio_last_load_summary"] = {
+                            "data_mode": data_mode,
+                            "rehydrate_stats": stats,
+                        }
+                        st.session_state["pipeline_studio_loaded_project_dir"] = (
+                            project_dir
+                        )
+                        missing_sources = res.get("missing_sources")
+                        missing_sources = (
+                            missing_sources if isinstance(missing_sources, list) else []
+                        )
+                        st.session_state["pipeline_studio_missing_sources"] = (
+                            missing_sources
                         )
                         st.session_state["pipeline_studio_autofollow_pending"] = True
                         st.session_state["pipeline_studio_view_pending"] = (
@@ -7792,13 +8639,25 @@ def _render_pipeline_studio() -> None:
                         value=default_project_name,
                         key="pipeline_studio_project_name",
                     )
-                    st.button(
-                        "Save project",
-                        key="pipeline_studio_project_save",
-                        on_click=_save_project_click,
-                        args=(project_name,),
-                        use_container_width=True,
-                    )
+                    c_save_meta, c_save_full = st.columns(2)
+                    with c_save_meta:
+                        st.button(
+                            "Save project (metadata-only)",
+                            key="pipeline_studio_project_save_meta",
+                            on_click=_save_project_click,
+                            args=(project_name, False),
+                            use_container_width=True,
+                            help="Stores lineage + steps without dataset pickles; reloads from source on demand.",
+                        )
+                    with c_save_full:
+                        st.button(
+                            "Save project with data",
+                            key="pipeline_studio_project_save_full",
+                            on_click=_save_project_click,
+                            args=(project_name, True),
+                            use_container_width=True,
+                            help="Stores dataset snapshots (Parquet when available, else pickle).",
+                        )
 
                     projects = _pipeline_studio_list_projects()
                     if not projects:
@@ -7835,11 +8694,17 @@ def _render_pipeline_studio() -> None:
                             format_func=_fmt_project,
                             key="pipeline_studio_project_select",
                         )
+                        rehydrate = st.checkbox(
+                            "Rebuild datasets from sources (metadata-only)",
+                            value=True,
+                            key="pipeline_studio_project_rehydrate",
+                            help="Attempts to reload source files and replay transforms when the project contains metadata only.",
+                        )
                         st.button(
                             "Load selected project",
                             key="pipeline_studio_project_load",
                             on_click=_load_project_click,
-                            args=(selected_project,),
+                            args=(selected_project, bool(rehydrate)),
                             use_container_width=True,
                         )
                         delete_confirm = st.checkbox(
@@ -7855,6 +8720,451 @@ def _render_pipeline_studio() -> None:
                             use_container_width=True,
                             disabled=not bool(delete_confirm),
                         )
+
+                    st.markdown("---")
+                    st.markdown("**Project dashboard**")
+                    projects = _pipeline_studio_list_projects()
+                    load_summary = st.session_state.get(
+                        "pipeline_studio_last_load_summary"
+                    )
+                    if isinstance(load_summary, dict):
+                        mode = str(load_summary.get("data_mode") or "full").replace(
+                            "_", "-"
+                        )
+                        stats = load_summary.get("rehydrate_stats")
+                        stats = stats if isinstance(stats, dict) else {}
+                        stat_bits = []
+                        if stats:
+                            roots = int(stats.get("roots_loaded") or 0)
+                            transforms = int(stats.get("transforms_run") or 0)
+                            misses = int(stats.get("missing_sources") or 0)
+                            fails = int(stats.get("transform_failures") or 0)
+                            if roots or transforms:
+                                stat_bits.append(f"rehydrated {roots + transforms}")
+                            if misses:
+                                stat_bits.append(f"missing sources: {misses}")
+                            if fails:
+                                stat_bits.append(f"transform errors: {fails}")
+                        badge = f"Last load: {mode}"
+                        if stat_bits:
+                            badge = f"{badge} · {', '.join(stat_bits)}"
+                        st.info(badge)
+                    search_term = st.text_input(
+                        "Search projects",
+                        value=st.session_state.get(
+                            "pipeline_studio_project_search", ""
+                        ),
+                        key="pipeline_studio_project_search",
+                    )
+                    show_archived = st.checkbox(
+                        "Show archived projects",
+                        value=bool(
+                            st.session_state.get(
+                                "pipeline_studio_project_show_archived", False
+                            )
+                        ),
+                        key="pipeline_studio_project_show_archived",
+                    )
+                    show_sizes = st.checkbox(
+                        "Show disk usage",
+                        value=bool(
+                            st.session_state.get(
+                                "pipeline_studio_project_show_sizes", False
+                            )
+                        ),
+                        key="pipeline_studio_project_show_sizes",
+                    )
+                    sort_by = st.selectbox(
+                        "Sort by",
+                        options=[
+                            "Last saved",
+                            "Last opened",
+                            "Name",
+                            "Datasets",
+                            "Disk usage",
+                        ],
+                        index=0,
+                        key="pipeline_studio_project_sort",
+                    )
+
+                    if search_term:
+                        query = search_term.strip().lower()
+                    else:
+                        query = ""
+                    filtered_projects = []
+                    for rec in projects:
+                        if not isinstance(rec, dict):
+                            continue
+                        if not show_archived and bool(rec.get("archived")):
+                            continue
+                        name = str(rec.get("name") or rec.get("dir_name") or "")
+                        tags = rec.get("tags") or []
+                        tags = [str(t).lower() for t in tags if isinstance(t, str)]
+                        hay = " ".join([name.lower()] + tags)
+                        if query and query not in hay:
+                            continue
+                        filtered_projects.append(rec)
+
+                    if show_sizes:
+                        for rec in filtered_projects:
+                            dir_path = rec.get("dir_path")
+                            if isinstance(dir_path, str):
+                                rec["disk_bytes"] = _pipeline_studio_project_disk_usage(
+                                    dir_path
+                                )
+
+                    def _sort_key(rec: dict) -> tuple:
+                        if sort_by == "Name":
+                            return (str(rec.get("name") or ""),)
+                        if sort_by == "Last opened":
+                            return (float(rec.get("last_opened_ts") or 0.0),)
+                        if sort_by == "Datasets":
+                            return (int(rec.get("datasets_total") or 0),)
+                        if sort_by == "Disk usage":
+                            return (int(rec.get("disk_bytes") or 0),)
+                        return (float(rec.get("saved_ts") or 0.0),)
+
+                    filtered_projects.sort(key=_sort_key, reverse=sort_by != "Name")
+
+                    if not filtered_projects:
+                        st.caption("No matching projects.")
+                    else:
+                        rows = []
+                        for rec in filtered_projects:
+                            mode = str(rec.get("data_mode") or "full").replace("_", "-")
+                            rows.append(
+                                {
+                                    "name": rec.get("name") or rec.get("dir_name"),
+                                    "data_mode": mode,
+                                    "datasets": int(rec.get("datasets_total") or 0),
+                                    "saved": _pipeline_studio_format_ts(
+                                        rec.get("saved_ts")
+                                    ),
+                                    "opened": _pipeline_studio_format_ts(
+                                        rec.get("last_opened_ts")
+                                    ),
+                                    "tags": ", ".join(
+                                        [
+                                            t
+                                            for t in (rec.get("tags") or [])
+                                            if isinstance(t, str) and t.strip()
+                                        ]
+                                    ),
+                                    "archived": bool(rec.get("archived")),
+                                    "size": _pipeline_studio_format_bytes(
+                                        rec.get("disk_bytes")
+                                    )
+                                    if show_sizes
+                                    else "-",
+                                }
+                            )
+                        st.dataframe(
+                            rows,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        cache_bytes = _pipeline_studio_dataset_cache_usage()
+                        if cache_bytes:
+                            st.caption(
+                                f"Dataset cache size: {_pipeline_studio_format_bytes(cache_bytes)}"
+                            )
+
+                        def _project_label(dir_name: str) -> str:
+                            rec = next(
+                                (
+                                    p
+                                    for p in filtered_projects
+                                    if p.get("dir_name") == dir_name
+                                ),
+                                None,
+                            )
+                            if not isinstance(rec, dict):
+                                return dir_name
+                            name = rec.get("name") or dir_name
+                            mode = str(rec.get("data_mode") or "full").replace("_", "-")
+                            data_ct = rec.get("datasets_total") or 0
+                            archived = " • archived" if rec.get("archived") else ""
+                            return f"{name} ({mode}, {data_ct} datasets){archived}"
+
+                        manage_options = [
+                            rec.get("dir_name")
+                            for rec in filtered_projects
+                            if rec.get("dir_name")
+                        ]
+                        manage_options = [
+                            x
+                            for x in manage_options
+                            if isinstance(x, str) and x.strip()
+                        ]
+                        manage_choice = st.selectbox(
+                            "Manage project",
+                            options=[""] + manage_options,
+                            format_func=_project_label,
+                            key="pipeline_studio_project_manage",
+                        )
+                        if manage_choice:
+                            rec = next(
+                                (
+                                    p
+                                    for p in filtered_projects
+                                    if p.get("dir_name") == manage_choice
+                                ),
+                                None,
+                            )
+                            rec = rec if isinstance(rec, dict) else {}
+                            tags_str = ", ".join(
+                                [
+                                    t
+                                    for t in (rec.get("tags") or [])
+                                    if isinstance(t, str) and t.strip()
+                                ]
+                            )
+                            tags_input = st.text_input(
+                                "Tags (comma-separated)",
+                                value=tags_str,
+                                key=f"pipeline_studio_project_tags_{manage_choice}",
+                            )
+                            notes_input = st.text_area(
+                                "Notes",
+                                value=rec.get("notes") or "",
+                                key=f"pipeline_studio_project_notes_{manage_choice}",
+                            )
+                            archived_input = st.checkbox(
+                                "Archived",
+                                value=bool(rec.get("archived")),
+                                key=f"pipeline_studio_project_archived_{manage_choice}",
+                            )
+                            if st.button(
+                                "Save metadata",
+                                key=f"pipeline_studio_project_meta_save_{manage_choice}",
+                                use_container_width=True,
+                            ):
+                                tags_list = [
+                                    t.strip()
+                                    for t in tags_input.split(",")
+                                    if t.strip()
+                                ]
+                                _pipeline_studio_save_project_metadata(
+                                    dir_name=manage_choice,
+                                    tags=tags_list,
+                                    notes=notes_input,
+                                    archived=bool(archived_input),
+                                )
+
+                            rename_name = st.text_input(
+                                "Rename to",
+                                value=rec.get("name") or manage_choice,
+                                key=f"pipeline_studio_project_rename_{manage_choice}",
+                            )
+                            if st.button(
+                                "Rename project",
+                                key=f"pipeline_studio_project_rename_btn_{manage_choice}",
+                                use_container_width=True,
+                            ):
+                                res = _pipeline_studio_rename_project(
+                                    dir_name=manage_choice, new_name=rename_name
+                                )
+                                err = res.get("error")
+                                if err:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = f"Error: {err}"
+                                else:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = "Project renamed."
+
+                            dup_name = st.text_input(
+                                "Duplicate as",
+                                value=f"{rec.get('name') or manage_choice} copy",
+                                key=f"pipeline_studio_project_duplicate_{manage_choice}",
+                            )
+                            if st.button(
+                                "Duplicate project",
+                                key=f"pipeline_studio_project_duplicate_btn_{manage_choice}",
+                                use_container_width=True,
+                            ):
+                                res = _pipeline_studio_duplicate_project(
+                                    dir_name=manage_choice, new_name=dup_name
+                                )
+                                err = res.get("error")
+                                if err:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = f"Error: {err}"
+                                else:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = "Project duplicated."
+
+                            if st.button(
+                                "Convert to metadata-only",
+                                key=f"pipeline_studio_project_convert_{manage_choice}",
+                                use_container_width=True,
+                            ):
+                                _pipeline_studio_convert_project_to_metadata_only(
+                                    dir_name=manage_choice
+                                )
+
+                        bulk_options = manage_options
+                        bulk_delete = st.multiselect(
+                            "Bulk delete projects",
+                            options=bulk_options,
+                            format_func=_project_label,
+                            key="pipeline_studio_project_bulk_delete",
+                        )
+                        bulk_confirm = st.checkbox(
+                            "I understand this will delete the selected projects",
+                            value=False,
+                            key="pipeline_studio_project_bulk_confirm",
+                        )
+                        st.button(
+                            "Delete selected projects",
+                            key="pipeline_studio_project_bulk_delete_btn",
+                            on_click=_pipeline_studio_bulk_delete_projects,
+                            args=(bulk_delete,),
+                            use_container_width=True,
+                            disabled=not (bulk_confirm and bulk_delete),
+                        )
+
+                    missing_sources = st.session_state.get(
+                        "pipeline_studio_missing_sources"
+                    )
+                    missing_sources = (
+                        missing_sources if isinstance(missing_sources, list) else []
+                    )
+                    project_dir = st.session_state.get(
+                        "pipeline_studio_loaded_project_dir"
+                    )
+                    if missing_sources and isinstance(project_dir, str):
+                        with st.expander("Relink missing sources", expanded=True):
+                            st.caption(
+                                "Update file paths for datasets that could not be rehydrated."
+                            )
+                            for rec in missing_sources:
+                                did = rec.get("dataset_id")
+                                if not isinstance(did, str) or not did:
+                                    continue
+                                label = rec.get("label") or did
+                                old_src = rec.get("source") or ""
+                                st.text_input(
+                                    f"{label} ({did})",
+                                    value=old_src,
+                                    key=f"pipeline_studio_relink_{did}",
+                                    help=f"Previous source: {old_src}",
+                                )
+                            if st.button(
+                                "Relink + reload project",
+                                key="pipeline_studio_relink_apply",
+                                use_container_width=True,
+                            ):
+                                updates: dict[str, str] = {}
+                                for rec in missing_sources:
+                                    did = rec.get("dataset_id")
+                                    if not isinstance(did, str) or not did:
+                                        continue
+                                    new_val = st.session_state.get(
+                                        f"pipeline_studio_relink_{did}"
+                                    )
+                                    old_val = rec.get("source") or ""
+                                    if (
+                                        isinstance(new_val, str)
+                                        and new_val.strip()
+                                        and new_val.strip() != old_val
+                                    ):
+                                        updates[did] = new_val.strip()
+                                if updates:
+                                    _pipeline_studio_update_project_manifest(
+                                        project_dir=project_dir,
+                                        dataset_source_updates=updates,
+                                    )
+                                res = _pipeline_studio_load_project(
+                                    project_dir=project_dir, rehydrate=True
+                                )
+                                err = res.get("error")
+                                if err:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = f"Error: {err}"
+                                else:
+                                    st.session_state[
+                                        "pipeline_studio_project_notice"
+                                    ] = "Relinked sources and reloaded project."
+                                missing_next = res.get("missing_sources")
+                                missing_next = (
+                                    missing_next
+                                    if isinstance(missing_next, list)
+                                    else []
+                                )
+                                st.session_state["pipeline_studio_missing_sources"] = (
+                                    missing_next
+                                )
+
+                    project_dir = st.session_state.get(
+                        "pipeline_studio_loaded_project_dir"
+                    )
+                    if isinstance(project_dir, str) and project_dir:
+                        if st.button(
+                            "Rehydrate now",
+                            key="pipeline_studio_rehydrate_now",
+                            use_container_width=True,
+                        ):
+                            res = _pipeline_studio_load_project(
+                                project_dir=project_dir, rehydrate=True
+                            )
+                            err = res.get("error")
+                            if err:
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    f"Error: {err}"
+                                )
+                            else:
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    "Rehydrated project."
+                                )
+                            missing_next = res.get("missing_sources")
+                            missing_next = (
+                                missing_next if isinstance(missing_next, list) else []
+                            )
+                            st.session_state["pipeline_studio_missing_sources"] = (
+                                missing_next
+                            )
+                            st.session_state["pipeline_studio_last_load_summary"] = {
+                                "data_mode": res.get("data_mode"),
+                                "rehydrate_stats": res.get("rehydrate_stats") or {},
+                            }
+
+                        manifest = _pipeline_studio_load_project_manifest(
+                            project_dir=project_dir
+                        )
+                        team_state = (
+                            manifest.get("team_state")
+                            if isinstance(manifest, dict)
+                            else {}
+                        )
+                        datasets_meta = (
+                            team_state.get("datasets")
+                            if isinstance(team_state, dict)
+                            else {}
+                        )
+                        preview_sets = [
+                            (did, meta)
+                            for did, meta in datasets_meta.items()
+                            if isinstance(meta, dict)
+                            and isinstance(meta.get("preview_data"), list)
+                            and meta.get("preview_data")
+                        ]
+                        if preview_sets:
+                            with st.expander(
+                                "Data previews (metadata-only)", expanded=False
+                            ):
+                                for did, meta in preview_sets:
+                                    label = meta.get("label") or did
+                                    st.caption(f"{label} ({did})")
+                                    st.dataframe(
+                                        meta.get("preview_data"),
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
 
                     st.markdown("---")
                     st.markdown("**Start new project**")
@@ -7880,6 +9190,26 @@ def _render_pipeline_studio() -> None:
                         args=(bool(clear_cache), bool(add_memory)),
                         use_container_width=True,
                         disabled=not bool(confirm_reset),
+                    )
+
+                    st.markdown("---")
+                    st.markdown("**Factory reset (delete cache + reports)**")
+                    st.caption(
+                        "Deletes `pipeline_store/` (datasets/projects/cache) and "
+                        "`pipeline_reports/` (pipeline specs/scripts). This is permanent."
+                    )
+                    factory_confirm = st.checkbox(
+                        "I understand this will permanently delete pipeline_store/ and pipeline_reports/",
+                        value=False,
+                        key="pipeline_studio_factory_reset_confirm",
+                    )
+                    st.button(
+                        "Factory reset",
+                        key="pipeline_studio_factory_reset",
+                        on_click=_pipeline_studio_factory_reset,
+                        args=(bool(add_memory),),
+                        use_container_width=True,
+                        disabled=not bool(factory_confirm),
                     )
 
                 def _pipeline_studio_hide_nodes(
@@ -8442,6 +9772,162 @@ def _render_pipeline_studio() -> None:
                         on_click=_apply_template,
                         use_container_width=True,
                     )
+
+                with st.expander("Merge wizard", expanded=False):
+                    if len(studio_datasets) < 2:
+                        st.info("Load at least two datasets to enable merges.")
+                    else:
+                        ordered_ids = sorted(
+                            studio_datasets.items(),
+                            key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                            if isinstance(kv[1], dict)
+                            else 0.0,
+                            reverse=True,
+                        )
+                        wizard_ids = [
+                            did for did, _e in ordered_ids if isinstance(did, str)
+                        ]
+                        if not wizard_ids:
+                            st.info("No datasets available.")
+                        else:
+
+                            def _wiz_label(did: str) -> str:
+                                entry = studio_datasets.get(did)
+                                entry = entry if isinstance(entry, dict) else {}
+                                label = entry.get("label") or did
+                                stage = entry.get("stage") or "dataset"
+                                shape = entry.get("shape")
+                                shape_txt = f" {shape}" if shape else ""
+                                return f"{stage}: {label}{shape_txt} ({did})"
+
+                            default_left = (
+                                studio_active_id
+                                if isinstance(studio_active_id, str)
+                                and studio_active_id in wizard_ids
+                                else wizard_ids[0]
+                            )
+                            left_id = st.selectbox(
+                                "Left dataset",
+                                options=wizard_ids,
+                                index=wizard_ids.index(default_left)
+                                if default_left in wizard_ids
+                                else 0,
+                                format_func=_wiz_label,
+                                key="pipeline_studio_merge_left_id",
+                            )
+                            right_options = [
+                                did for did in wizard_ids if did != left_id
+                            ]
+                            right_default = (
+                                right_options[0] if right_options else left_id
+                            )
+                            right_id = st.selectbox(
+                                "Right dataset",
+                                options=right_options or wizard_ids,
+                                index=right_options.index(right_default)
+                                if right_default in right_options
+                                else 0,
+                                format_func=_wiz_label,
+                                key="pipeline_studio_merge_right_id",
+                            )
+                            op = st.selectbox(
+                                "Merge operation",
+                                options=["join", "concat"],
+                                index=0,
+                                key="pipeline_studio_merge_op",
+                            )
+
+                            def _dataset_columns(did: str) -> list[str]:
+                                entry = studio_datasets.get(did)
+                                entry = entry if isinstance(entry, dict) else {}
+                                cols = entry.get("columns")
+                                if isinstance(cols, list):
+                                    return [str(c) for c in cols if str(c)]
+                                df = _dataset_entry_to_df(entry)
+                                if isinstance(df, pd.DataFrame):
+                                    return [str(c) for c in df.columns]
+                                return []
+
+                            join_keys: list[str] = []
+                            join_how = "left"
+                            concat_axis = 0
+                            concat_ignore_index = True
+                            if op == "join":
+                                left_cols = _dataset_columns(left_id)
+                                right_cols = _dataset_columns(right_id)
+                                common_cols = [
+                                    c for c in left_cols if c in set(right_cols)
+                                ]
+                                preferred = sorted(
+                                    common_cols,
+                                    key=lambda c: (
+                                        0 if "id" in c.lower() else 1,
+                                        c.lower(),
+                                    ),
+                                )
+                                join_keys = st.multiselect(
+                                    "Join keys",
+                                    options=preferred,
+                                    default=preferred[:1],
+                                    key="pipeline_studio_merge_keys",
+                                )
+                                join_how = st.selectbox(
+                                    "Join type",
+                                    options=["inner", "left", "right", "outer"],
+                                    index=1,
+                                    key="pipeline_studio_merge_how",
+                                )
+                            else:
+                                concat_axis = st.selectbox(
+                                    "Concat axis",
+                                    options=[0, 1],
+                                    index=0,
+                                    key="pipeline_studio_merge_axis",
+                                )
+                                concat_ignore_index = st.checkbox(
+                                    "Ignore index (axis=0)",
+                                    value=True,
+                                    key="pipeline_studio_merge_ignore_index",
+                                )
+
+                            stage_default = "wrangled"
+                            label_default = "merge_wizard"
+                            stage = st.text_input(
+                                "Stage",
+                                value=stage_default,
+                                key="pipeline_studio_merge_stage",
+                            )
+                            label = st.text_input(
+                                "Label",
+                                value=label_default,
+                                key="pipeline_studio_merge_label",
+                            )
+
+                            if op == "join":
+                                key_expr = join_keys or ["id"]
+                                join_code = (
+                                    "import pandas as pd\n\n"
+                                    "# df_0, df_1, ... are available\n"
+                                    f"df = df_0.merge(df_1, on={key_expr!r}, how={join_how!r})\n"
+                                )
+                            else:
+                                join_code = (
+                                    "import pandas as pd\n\n"
+                                    "# df_0, df_1, ... are available\n"
+                                    f"df = pd.concat([df_0, df_1], axis={concat_axis}, ignore_index={concat_ignore_index if concat_axis == 0 else False})\n"
+                                )
+                            st.code(join_code, language="python")
+                            if st.button(
+                                "Create merge node",
+                                key="pipeline_studio_merge_create",
+                                use_container_width=True,
+                            ):
+                                _pipeline_studio_create_manual_merge_node(
+                                    parent_ids=[left_id, right_id],
+                                    stage=stage,
+                                    label=label,
+                                    code=join_code,
+                                )
 
                 m = meta_by_id.get(selected_node_id) or {}
                 with st.expander("Selected step details", expanded=False):
@@ -10886,7 +12372,7 @@ def _render_pipeline_studio() -> None:
                         st.session_state.get("pipeline_studio_manual_node_open", False)
                     )
                     if manual_open:
-                        with st.expander("New node (manual transform)", expanded=True):
+                        with st.expander("New node (manual transform)", expanded=False):
                             kind_labels = {
                                 "python_function": "Python transform",
                                 "sql_query": "SQL query",
@@ -10973,7 +12459,10 @@ def _render_pipeline_studio() -> None:
                                     cleaned: list[str] = []
                                     seen: set[str] = set()
                                     for did in ids:
-                                        if not isinstance(did, str) or did not in dataset_ids:
+                                        if (
+                                            not isinstance(did, str)
+                                            or did not in dataset_ids
+                                        ):
                                             continue
                                         if did in seen:
                                             continue
@@ -10991,13 +12480,20 @@ def _render_pipeline_studio() -> None:
                                         "pipeline_studio_manual_parent_notice"
                                     ] = notice or "Updated parent datasets."
                                     _keep_pipeline_studio_open()
-                                    _safe_rerun()
 
                                 def _parse_parent_hint(text: str) -> list[str]:
                                     text = text if isinstance(text, str) else ""
-                                    tokens = [t.strip() for t in re.split(r"[,\n]+", text) if t.strip()]
+                                    tokens = [
+                                        t.strip()
+                                        for t in re.split(r"[,\n]+", text)
+                                        if t.strip()
+                                    ]
                                     if len(tokens) <= 1:
-                                        tokens = [t.strip() for t in re.split(r"\s+", text) if t.strip()]
+                                        tokens = [
+                                            t.strip()
+                                            for t in re.split(r"\s+", text)
+                                            if t.strip()
+                                        ]
                                     if not tokens:
                                         return []
                                     resolved: list[str] = []
@@ -11010,7 +12506,10 @@ def _render_pipeline_studio() -> None:
                                         if tok_lower:
                                             for did in dataset_ids:
                                                 did_lower = did.lower()
-                                                if tok_lower == did_lower or tok_lower in did_lower:
+                                                if (
+                                                    tok_lower == did_lower
+                                                    or tok_lower in did_lower
+                                                ):
                                                     match_id = did
                                                     break
                                         if match_id:
@@ -11018,16 +12517,24 @@ def _render_pipeline_studio() -> None:
                                             continue
                                         for did in dataset_ids:
                                             entry = studio_datasets.get(did)
-                                            entry = entry if isinstance(entry, dict) else {}
+                                            entry = (
+                                                entry if isinstance(entry, dict) else {}
+                                            )
                                             label = entry.get("label") or ""
                                             prov = entry.get("provenance")
-                                            prov = prov if isinstance(prov, dict) else {}
+                                            prov = (
+                                                prov if isinstance(prov, dict) else {}
+                                            )
                                             candidates = [
                                                 str(label),
                                                 str(prov.get("original_name") or ""),
                                                 str(prov.get("source") or ""),
                                             ]
-                                            if any(tok_lower in c.lower() for c in candidates if c):
+                                            if any(
+                                                tok_lower in c.lower()
+                                                for c in candidates
+                                                if c
+                                            ):
                                                 match_id = did
                                                 break
                                         if match_id:
@@ -11064,7 +12571,10 @@ def _render_pipeline_studio() -> None:
                                         use_container_width=True,
                                     ):
                                         auto_ids: list[str] = []
-                                        if isinstance(active_id, str) and active_id in dataset_ids:
+                                        if (
+                                            isinstance(active_id, str)
+                                            and active_id in dataset_ids
+                                        ):
                                             auto_ids.append(active_id)
                                         for did in dataset_ids:
                                             if did not in auto_ids:
@@ -11072,7 +12582,8 @@ def _render_pipeline_studio() -> None:
                                             if len(auto_ids) >= 2:
                                                 break
                                         _queue_manual_merge_parents(
-                                            auto_ids, notice="Auto-picked parent datasets."
+                                            auto_ids,
+                                            notice="Auto-picked parent datasets.",
                                         )
 
                                 default_merge = (
@@ -12607,7 +14118,7 @@ if drawer_open and _pipeline_studio_is_docked():
             "\n".join(
                 [
                     "<style>",
-                    ".pipeline-studio-drawer {",
+                    "div[data-testid=\"stVerticalBlock\"]:has(#pipeline-studio-drawer-marker) {",
                     "  height: calc(100vh - 220px);",
                     "  max-height: 900px;",
                     "  min-height: 320px;",
@@ -12617,12 +14128,18 @@ if drawer_open and _pipeline_studio_is_docked():
                     "  border-radius: 12px;",
                     "  background: rgba(15, 15, 15, 0.45);",
                     "}",
+                    "#pipeline-studio-drawer-marker {",
+                    "  display: none;",
+                    "}",
                     "</style>",
                 ]
             ),
             unsafe_allow_html=True,
         )
-        st.markdown('<div class="pipeline-studio-drawer">', unsafe_allow_html=True)
+        st.markdown(
+            '<span id="pipeline-studio-drawer-marker"></span>',
+            unsafe_allow_html=True,
+        )
         st.markdown("### Pipeline Studio (Docked)")
         c_drawer_close, _c_drawer_hint = st.columns(
             [0.18, 0.82], vertical_alignment="center"
@@ -12637,7 +14154,6 @@ if drawer_open and _pipeline_studio_is_docked():
         with _c_drawer_hint:
             st.caption("Docked view keeps Studio inline while you chat.")
         _render_pipeline_studio_fragment()
-        st.markdown("</div>", unsafe_allow_html=True)
 else:
     drawer_placeholder.empty()
 

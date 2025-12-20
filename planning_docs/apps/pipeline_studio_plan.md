@@ -63,6 +63,13 @@ This plan proposes a **Pipeline Studio** experience that:
 ✅ Recently implemented:
 - Rich node inspector actions (edit code + rerun / delete subgraph) + semantic graph model
 - Templates palette (quick add) with prebuilt Python/SQL/Merge snippets that open the manual node editor
+- Project management + footprint controls:
+  - Metadata-only project saves with preview samples + rehydrate from source
+  - “Save project with data” (Parquet preferred; pickle fallback)
+  - Project dashboard (search/sort, tags/notes/archive, rename/duplicate, bulk delete)
+  - Relink missing sources UI + rehydrate status summary
+  - Dataset cache controls (persist/restore off by default, cache limits, parquet/pickle)
+  - Factory reset + start-new-project flow
 
 ## Proposed UX
 
@@ -322,6 +329,14 @@ Persist two files (or SQLite tables):
    - Implement `run_from(node_id)` and downstream invalidation
    - Persist outputs/artifacts by `(run_id, node_id)`
 
+### Phase 6 — Project management + footprint controls ✅ (implemented)
+1) Metadata-only project saves (default) with preview samples
+2) “Save project with data” using Parquet when available (pickle fallback)
+3) Project dashboard (search/sort, tags/notes/archive, rename/duplicate, bulk delete)
+4) Relink missing sources + rehydrate summary
+5) Dataset cache controls (persist/restore defaults off, cache size limits, format)
+6) Factory reset + start-new-project actions
+
 ## Acceptance Criteria (MVP)
 ✅ Users can open Pipeline Studio and:
 - Select pipeline target (Model/Active/Latest)
@@ -341,6 +356,16 @@ Persist two files (or SQLite tables):
 - **True “live”**: people may mean streaming incremental intermediate results. MVP focuses on “live toggling of latest outputs” rather than streaming intermediate DataFrame updates.
 - **Workflow editor complexity**: interactive canvas introduces heavy state management and requires a custom Streamlit component.
 - **Code execution safety**: “edit code + rerun” requires clear guardrails (local-only, confirmations, and a limited execution model).
+
+## Release Checklist (Remaining to Ship)
+- Validate project load/rehydrate against older manifests (migrate missing fields safely).
+- Smoke-test metadata-only save → reload → rehydrate flow (including missing-source relink).
+- Smoke-test cache pruning + Parquet fallback + factory reset/start-new-project.
+- Add short user-facing docs or README snippet describing:
+  - Metadata-only vs full-data saves
+  - Rehydrate/relink workflow
+  - Cache controls + storage footprint expectations
+- (Optional) Add lightweight tests or a manual QA script for core workflows.
 
 ## Next Design Decisions (to unblock Phase 4/5)
 - **Navigation**: tabs vs multi-page vs modal (decide what becomes the “default” workspace).
