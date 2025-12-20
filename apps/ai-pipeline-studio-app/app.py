@@ -46,8 +46,11 @@ from ai_data_science_team.ml_agents.model_evaluation_agent import ModelEvaluatio
 from ai_data_science_team.multiagents.supervisor_ds_team import make_supervisor_ds_team
 from ai_data_science_team.utils.pipeline import build_pipeline_snapshot
 
+APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TITLE = "AI Pipeline Studio"
-st.set_page_config(page_title=TITLE, page_icon=":bar_chart:", layout="wide")
+LOGO_PATH = os.path.join(APP_ROOT, "img", "ai_pipeline_studio_logo.png")
+page_icon = LOGO_PATH if os.path.exists(LOGO_PATH) else ":bar_chart:"
+st.set_page_config(page_title=TITLE, page_icon=page_icon, layout="wide")
 st.title(TITLE)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
 
@@ -57,8 +60,6 @@ SQL_URL_INPUT_KEY = "sql_url_input"
 SQL_URL_SYNC_FLAG = "_sync_sql_url_input"
 ACTIVE_DATASET_OVERRIDE_SYNC_FLAG = "_sync_active_dataset_override"
 ACTIVE_DATASET_OVERRIDE_PENDING_KEY = "active_dataset_id_override_pending"
-
-APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PIPELINE_STUDIO_ARTIFACT_STORE_VERSION = 1
 PIPELINE_STUDIO_ARTIFACT_STORE_PATH = os.path.join(
     APP_ROOT, "pipeline_store", "pipeline_studio_artifact_store.json"
@@ -4012,7 +4013,7 @@ with st.sidebar:
     if st.button(
         "Pipeline Studio",
         key="pipeline_studio_open_sidebar",
-        use_container_width=True,
+        width="stretch",
         help="Open Pipeline Studio using the selected mode.",
     ):
         _request_open_pipeline_studio()
@@ -4103,7 +4104,7 @@ with st.sidebar:
         model_choice = ollama_model
 
         if st.button(
-            "Check Ollama connection", use_container_width=True, key="ollama_check"
+            "Check Ollama connection", width="stretch", key="ollama_check"
         ):
             try:
                 from urllib.request import Request, urlopen
@@ -4880,7 +4881,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 if st.button(
                     "Set active",
                     key=f"pipeline_active_set_{key_suffix}",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     _set_active_dataset_now(selected_now)
             with cols[2]:
@@ -4891,14 +4892,14 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                     if st.button(
                         "Use target",
                         key=f"pipeline_active_target_{key_suffix}",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         _set_active_dataset_now(target_id)
                 else:
                     st.button(
                         "Use target",
                         key=f"pipeline_active_target_{key_suffix}",
-                        use_container_width=True,
+                        width="stretch",
                         disabled=True,
                     )
             if st.session_state.get("active_dataset_id_override"):
@@ -5105,7 +5106,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
                     fig,
-                    use_container_width=True,
+                    width="stretch",
                     key=f"detail_chart_{key_suffix}",
                 )
             except Exception as e:
@@ -5153,9 +5154,9 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
             st.markdown("**Model Info**")
             try:
                 if isinstance(model_info, dict):
-                    st.dataframe(pd.DataFrame(model_info), use_container_width=True)
+                    st.dataframe(pd.DataFrame(model_info), width="stretch")
                 elif isinstance(model_info, list):
-                    st.dataframe(pd.DataFrame(model_info), use_container_width=True)
+                    st.dataframe(pd.DataFrame(model_info), width="stretch")
                 else:
                     st.json(model_info)
             except Exception:
@@ -5173,7 +5174,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
                     fig,
-                    use_container_width=True,
+                    width="stretch",
                     key=f"eval_chart_{key_suffix}",
                 )
             except Exception as e:
@@ -5231,7 +5232,7 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                         ]
                         st.dataframe(
                             df[preferred_cols] if preferred_cols else df,
-                            use_container_width=True,
+                            width="stretch",
                         )
                         if any(
                             c in df.columns
@@ -5258,11 +5259,11 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                         ]
                         st.dataframe(
                             df[preferred_cols] if preferred_cols else df,
-                            use_container_width=True,
+                            width="stretch",
                         )
                         return
                     if isinstance(obj, list):
-                        st.dataframe(pd.DataFrame(obj), use_container_width=True)
+                        st.dataframe(pd.DataFrame(obj), width="stretch")
                         return
                 except Exception:
                     pass
@@ -8523,7 +8524,7 @@ def _render_pipeline_studio() -> None:
                         if st.button(
                             "Set active",
                             key="pipeline_studio_active_set",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             _set_active_dataset_studio(picked_id)
                     with pick_cols[2]:
@@ -8536,14 +8537,14 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Use target",
                                 key="pipeline_studio_active_target",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 _set_active_dataset_studio(target_id)
                         else:
                             st.button(
                                 "Use target",
                                 key="pipeline_studio_active_target",
-                                use_container_width=True,
+                                width="stretch",
                                 disabled=True,
                             )
                     if st.session_state.get("active_dataset_id_override"):
@@ -8752,7 +8753,7 @@ def _render_pipeline_studio() -> None:
                             key="pipeline_studio_project_save_meta",
                             on_click=_save_project_click,
                             args=(project_name, False),
-                            use_container_width=True,
+                            width="stretch",
                             help="Stores lineage + steps without dataset pickles; reloads from source on demand.",
                         )
                     with c_save_full:
@@ -8761,7 +8762,7 @@ def _render_pipeline_studio() -> None:
                             key="pipeline_studio_project_save_full",
                             on_click=_save_project_click,
                             args=(project_name, True),
-                            use_container_width=True,
+                            width="stretch",
                             help="Stores dataset snapshots (Parquet when available, else pickle).",
                         )
 
@@ -8840,7 +8841,7 @@ def _render_pipeline_studio() -> None:
                             key="pipeline_studio_project_load",
                             on_click=_load_project_click,
                             args=(selected_project, bool(rehydrate)),
-                            use_container_width=True,
+                            width="stretch",
                         )
                         delete_confirm = st.checkbox(
                             "I understand this will delete the selected project",
@@ -8852,7 +8853,7 @@ def _render_pipeline_studio() -> None:
                             key="pipeline_studio_project_delete",
                             on_click=_pipeline_studio_delete_project,
                             args=(selected_project,),
-                            use_container_width=True,
+                            width="stretch",
                             disabled=not bool(delete_confirm),
                         )
 
@@ -9025,8 +9026,8 @@ def _render_pipeline_studio() -> None:
                             )
 
                         st.dataframe(
-                            df_rows.style.applymap(_style_mode, subset=["mode"]),
-                            use_container_width=True,
+                            df_rows.style.map(_style_mode, subset=["mode"]),
+                            width="stretch",
                             hide_index=True,
                         )
                         cache_bytes = _pipeline_studio_dataset_cache_usage()
@@ -9103,7 +9104,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Save metadata",
                                 key=f"pipeline_studio_project_meta_save_{manage_choice}",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 tags_list = [
                                     t.strip()
@@ -9125,7 +9126,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Rename project",
                                 key=f"pipeline_studio_project_rename_btn_{manage_choice}",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 res = _pipeline_studio_rename_project(
                                     dir_name=manage_choice, new_name=rename_name
@@ -9148,7 +9149,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Duplicate project",
                                 key=f"pipeline_studio_project_duplicate_btn_{manage_choice}",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 res = _pipeline_studio_duplicate_project(
                                     dir_name=manage_choice, new_name=dup_name
@@ -9166,7 +9167,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Convert to metadata-only",
                                 key=f"pipeline_studio_project_convert_{manage_choice}",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 _pipeline_studio_convert_project_to_metadata_only(
                                     dir_name=manage_choice
@@ -9189,7 +9190,7 @@ def _render_pipeline_studio() -> None:
                             key="pipeline_studio_project_bulk_delete_btn",
                             on_click=_pipeline_studio_bulk_delete_projects,
                             args=(bulk_delete,),
-                            use_container_width=True,
+                            width="stretch",
                             disabled=not (bulk_confirm and bulk_delete),
                         )
 
@@ -9222,7 +9223,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Relink + reload project",
                                 key="pipeline_studio_relink_apply",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 updates: dict[str, str] = {}
                                 for rec in missing_sources:
@@ -9273,7 +9274,7 @@ def _render_pipeline_studio() -> None:
                         if st.button(
                             "Rehydrate now",
                             key="pipeline_studio_rehydrate_now",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             res = _pipeline_studio_load_project(
                                 project_dir=project_dir, rehydrate=True
@@ -9328,7 +9329,7 @@ def _render_pipeline_studio() -> None:
                                     st.caption(f"{label} ({did})")
                                     st.dataframe(
                                         meta.get("preview_data"),
-                                        use_container_width=True,
+                                        width="stretch",
                                         hide_index=True,
                                     )
 
@@ -9354,7 +9355,7 @@ def _render_pipeline_studio() -> None:
                         key="pipeline_studio_project_reset",
                         on_click=_pipeline_studio_reset_project,
                         args=(bool(clear_cache), bool(add_memory)),
-                        use_container_width=True,
+                        width="stretch",
                         disabled=not bool(confirm_reset),
                     )
 
@@ -9374,7 +9375,7 @@ def _render_pipeline_studio() -> None:
                         key="pipeline_studio_factory_reset",
                         on_click=_pipeline_studio_factory_reset,
                         args=(bool(add_memory),),
-                        use_container_width=True,
+                        width="stretch",
                         disabled=not bool(factory_confirm),
                     )
 
@@ -9453,12 +9454,12 @@ def _render_pipeline_studio() -> None:
                             if isinstance(skipped, list) and skipped:
                                 st.markdown("**Skipped**")
                                 st.dataframe(
-                                    pd.DataFrame(skipped), use_container_width=True
+                                    pd.DataFrame(skipped), width="stretch"
                                 )
                             if isinstance(failed, list) and failed:
                                 st.markdown("**Failures**")
                                 st.dataframe(
-                                    pd.DataFrame(failed), use_container_width=True
+                                    pd.DataFrame(failed), width="stretch"
                                 )
                             if pipeline_hash and stale_ids:
                                 st.markdown("---")
@@ -9520,7 +9521,7 @@ def _render_pipeline_studio() -> None:
                         ]
                         if mapping_rows:
                             st.dataframe(
-                                pd.DataFrame(mapping_rows), use_container_width=True
+                                pd.DataFrame(mapping_rows), width="stretch"
                             )
 
                         c_hide_stale, c_hide_old = st.columns(2)
@@ -9532,7 +9533,7 @@ def _render_pipeline_studio() -> None:
                                 disabled=not bool(pipeline_hash and stale_ids),
                                 on_click=_pipeline_studio_hide_nodes,
                                 args=(pipeline_hash, stale_ids),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with c_hide_old:
                             st.button(
@@ -9542,7 +9543,7 @@ def _render_pipeline_studio() -> None:
                                 disabled=not bool(pipeline_hash and src_old),
                                 on_click=_pipeline_studio_hide_old_branch,
                                 args=(pipeline_hash, src_old or ""),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                 _pipeline_studio_history_init()
@@ -9936,7 +9937,7 @@ def _render_pipeline_studio() -> None:
                         "Use template",
                         key="pipeline_studio_template_apply",
                         on_click=_apply_template,
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 with st.expander("Merge wizard", expanded=False):
@@ -10086,7 +10087,7 @@ def _render_pipeline_studio() -> None:
                             if st.button(
                                 "Create merge node",
                                 key="pipeline_studio_merge_create",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 _pipeline_studio_create_manual_merge_node(
                                     parent_ids=[left_id, right_id],
@@ -10207,7 +10208,7 @@ def _render_pipeline_studio() -> None:
                                     kind,
                                     code_lang,
                                 ),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with c_reset:
 
@@ -10228,7 +10229,7 @@ def _render_pipeline_studio() -> None:
                                 key=f"pipeline_studio_inline_reset_{selected_node_id}",
                                 on_click=_reset_inline_draft,
                                 args=(selected_node_id, fp),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                         st.markdown("**Run draft (local)**")
@@ -10300,7 +10301,7 @@ def _render_pipeline_studio() -> None:
                                 disabled=not bool(confirmed),
                                 on_click=_run_inline_draft,
                                 args=(selected_node_id, inline_key, kind),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with r2:
                             st.button(
@@ -10315,7 +10316,7 @@ def _render_pipeline_studio() -> None:
                                     kind,
                                     bool(replace_mode),
                                 ),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                     st.markdown("---")
@@ -10338,7 +10339,7 @@ def _render_pipeline_studio() -> None:
                             "pipeline_hash": pipeline_hash,
                             "root_id": selected_node_id,
                         },
-                        use_container_width=True,
+                        width="stretch",
                     )
                     st.button(
                         "Restore subgraph",
@@ -10350,7 +10351,7 @@ def _render_pipeline_studio() -> None:
                             "pipeline_hash": pipeline_hash,
                             "root_id": selected_node_id,
                         },
-                        use_container_width=True,
+                        width="stretch",
                     )
                     st.markdown("---")
                     clear_history = st.checkbox(
@@ -10374,7 +10375,7 @@ def _render_pipeline_studio() -> None:
                             "root_id": selected_node_id,
                             "clear_history": bool(clear_history),
                         },
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 if st.button(
@@ -10550,7 +10551,7 @@ def _render_pipeline_studio() -> None:
                             else graph_json
                         )
                         fig = _apply_streamlit_plot_style(pio.from_json(payload))
-                        st.plotly_chart(fig, use_container_width=True, key=widget_key)
+                        st.plotly_chart(fig, width="stretch", key=widget_key)
 
                     def _build_code_snippet(entry_obj: dict):
                         prov = (
@@ -10685,7 +10686,7 @@ def _render_pipeline_studio() -> None:
                                     st.markdown("**Dtype changes**")
                                     st.dataframe(
                                         pd.DataFrame(changes),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                 else:
                                     st.caption(
@@ -10746,7 +10747,7 @@ def _render_pipeline_studio() -> None:
                                                 ).drop(columns=["abs_delta"])
                                                 st.dataframe(
                                                     miss_df.head(50),
-                                                    use_container_width=True,
+                                                    width="stretch",
                                                 )
                                                 if len(shared) > max_cols:
                                                     st.caption(
@@ -10774,7 +10775,7 @@ def _render_pipeline_studio() -> None:
                             else:
                                 st.caption(f"Shape: {df_a.shape[0]} × {df_a.shape[1]}")
                                 st.dataframe(
-                                    df_a.head(int(rows)), use_container_width=True
+                                    df_a.head(int(rows)), width="stretch"
                                 )
                         with cb:
                             st.markdown(f"**B (compare): {_node_label(b_id)}**")
@@ -10783,7 +10784,7 @@ def _render_pipeline_studio() -> None:
                             else:
                                 st.caption(f"Shape: {df_b.shape[0]} × {df_b.shape[1]}")
                                 st.dataframe(
-                                    df_b.head(int(rows)), use_container_width=True
+                                    df_b.head(int(rows)), width="stretch"
                                 )
 
                     with cmp_tabs[2]:
@@ -10994,7 +10995,7 @@ def _render_pipeline_studio() -> None:
                                             a_small[
                                                 a_small[key_col].isin(sample_keys)
                                             ].head(int(preview_rows)),
-                                            use_container_width=True,
+                                            width="stretch",
                                         )
                                 if only_b:
                                     with st.expander(
@@ -11006,7 +11007,7 @@ def _render_pipeline_studio() -> None:
                                             b_small[
                                                 b_small[key_col].isin(sample_keys)
                                             ].head(int(preview_rows)),
-                                            use_container_width=True,
+                                            width="stretch",
                                         )
 
                                 if not cols_to_compare:
@@ -11061,7 +11062,7 @@ def _render_pipeline_studio() -> None:
                                             "mismatched_rows", ascending=False
                                         )
                                         st.markdown("**Value diffs (by key)**")
-                                        st.dataframe(diff_df, use_container_width=True)
+                                        st.dataframe(diff_df, width="stretch")
                                         inspect_default = str(diff_df.iloc[0]["column"])
                                         current_inspect = st.session_state.get(
                                             "pipeline_studio_compare_rowdiff_inspect_col"
@@ -11106,7 +11107,7 @@ def _render_pipeline_studio() -> None:
                                                 b_col: f"{inspect_col} (compare)",
                                             }
                                         )
-                                        st.dataframe(preview, use_container_width=True)
+                                        st.dataframe(preview, width="stretch")
 
                     # Compare mode replaces the workspace when enabled.
                     return
@@ -11249,7 +11250,7 @@ def _render_pipeline_studio() -> None:
                             step=5,
                             key="pipeline_studio_preview_rows",
                         )
-                        st.dataframe(df_sel.head(int(rows)), use_container_width=True)
+                        st.dataframe(df_sel.head(int(rows)), width="stretch")
                         try:
                             cols = (
                                 entry.get("columns")
@@ -11305,7 +11306,7 @@ def _render_pipeline_studio() -> None:
                                         f"missing_count (first {len(sample)} rows)",
                                     ]
                                     st.markdown("**Missingness (sampled)**")
-                                    st.dataframe(miss_df, use_container_width=True)
+                                    st.dataframe(miss_df, width="stretch")
                                 else:
                                     st.caption(
                                         f"No missing values detected in first {len(sample)} rows (sampled)."
@@ -11389,7 +11390,7 @@ def _render_pipeline_studio() -> None:
                             fig = _apply_streamlit_plot_style(pio.from_json(payload))
                             st.plotly_chart(
                                 fig,
-                                use_container_width=True,
+                                width="stretch",
                                 key=f"pipeline_studio_chart_{selected_node_id}",
                             )
                         except Exception as e:
@@ -11803,7 +11804,7 @@ def _render_pipeline_studio() -> None:
                                     on_click=_run_draft_click,
                                     args=(selected_node_id, editor_key, kind),
                                     help="Runs the draft and registers the output as a new dataset (active).",
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
                             with r2:
                                 st.button(
@@ -11814,7 +11815,7 @@ def _render_pipeline_studio() -> None:
                                     on_click=_run_draft_and_downstream,
                                     args=(selected_node_id, editor_key, kind),
                                     help="Runs the draft, then best-effort reruns downstream steps.",
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
                     else:
                         st.info("No runnable code recorded for this step.")
@@ -11872,12 +11873,12 @@ def _render_pipeline_studio() -> None:
                             if isinstance(model_info, dict):
                                 st.dataframe(
                                     pd.DataFrame(model_info),
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
                             elif isinstance(model_info, list):
                                 st.dataframe(
                                     pd.DataFrame(model_info),
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
                             else:
                                 st.json(model_info)
@@ -11896,7 +11897,7 @@ def _render_pipeline_studio() -> None:
                             fig = _apply_streamlit_plot_style(pio.from_json(payload))
                             st.plotly_chart(
                                 fig,
-                                use_container_width=True,
+                                width="stretch",
                                 key=f"pipeline_studio_eval_chart_{selected_node_id}",
                             )
                         except Exception as e:
@@ -11941,7 +11942,7 @@ def _render_pipeline_studio() -> None:
                             else None,
                         }
                         st.json({k: v for k, v in meta.items() if v})
-                        st.dataframe(df_sel.head(50), use_container_width=True)
+                        st.dataframe(df_sel.head(50), width="stretch")
 
                 elif view == "MLflow":
                     mlflow_art = None
@@ -11999,7 +12000,7 @@ def _render_pipeline_studio() -> None:
                                     ]
                                     st.dataframe(
                                         df[preferred_cols] if preferred_cols else df,
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                     if any(
                                         c in df.columns
@@ -12033,13 +12034,13 @@ def _render_pipeline_studio() -> None:
                                     ]
                                     st.dataframe(
                                         df[preferred_cols] if preferred_cols else df,
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                     return
                                 if isinstance(obj, list):
                                     st.dataframe(
                                         pd.DataFrame(obj),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                     return
                             except Exception:
@@ -12631,7 +12632,7 @@ def _render_pipeline_studio() -> None:
                             "New node",
                             key="pipeline_studio_flow_new_node_open",
                             help="Create a manual transform node (Python/SQL/Merge).",
-                            use_container_width=True,
+                            width="stretch",
                             on_click=_open_manual_node_editor,
                         )
                     with c4:
@@ -12835,7 +12836,7 @@ def _render_pipeline_studio() -> None:
                                     if st.button(
                                         "Use IDs",
                                         key="pipeline_studio_manual_parent_apply",
-                                        use_container_width=True,
+                                        width="stretch",
                                     ):
                                         resolved = _parse_parent_hint(hint_text)
                                         notice = (
@@ -12851,7 +12852,7 @@ def _render_pipeline_studio() -> None:
                                     if st.button(
                                         "Auto pick",
                                         key="pipeline_studio_manual_parent_auto",
-                                        use_container_width=True,
+                                        width="stretch",
                                     ):
                                         auto_ids: list[str] = []
                                         if (
@@ -13073,7 +13074,7 @@ def _render_pipeline_studio() -> None:
                                 if st.button(
                                     "Load into editor",
                                     key=load_key,
-                                    use_container_width=True,
+                                    width="stretch",
                                 ):
                                     try:
                                         st.session_state[template_key] = (
@@ -13216,14 +13217,14 @@ def _render_pipeline_studio() -> None:
                                     type="primary",
                                     disabled=not bool(confirm_run)
                                     or bool(manual_errors),
-                                    use_container_width=True,
+                                    width="stretch",
                                     on_click=_manual_create_click,
                                 )
                             with c_close:
                                 if st.button(
                                     "Close",
                                     key="pipeline_studio_manual_close",
-                                    use_container_width=True,
+                                    width="stretch",
                                 ):
                                     st.session_state[
                                         "pipeline_studio_manual_node_open"
@@ -13805,7 +13806,7 @@ def _render_pipeline_studio() -> None:
                                 help="Selects this node in the left rail and turns off auto-follow.",
                                 on_click=_flow_open_in_workspace,
                                 args=(sel, str(open_view)),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with c_hide:
                             st.button(
@@ -13815,7 +13816,7 @@ def _render_pipeline_studio() -> None:
                                 on_click=_flow_toggle_hidden,
                                 args=(pipeline_hash, sel, bool(in_hidden)),
                                 disabled=bool(in_deleted) or not bool(pipeline_hash),
-                                use_container_width=True,
+                                width="stretch",
                             )
                         with c_delete:
                             st.button(
@@ -13825,7 +13826,7 @@ def _render_pipeline_studio() -> None:
                                 on_click=_flow_toggle_deleted,
                                 args=(pipeline_hash, sel, bool(in_deleted)),
                                 disabled=not bool(pipeline_hash),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                         node_tabs = st.tabs(["Preview", "Code", "Metadata"])
@@ -13848,7 +13849,7 @@ def _render_pipeline_studio() -> None:
                                 )
                                 st.dataframe(
                                     df_node.head(int(preview_rows)),
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
 
                         with node_tabs[1]:
@@ -14179,7 +14180,7 @@ def _render_pipeline_studio() -> None:
                                                     bool(replace_mode),
                                                 ),
                                                 help="Runs the draft and registers the output as a new dataset (active).",
-                                                use_container_width=True,
+                                                width="stretch",
                                             )
                                         with r2:
                                             st.button(
@@ -14190,7 +14191,7 @@ def _render_pipeline_studio() -> None:
                                                 on_click=_run_draft_and_downstream_from_flow,
                                                 args=(sel, editor_key, _kind),
                                                 help="Runs the draft, then best-effort reruns downstream steps (python_function/python_merge/sql_query).",
-                                                use_container_width=True,
+                                                width="stretch",
                                             )
 
                         with node_tabs[2]:
@@ -14271,7 +14272,7 @@ def _render_pipeline_studio() -> None:
                                 key=f"pipeline_studio_flow_save_meta_{sel}",
                                 on_click=_flow_save_node_metadata,
                                 args=(sel, label_key, stage_key),
-                                use_container_width=True,
+                                width="stretch",
                             )
 
                             st.markdown("---")
@@ -14298,7 +14299,7 @@ def _render_pipeline_studio() -> None:
                                         disabled=not bool(pipeline_hash),
                                         on_click=_flow_hide_branch,
                                         args=(pipeline_hash or "", sel),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                 with c_unhide:
                                     st.button(
@@ -14307,7 +14308,7 @@ def _render_pipeline_studio() -> None:
                                         disabled=not bool(pipeline_hash),
                                         on_click=_flow_unhide_branch,
                                         args=(pipeline_hash or "", sel),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
 
                                 c_delete, c_restore = st.columns(2)
@@ -14326,7 +14327,7 @@ def _render_pipeline_studio() -> None:
                                         ),
                                         on_click=_flow_delete_branch,
                                         args=(pipeline_hash or "", sel),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                                 with c_restore:
                                     st.button(
@@ -14335,7 +14336,7 @@ def _render_pipeline_studio() -> None:
                                         disabled=not bool(pipeline_hash),
                                         on_click=_flow_restore_branch,
                                         args=(pipeline_hash or "", sel),
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
 
                                 st.markdown("---")
@@ -14359,7 +14360,7 @@ def _render_pipeline_studio() -> None:
                                     disabled=not bool(confirm_hard),
                                     on_click=_flow_hard_delete_branch,
                                     args=(pipeline_hash, sel, bool(clear_history)),
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
 
                             st.markdown("---")
@@ -14454,7 +14455,7 @@ if drawer_open and _pipeline_studio_is_docked():
                 if st.button(
                     "Close Studio",
                     key="pipeline_studio_drawer_close",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state["pipeline_studio_drawer_open"] = False
             with _c_drawer_hint:
