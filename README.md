@@ -69,9 +69,9 @@ The repository includes both the **AI Pipeline Studio** app and the underlying *
 - Modeling and evaluation (H2O + MLflow tools)
 - SQL database interaction
 
-Examples live in `examples/`.
-
 ### Agents (Snapshot)
+
+Agent examples live in `examples/`. Notable agents:
 - Data Loader Tools Agent
 - Data Wrangling Agent
 - Data Cleaning Agent
@@ -87,7 +87,7 @@ Examples live in `examples/`.
 
 ## Apps
 
-See all apps in `apps/`. Notable:
+See all apps in `apps/`. Notable apps:
 - AI Pipeline Studio: `apps/ai-pipeline-studio-app/`
 - EDA Explorer App: `apps/exploratory-copilot-app/`
 - Pandas Data Analyst App: `apps/pandas-data-analyst-app/`
