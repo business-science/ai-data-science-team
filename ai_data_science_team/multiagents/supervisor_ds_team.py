@@ -3517,6 +3517,9 @@ Examples:
             merged.get("messages"), "data_visualization_agent"
         )
         plotly_graph = response.get("plotly_graph")
+        viz_error = response.get("data_visualization_error")
+        viz_error_path = response.get("data_visualization_error_log_path")
+        viz_warning = response.get("data_visualization_warning")
         try:
             from ai_data_science_team.utils.plotly import plotly_from_dict
 
@@ -3550,6 +3553,23 @@ Examples:
             )
         except Exception:
             pass
+        if isinstance(viz_error, str) and viz_error:
+            err_bits = [viz_error]
+            if isinstance(viz_error_path, str) and viz_error_path:
+                err_bits.append(f"Log: {viz_error_path}")
+            merged["messages"].append(
+                AIMessage(
+                    content="Visualization error:\n" + "\n".join(err_bits),
+                    name="data_visualization_agent",
+                )
+            )
+        if isinstance(viz_warning, str) and viz_warning:
+            merged["messages"].append(
+                AIMessage(
+                    content="Visualization warning:\n" + viz_warning,
+                    name="data_visualization_agent",
+                )
+            )
         return {
             **merged,
             "viz_graph": plotly_graph,
@@ -3560,6 +3580,9 @@ Examples:
                     "data_visualization_function": response.get(
                         "data_visualization_function"
                     ),
+                    "error": viz_error,
+                    "error_log_path": viz_error_path,
+                    "warning": viz_warning,
                 },
             },
             "last_worker": "Data_Visualization_Agent",

@@ -4492,6 +4492,7 @@ def build_team(
     mlflow_tracking_uri: str | None,
     mlflow_artifact_root: str | None,
     mlflow_experiment_name: str,
+    debug_mode: bool = False,
 ):
     llm_provider = (llm_provider or "OpenAI").strip()
     if llm_provider.lower() == "ollama":
@@ -4536,7 +4537,9 @@ def build_team(
     data_wrangling_agent = DataWranglingAgent(llm, log=False)
     data_cleaning_agent = DataCleaningAgent(llm, log=False)
     eda_tools_agent = EDAToolsAgent(llm, log_tool_calls=True)
-    data_visualization_agent = DataVisualizationAgent(llm, log=False)
+    data_visualization_agent = DataVisualizationAgent(
+        llm, log=bool(debug_mode)
+    )
     # SQL connection is optional; default to in-memory sqlite to satisfy constructor.
     resolved_sql_url = (sql_url or DEFAULT_SQL_URL).strip() or DEFAULT_SQL_URL
     engine_kwargs: dict = {}
@@ -5082,6 +5085,16 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
     # Charts
     with tabs[4]:
         graph_json = detail.get("plotly_graph")
+        viz_error = detail.get("data_visualization_error")
+        viz_error_path = detail.get("data_visualization_error_log_path")
+        viz_warning = detail.get("data_visualization_warning")
+        if isinstance(viz_error, str) and viz_error:
+            err_bits = [viz_error]
+            if isinstance(viz_error_path, str) and viz_error_path:
+                err_bits.append(f"Log: {viz_error_path}")
+            st.error("Visualization error:\n" + "\n".join(err_bits))
+        if isinstance(viz_warning, str) and viz_warning:
+            st.warning(viz_warning)
         if graph_json:
             try:
                 payload = (
@@ -5538,6 +5551,7 @@ if prompt:
             st.session_state.get("mlflow_tracking_uri"),
             st.session_state.get("mlflow_artifact_root"),
             st.session_state.get("mlflow_experiment_name", "H2O AutoML"),
+            debug_mode=bool(st.session_state.get("debug_mode", False)),
         )
         try:
             # If LangGraph memory is enabled, pass only the new user message.
@@ -6279,6 +6293,24 @@ if prompt:
                 and isinstance(artifacts.get("viz"), dict)
                 else None
             ),
+            "data_visualization_error": (
+                artifacts.get("viz", {}).get("error")
+                if "data_visualization_agent" in ran_agents
+                and isinstance(artifacts.get("viz"), dict)
+                else None
+            ),
+            "data_visualization_error_log_path": (
+                artifacts.get("viz", {}).get("error_log_path")
+                if "data_visualization_agent" in ran_agents
+                and isinstance(artifacts.get("viz"), dict)
+                else None
+            ),
+            "data_visualization_warning": (
+                artifacts.get("viz", {}).get("warning")
+                if "data_visualization_agent" in ran_agents
+                and isinstance(artifacts.get("viz"), dict)
+                else None
+            ),
             "model_info": (
                 (result.get("model_info") or artifacts.get("h2o"))
                 if "h2o_ml_agent" in ran_agents
@@ -6408,6 +6440,23 @@ if prompt:
                 if detail.get("plotly_graph") is not None:
                     cur["plotly_graph"] = {
                         "json": _safe_json(detail.get("plotly_graph")),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("data_visualization_error") is not None:
+                    cur["viz_error"] = {
+                        "message": _safe_json(detail.get("data_visualization_error")),
+                        "log_path": _safe_json(
+                            detail.get("data_visualization_error_log_path")
+                        ),
+                        "turn_idx": idx,
+                        "created_ts": ts,
+                    }
+                if detail.get("data_visualization_warning") is not None:
+                    cur["viz_warning"] = {
+                        "message": _safe_json(
+                            detail.get("data_visualization_warning")
+                        ),
                         "turn_idx": idx,
                         "created_ts": ts,
                     }
@@ -11273,6 +11322,17 @@ def _render_pipeline_studio() -> None:
                         pg = entry_art.get("plotly_graph")
                         pg = pg if isinstance(pg, dict) else {}
                         graph_json = pg.get("json")
+                        viz_err = entry_art.get("viz_error")
+                        viz_err = viz_err if isinstance(viz_err, dict) else {}
+                        viz_err_msg = viz_err.get("message")
+                        viz_err_path = viz_err.get("log_path")
+                        viz_warn = entry_art.get("viz_warning")
+                        viz_warn = viz_warn if isinstance(viz_warn, dict) else {}
+                        viz_warn_msg = viz_warn.get("message")
+                    else:
+                        viz_err_msg = None
+                        viz_err_path = None
+                        viz_warn_msg = None
                     if not graph_json:
                         detail = _latest_detail_for_dataset_id(
                             selected_node_id, require_key="plotly_graph"
@@ -11282,6 +11342,13 @@ def _render_pipeline_studio() -> None:
                             if isinstance(detail, dict)
                             else None
                         )
+                        if isinstance(detail, dict) and not viz_err_msg:
+                            viz_err_msg = detail.get("data_visualization_error")
+                            viz_err_path = detail.get(
+                                "data_visualization_error_log_path"
+                            )
+                        if isinstance(detail, dict) and not viz_warn_msg:
+                            viz_warn_msg = detail.get("data_visualization_warning")
                     if not graph_json:
                         fp = entry.get("fingerprint")
                         fp = fp if isinstance(fp, str) and fp else None
@@ -11292,6 +11359,22 @@ def _render_pipeline_studio() -> None:
                             pg = persisted.get("plotly_graph")
                             pg = pg if isinstance(pg, dict) else {}
                             graph_json = pg.get("json")
+                            viz_err = persisted.get("viz_error")
+                            viz_err = viz_err if isinstance(viz_err, dict) else {}
+                            if not viz_err_msg:
+                                viz_err_msg = viz_err.get("message")
+                                viz_err_path = viz_err.get("log_path")
+                            viz_warn = persisted.get("viz_warning")
+                            viz_warn = viz_warn if isinstance(viz_warn, dict) else {}
+                            if not viz_warn_msg:
+                                viz_warn_msg = viz_warn.get("message")
+                    if isinstance(viz_err_msg, str) and viz_err_msg:
+                        err_bits = [viz_err_msg]
+                        if isinstance(viz_err_path, str) and viz_err_path:
+                            err_bits.append(f"Log: {viz_err_path}")
+                        st.error("Visualization error:\n" + "\n".join(err_bits))
+                    if isinstance(viz_warn_msg, str) and viz_warn_msg:
+                        st.warning(viz_warn_msg)
                     if not graph_json:
                         st.info(
                             "No chart found for this dataset yet. Try: `plot ...` while this dataset is active."
