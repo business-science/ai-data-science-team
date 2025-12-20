@@ -12,6 +12,7 @@ import uuid
 import os
 import json
 import inspect
+import shutil
 from openai import OpenAI
 import pandas as pd
 import sqlalchemy as sql
@@ -2301,6 +2302,189 @@ def _keep_pipeline_studio_open() -> None:
         st.session_state["pipeline_studio_open_requested"] = True
 
 
+def _pipeline_studio_reset_project(*, clear_cache: bool, add_memory: bool) -> None:
+    docked = bool(st.session_state.get("pipeline_studio_docked", False))
+    target_label = st.session_state.get("pipeline_studio_target")
+    show_hidden = bool(st.session_state.get("pipeline_studio_show_hidden", False))
+    show_deleted = bool(st.session_state.get("pipeline_studio_show_deleted", False))
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("pipeline_studio_"):
+            st.session_state.pop(key, None)
+
+    st.session_state["pipeline_studio_docked"] = docked
+    if isinstance(target_label, str) and target_label:
+        st.session_state["pipeline_studio_target"] = target_label
+    st.session_state["pipeline_studio_show_hidden"] = show_hidden
+    st.session_state["pipeline_studio_show_deleted"] = show_deleted
+
+    st.session_state["team_state"] = {}
+    st.session_state["details"] = []
+    st.session_state["chat_history"] = []
+    st.session_state["selected_data_raw"] = None
+    st.session_state["selected_data_provenance"] = None
+    st.session_state["last_pipeline_persist_dir"] = None
+
+    _queue_active_dataset_override("")
+    st.session_state.pop("chat_dataset_selector", None)
+
+    msgs = StreamlitChatMessageHistory(key="supervisor_ds_msgs")
+    msgs.clear()
+    msgs.add_ai_message("How can the data science team help today?")
+    st.session_state["thread_id"] = str(uuid.uuid4())
+    st.session_state["checkpointer"] = get_checkpointer() if add_memory else None
+
+    dataset_store = {
+        "version": PIPELINE_STUDIO_DATASET_STORE_VERSION,
+        "path": PIPELINE_STUDIO_DATASET_STORE_PATH,
+        "by_dataset_id": {},
+        "active_dataset_id": None,
+        "locked_node_ids": [],
+    }
+    registry_store = {
+        "version": PIPELINE_STUDIO_PIPELINE_REGISTRY_VERSION,
+        "path": PIPELINE_STUDIO_PIPELINE_REGISTRY_PATH,
+        "by_pipeline_hash": {},
+    }
+    artifact_store = {
+        "version": PIPELINE_STUDIO_ARTIFACT_STORE_VERSION,
+        "path": PIPELINE_STUDIO_ARTIFACT_STORE_PATH,
+        "by_fingerprint": {},
+    }
+    flow_store = {
+        "version": PIPELINE_STUDIO_FLOW_LAYOUT_VERSION,
+        "path": PIPELINE_STUDIO_FLOW_LAYOUT_PATH,
+        "by_pipeline_hash": {},
+    }
+    drafts_store = {
+        "version": PIPELINE_STUDIO_CODE_DRAFTS_VERSION,
+        "path": PIPELINE_STUDIO_CODE_DRAFTS_PATH,
+        "by_fingerprint": {},
+    }
+
+    st.session_state["pipeline_studio_dataset_store"] = dataset_store
+    st.session_state["_pipeline_studio_dataset_store_loaded"] = True
+    st.session_state["_pipeline_studio_dataset_store_restored"] = True
+    st.session_state["pipeline_studio_pipeline_registry_store"] = registry_store
+    st.session_state["_pipeline_studio_pipeline_registry_store_loaded"] = True
+    st.session_state["pipeline_studio_artifact_store"] = artifact_store
+    st.session_state["_pipeline_studio_artifact_store_loaded"] = True
+    st.session_state["pipeline_studio_flow_layout_store"] = flow_store
+    st.session_state["_pipeline_studio_flow_layout_store_loaded"] = True
+    st.session_state["pipeline_studio_code_drafts_store"] = drafts_store
+    st.session_state["_pipeline_studio_code_drafts_store_loaded"] = True
+    st.session_state["pipeline_studio_artifacts"] = {}
+    st.session_state["pipeline_studio_semantic_graph"] = None
+    st.session_state["pipeline_studio_locked_node_ids"] = []
+
+    if clear_cache:
+        _save_pipeline_studio_dataset_store(dataset_store)
+        _save_pipeline_studio_pipeline_registry_store(registry_store)
+        _save_pipeline_studio_artifact_store(artifact_store)
+        _save_pipeline_studio_flow_layout_store(flow_store)
+        _save_pipeline_studio_code_drafts_store(drafts_store)
+        try:
+            if os.path.isdir(PIPELINE_STUDIO_DATASET_STORE_DIR):
+                shutil.rmtree(PIPELINE_STUDIO_DATASET_STORE_DIR)
+        except Exception:
+            pass
+
+    st.session_state["pipeline_studio_project_notice"] = (
+        "Started a new project (current session cleared)."
+    )
+    _keep_pipeline_studio_open()
+    _safe_rerun()
+
+
+def _pipeline_studio_delete_project(*, dir_name: str) -> None:
+    dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+    if not dir_name:
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Select a project to delete."
+        )
+        return
+    project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+    if not os.path.isdir(project_dir):
+        st.session_state["pipeline_studio_project_notice"] = (
+            "Error: Project not found on disk."
+        )
+        return
+    try:
+        shutil.rmtree(project_dir)
+    except Exception as exc:
+        st.session_state["pipeline_studio_project_notice"] = f"Error: {exc}"
+        return
+    st.session_state["pipeline_studio_project_notice"] = (
+        f"Deleted project `{dir_name}`."
+    )
+    st.session_state.pop("pipeline_studio_project_select", None)
+    _keep_pipeline_studio_open()
+    _safe_rerun()
+
+
+def _parse_merge_shortcut(
+    prompt: str, *, datasets: dict
+) -> dict | None:
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+    text = prompt.strip()
+    text_lower = text.lower()
+    if not any(w in text_lower for w in ("merge", "join", "concat", "append", "union")):
+        return None
+
+    dataset_ids = [did for did in datasets.keys() if isinstance(did, str) and did]
+    if not dataset_ids:
+        return None
+
+    def _match_dataset_ids() -> list[str]:
+        matches: list[str] = []
+        for did in dataset_ids:
+            if did.lower() in text_lower:
+                matches.append(did)
+        if len(matches) >= 2:
+            return matches
+
+        for did in dataset_ids:
+            entry = datasets.get(did)
+            entry = entry if isinstance(entry, dict) else {}
+            prov = entry.get("provenance")
+            prov = prov if isinstance(prov, dict) else {}
+            candidates = [
+                str(entry.get("label") or ""),
+                str(prov.get("original_name") or ""),
+                str(prov.get("source") or ""),
+            ]
+            for cand in candidates:
+                cand_clean = cand.strip()
+                if not cand_clean or len(cand_clean) < 3:
+                    continue
+                if cand_clean.lower() in text_lower:
+                    matches.append(did)
+                    break
+        return list(dict.fromkeys(matches))
+
+    selected = _match_dataset_ids()
+    if len(selected) < 2:
+        return None
+
+    op = "join"
+    if any(w in text_lower for w in ("concat", "append", "union")):
+        op = "concat"
+
+    join_keys: list[str] = []
+    if op == "join":
+        m = re.search(r"(?i)\\bon\\s+([a-zA-Z0-9_,\\s]+)", text)
+        if m:
+            raw = m.group(1)
+            parts = re.split(r"[,&]|\\band\\b", raw, flags=re.IGNORECASE)
+            join_keys = [p.strip() for p in parts if p.strip()]
+    return {
+        "dataset_ids": selected[:4],
+        "operation": op,
+        "on": join_keys[:3],
+    }
+
+
 def _extract_db_target_from_prompt(
     prompt: str,
 ) -> tuple[str | None, tuple[int, int] | None]:
@@ -4217,6 +4401,68 @@ if chat_target_id and isinstance(chat_target_datasets, dict):
 else:
     st.caption("Chat target: Auto (supervisor active dataset)")
 
+team_state_for_chat = st.session_state.get("team_state", {})
+team_state_for_chat = team_state_for_chat if isinstance(team_state_for_chat, dict) else {}
+datasets_for_chat = team_state_for_chat.get("datasets")
+datasets_for_chat = datasets_for_chat if isinstance(datasets_for_chat, dict) else {}
+visible_ids, ui_hidden_ids, ui_deleted_ids, _p_hash, _node_ids = _pipeline_studio_ui_state(
+    team_state=team_state_for_chat
+)
+visible_set = set(visible_ids) if visible_ids else set(datasets_for_chat.keys())
+if ui_hidden_ids or ui_deleted_ids:
+    visible_set = {
+        did
+        for did in visible_set
+        if did not in ui_hidden_ids and did not in ui_deleted_ids
+    }
+chat_dataset_options = [did for did in datasets_for_chat.keys() if did in visible_set]
+if chat_dataset_options:
+    ordered_chat = sorted(
+        [(did, datasets_for_chat.get(did)) for did in chat_dataset_options],
+        key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+        if isinstance(kv[1], dict)
+        else 0.0,
+        reverse=True,
+    )
+    chat_dataset_options = [did for did, _e in ordered_chat]
+    override_now = st.session_state.get("active_dataset_id_override") or ""
+    desired = override_now if override_now in chat_dataset_options else ""
+    if "chat_dataset_selector" not in st.session_state:
+        st.session_state["chat_dataset_selector"] = desired
+
+    def _format_chat_dataset(did: str) -> str:
+        if not did:
+            return "Auto (use active dataset)"
+        entry = datasets_for_chat.get(did)
+        entry = entry if isinstance(entry, dict) else {}
+        label = entry.get("label") or did
+        stage = entry.get("stage") or "dataset"
+        shape = entry.get("shape")
+        shape_txt = f" {shape}" if shape else ""
+        return f"{stage}: {label}{shape_txt} ({did})"
+
+    def _apply_chat_dataset_selection() -> None:
+        selected = st.session_state.get("chat_dataset_selector") or ""
+        if not selected:
+            _queue_active_dataset_override("")
+        else:
+            _queue_active_dataset_override(str(selected))
+            st.session_state["pipeline_studio_node_id_pending"] = str(selected)
+        _safe_rerun()
+
+    st.selectbox(
+        "Chat dataset",
+        options=[""] + chat_dataset_options,
+        format_func=_format_chat_dataset,
+        key="chat_dataset_selector",
+        help="Controls which dataset chat operations target.",
+        on_change=_apply_chat_dataset_selection,
+    )
+    if len(chat_dataset_options) >= 2:
+        st.caption(
+            "Tip: merge datasets in chat like `merge <id1> <id2> on <key>` or use the Pipeline Studio Merge wizard."
+        )
+
 pending_prompt = st.session_state.pop("chat_prompt_pending", None)
 pending_prompt = pending_prompt.strip() if isinstance(pending_prompt, str) else ""
 prompt = (
@@ -4248,6 +4494,17 @@ if prompt:
         team_prompt = (db_cmd.get("team_prompt") or "").strip()
     else:
         team_prompt = display_prompt.strip()
+    merge_shortcut = None
+    if team_prompt:
+        team_state_for_merge = st.session_state.get("team_state", {})
+        team_state_for_merge = (
+            team_state_for_merge
+            if isinstance(team_state_for_merge, dict)
+            else {}
+        )
+        merge_shortcut = _parse_merge_shortcut(
+            team_prompt, datasets=team_state_for_merge.get("datasets") or {}
+        )
 
     st.chat_message("human").write(display_prompt)
     msgs.add_user_message(display_prompt)
@@ -4369,6 +4626,18 @@ if prompt:
                 },
                 "data_raw": data_raw_dict,
             }
+            if isinstance(merge_shortcut, dict):
+                invoke_payload["artifacts"]["config"]["merge"] = {
+                    "dataset_ids": merge_shortcut.get("dataset_ids") or [],
+                    "operation": merge_shortcut.get("operation") or "join",
+                    "on": ",".join(merge_shortcut.get("on") or []),
+                    "how": "left",
+                    "left_on": "",
+                    "right_on": "",
+                    "suffixes": "_x,_y",
+                    "axis": 0,
+                    "ignore_index": True,
+                }
             if input_provenance:
                 invoke_payload["artifacts"]["input_dataset"] = input_provenance
             sync_state = bool(
@@ -7143,6 +7412,149 @@ def _render_pipeline_studio() -> None:
                     f"**Target dataset id:** `{target_display}`  \n"
                     f"**Active dataset id:** `{pipe.get('active_dataset_id')}`"
                 )
+                with st.expander("Merge wizard", expanded=False):
+                    if len(studio_datasets) < 2:
+                        st.info("Load at least two datasets to enable merges.")
+                    else:
+                        ordered_ids = sorted(
+                            studio_datasets.items(),
+                            key=lambda kv: float(kv[1].get("created_ts") or 0.0)
+                            if isinstance(kv[1], dict)
+                            else 0.0,
+                            reverse=True,
+                        )
+                        wizard_ids = [did for did, _e in ordered_ids if isinstance(did, str)]
+                        if not wizard_ids:
+                            st.info("No datasets available.")
+                        else:
+                            def _wiz_label(did: str) -> str:
+                                entry = studio_datasets.get(did)
+                                entry = entry if isinstance(entry, dict) else {}
+                                label = entry.get("label") or did
+                                stage = entry.get("stage") or "dataset"
+                                shape = entry.get("shape")
+                                shape_txt = f" {shape}" if shape else ""
+                                return f"{stage}: {label}{shape_txt} ({did})"
+
+                            default_left = (
+                                studio_active_id
+                                if isinstance(studio_active_id, str)
+                                and studio_active_id in wizard_ids
+                                else wizard_ids[0]
+                            )
+                            left_id = st.selectbox(
+                                "Left dataset",
+                                options=wizard_ids,
+                                index=wizard_ids.index(default_left)
+                                if default_left in wizard_ids
+                                else 0,
+                                format_func=_wiz_label,
+                                key="pipeline_studio_merge_left_id",
+                            )
+                            right_options = [did for did in wizard_ids if did != left_id]
+                            right_default = right_options[0] if right_options else left_id
+                            right_id = st.selectbox(
+                                "Right dataset",
+                                options=right_options or wizard_ids,
+                                index=right_options.index(right_default)
+                                if right_default in right_options
+                                else 0,
+                                format_func=_wiz_label,
+                                key="pipeline_studio_merge_right_id",
+                            )
+                            op = st.selectbox(
+                                "Merge operation",
+                                options=["join", "concat"],
+                                index=0,
+                                key="pipeline_studio_merge_op",
+                            )
+
+                            def _dataset_columns(did: str) -> list[str]:
+                                entry = studio_datasets.get(did)
+                                entry = entry if isinstance(entry, dict) else {}
+                                cols = entry.get("columns")
+                                if isinstance(cols, list):
+                                    return [str(c) for c in cols if str(c)]
+                                df = _dataset_entry_to_df(entry)
+                                if isinstance(df, pd.DataFrame):
+                                    return [str(c) for c in df.columns]
+                                return []
+
+                            join_keys: list[str] = []
+                            join_how = "left"
+                            concat_axis = 0
+                            concat_ignore_index = True
+                            if op == "join":
+                                left_cols = _dataset_columns(left_id)
+                                right_cols = _dataset_columns(right_id)
+                                common_cols = [c for c in left_cols if c in set(right_cols)]
+                                preferred = sorted(
+                                    common_cols,
+                                    key=lambda c: (0 if "id" in c.lower() else 1, c.lower()),
+                                )
+                                join_keys = st.multiselect(
+                                    "Join keys",
+                                    options=preferred,
+                                    default=preferred[:1],
+                                    key="pipeline_studio_merge_keys",
+                                )
+                                join_how = st.selectbox(
+                                    "Join type",
+                                    options=["inner", "left", "right", "outer"],
+                                    index=1,
+                                    key="pipeline_studio_merge_how",
+                                )
+                            else:
+                                concat_axis = st.selectbox(
+                                    "Concat axis",
+                                    options=[0, 1],
+                                    index=0,
+                                    key="pipeline_studio_merge_axis",
+                                )
+                                concat_ignore_index = st.checkbox(
+                                    "Ignore index (axis=0)",
+                                    value=True,
+                                    key="pipeline_studio_merge_ignore_index",
+                                )
+
+                            stage_default = "wrangled"
+                            label_default = "merge_wizard"
+                            stage = st.text_input(
+                                "Stage",
+                                value=stage_default,
+                                key="pipeline_studio_merge_stage",
+                            )
+                            label = st.text_input(
+                                "Label",
+                                value=label_default,
+                                key="pipeline_studio_merge_label",
+                            )
+
+                            if op == "join":
+                                key_expr = join_keys or ["id"]
+                                join_code = (
+                                    "import pandas as pd\n\n"
+                                    "# df_0, df_1, ... are available\n"
+                                    f"df = df_0.merge(df_1, on={key_expr!r}, how={join_how!r})\n"
+                                )
+                            else:
+                                join_code = (
+                                    "import pandas as pd\n\n"
+                                    "# df_0, df_1, ... are available\n"
+                                    f"df = pd.concat([df_0, df_1], axis={concat_axis}, ignore_index={concat_ignore_index if concat_axis == 0 else False})\n"
+                                )
+                            st.code(join_code, language="python")
+                            if st.button(
+                                "Create merge node",
+                                key="pipeline_studio_merge_create",
+                                use_container_width=True,
+                            ):
+                                _pipeline_studio_create_manual_merge_node(
+                                    parent_ids=[left_id, right_id],
+                                    stage=stage,
+                                    label=label,
+                                    code=join_code,
+                                )
                 show_hidden_pick = bool(
                     st.session_state.get("pipeline_studio_show_hidden", False)
                 )
@@ -7430,6 +7842,45 @@ def _render_pipeline_studio() -> None:
                             args=(selected_project,),
                             use_container_width=True,
                         )
+                        delete_confirm = st.checkbox(
+                            "I understand this will delete the selected project",
+                            value=False,
+                            key="pipeline_studio_project_delete_confirm",
+                        )
+                        st.button(
+                            "Delete selected project",
+                            key="pipeline_studio_project_delete",
+                            on_click=_pipeline_studio_delete_project,
+                            args=(selected_project,),
+                            use_container_width=True,
+                            disabled=not bool(delete_confirm),
+                        )
+
+                    st.markdown("---")
+                    st.markdown("**Start new project**")
+                    st.caption(
+                        "Clears current datasets, Pipeline Studio state, and chat history. "
+                        "Saved projects remain available."
+                    )
+                    clear_cache = st.checkbox(
+                        "Also clear Pipeline Studio cache on disk",
+                        value=False,
+                        key="pipeline_studio_reset_clear_cache",
+                        help="Removes cached datasets/layout/artifacts stored in `pipeline_store/`.",
+                    )
+                    confirm_reset = st.checkbox(
+                        "I understand this will clear the current project",
+                        value=False,
+                        key="pipeline_studio_reset_confirm",
+                    )
+                    st.button(
+                        "Start new project",
+                        key="pipeline_studio_project_reset",
+                        on_click=_pipeline_studio_reset_project,
+                        args=(bool(clear_cache), bool(add_memory)),
+                        use_container_width=True,
+                        disabled=not bool(confirm_reset),
+                    )
 
                 def _pipeline_studio_hide_nodes(
                     p_hash: str,
