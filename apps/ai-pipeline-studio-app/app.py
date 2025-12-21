@@ -53,6 +53,21 @@ page_icon = LOGO_PATH if os.path.exists(LOGO_PATH) else ":bar_chart:"
 st.set_page_config(page_title=TITLE, page_icon=page_icon, layout="wide")
 st.title(TITLE)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
+st.markdown(
+    "\n".join(
+        [
+            "<style>",
+            "@media (min-width: 1100px) {",
+            "  [data-testid=\"stDialog\"] [role=\"dialog\"] {",
+            "    width: calc(100vw - 2rem) !important;",
+            "    max-width: calc(100vw - 2rem) !important;",
+            "  }",
+            "}",
+            "</style>",
+        ]
+    ),
+    unsafe_allow_html=True,
+)
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
 DEFAULT_SQL_URL = "sqlite:///:memory:"
@@ -8308,14 +8323,43 @@ def _render_pipeline_studio() -> None:
         components.html(
             "\n".join(
                 [
-                    '<div style="display:flex; align-items:center; gap:0.5rem;">',
-                    f'<button id="copy-btn" style="padding:0.25rem 0.75rem; border-radius:0.5rem; border:1px solid rgba(49,51,63,0.2); background:rgba(255,255,255,0.0); cursor:pointer; font-size:0.875rem;">{label}</button>',
-                    '<span id="copy-status" style="font-size:0.85rem; color:rgba(49,51,63,0.65);"></span>',
+                    "<style>",
+                    "@import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600&display=swap');",
+                    "body {",
+                    "  margin: 0;",
+                    "  font-family: 'Source Sans 3', 'Source Sans Pro', sans-serif;",
+                    "  -webkit-font-smoothing: antialiased;",
+                    "}",
+                    "#pipeline-copy-wrap { width: 100%; }",
+                    "#pipeline-copy-btn {",
+                    "  width: 100%;",
+                    "  min-height: 2.2rem;",
+                    "  padding: 0.25rem 0.8rem;",
+                    "  border-radius: 0.5rem;",
+                    "  border: 1px solid rgba(255, 255, 255, 0.18);",
+                    "  background: rgba(18, 25, 34, 0.85);",
+                    "  color: #e6edf3;",
+                    "  cursor: pointer;",
+                    "  font-size: 0.95rem;",
+                    "  font-family: inherit;",
+                    "  font-weight: 600;",
+                    "  line-height: 1.1;",
+                    "  display: inline-flex;",
+                    "  align-items: center;",
+                    "  justify-content: center;",
+                    "  box-sizing: border-box;",
+                    "}",
+                    "#pipeline-copy-btn:hover {",
+                    "  background: rgba(32, 42, 56, 0.95);",
+                    "}",
+                    "</style>",
+                    '<div id="pipeline-copy-wrap">',
+                    f'<button id="pipeline-copy-btn">{label}</button>',
                     "</div>",
                     "<script>",
                     f"const text = {payload};",
-                    "const btn = document.getElementById('copy-btn');",
-                    "const status = document.getElementById('copy-status');",
+                    "const btn = document.getElementById('pipeline-copy-btn');",
+                    "const original = btn ? btn.textContent : '';",
                     "async function doCopy() {",
                     "  try {",
                     "    if (navigator.clipboard && navigator.clipboard.writeText) {",
@@ -8328,18 +8372,18 @@ def _render_pipeline_studio() -> None:
                     "      document.execCommand('copy');",
                     "      document.body.removeChild(textarea);",
                     "    }",
-                    "    if (status) status.textContent = 'Copied';",
-                    "    setTimeout(() => { if (status) status.textContent = ''; }, 1500);",
+                    "    if (btn) btn.textContent = 'Copied';",
+                    "    setTimeout(() => { if (btn) btn.textContent = original; }, 1500);",
                     "  } catch (e) {",
-                    "    if (status) status.textContent = 'Copy failed';",
-                    "    setTimeout(() => { if (status) status.textContent = ''; }, 2000);",
+                    "    if (btn) btn.textContent = 'Copy failed';",
+                    "    setTimeout(() => { if (btn) btn.textContent = original; }, 2000);",
                     "  }",
                     "}",
                     "if (btn) btn.addEventListener('click', doCopy);",
                     "</script>",
                 ]
             ),
-            height=40,
+            height=44,
         )
 
     if not studio_datasets:
@@ -11221,6 +11265,7 @@ def _render_pipeline_studio() -> None:
                 view = st.radio(
                     "Workspace",
                     [
+                        "Visual Editor",
                         "Table",
                         "Chart",
                         "EDA",
@@ -11228,7 +11273,6 @@ def _render_pipeline_studio() -> None:
                         "Model",
                         "Predictions",
                         "MLflow",
-                        "Visual Editor",
                     ],
                     horizontal=True,
                     format_func=_view_label,
@@ -13941,7 +13985,9 @@ def _render_pipeline_studio() -> None:
                                             else "python",
                                         )
 
-                                    c_ask, c_save, c_reset = st.columns(3)
+                                    c_ask, c_save, c_reset, c_copy = st.columns(
+                                        [2, 1, 1, 1]
+                                    )
                                     with c_ask:
                                         if st.button(
                                             "Ask AI about this code",
@@ -14031,9 +14077,10 @@ def _render_pipeline_studio() -> None:
                                             on_click=_queue_code_reset_from_flow,
                                             args=(sel, fp),
                                         )
-                                    _render_copy_to_clipboard(
-                                        draft_code, label="Copy draft"
-                                    )
+                                    with c_copy:
+                                        _render_copy_to_clipboard(
+                                            draft_code, label="Copy draft"
+                                        )
                                     if _kind in {
                                         "python_function",
                                         "python_merge",
