@@ -116,6 +116,15 @@ PIPELINE_STUDIO_PROJECTS_DIR = os.path.join(
 )
 PIPELINE_STUDIO_PROJECTS_MAX_ITEMS = 25
 PIPELINE_STUDIO_HISTORY_MAX_ITEMS = 25
+PIPELINE_STUDIO_ARTIFACT_GROUPS = {
+    "Chart": ("plotly_graph", "viz_error", "viz_warning"),
+    "EDA": ("eda_reports",),
+    "Model": ("model_info", "eval_artifacts", "eval_plotly_graph"),
+    "MLflow": ("mlflow_artifacts",),
+}
+PIPELINE_STUDIO_ARTIFACT_KEYS = sorted(
+    {key for group in PIPELINE_STUDIO_ARTIFACT_GROUPS.values() for key in group}
+)
 
 
 def _pipeline_studio_history_init() -> None:
@@ -2446,6 +2455,37 @@ def _update_pipeline_studio_artifact_store_for_dataset(
         rec = by_fp.get(fingerprint) if isinstance(by_fp.get(fingerprint), dict) else {}
         rec_art = rec.get("artifacts") if isinstance(rec.get("artifacts"), dict) else {}
         rec_art.update(artifacts)
+        incoming_keys = {
+            str(k)
+            for k in artifacts.keys()
+            if isinstance(k, str) and str(k).strip()
+        }
+        if incoming_keys:
+            cleared_keys = rec.get("cleared_keys")
+            cleared_keys = (
+                {str(x) for x in cleared_keys}
+                if isinstance(cleared_keys, list)
+                else set()
+            )
+            cleared_keys = {k for k in cleared_keys if k}
+            if cleared_keys:
+                cleared_keys -= incoming_keys
+                if cleared_keys:
+                    rec["cleared_keys"] = sorted(cleared_keys)
+                else:
+                    rec.pop("cleared_keys", None)
+            clears_map = st.session_state.get("pipeline_studio_artifact_clears")
+            clears_map = clears_map if isinstance(clears_map, dict) else {}
+            existing = clears_map.get(dataset_id)
+            if isinstance(existing, list):
+                existing_set = {str(x) for x in existing if isinstance(x, str) and x}
+                if existing_set:
+                    existing_set -= incoming_keys
+                    if existing_set:
+                        clears_map[dataset_id] = sorted(existing_set)
+                    else:
+                        clears_map.pop(dataset_id, None)
+                    st.session_state["pipeline_studio_artifact_clears"] = clears_map
         rec.update(
             {
                 "fingerprint": fingerprint,
@@ -2922,6 +2962,134 @@ def _get_persisted_pipeline_studio_artifacts(*, fingerprint: str) -> dict:
         return artifacts if isinstance(artifacts, dict) else {}
     except Exception:
         return {}
+
+
+def _pipeline_studio_get_artifact_clear_keys(*, dataset_id: str | None) -> set[str]:
+    dataset_id = dataset_id.strip() if isinstance(dataset_id, str) else ""
+    if not dataset_id:
+        return set()
+    clears: set[str] = set()
+    clears_map = st.session_state.get("pipeline_studio_artifact_clears")
+    if isinstance(clears_map, dict):
+        stored = clears_map.get(dataset_id)
+        if isinstance(stored, list):
+            clears.update([str(x) for x in stored if isinstance(x, str) and x])
+
+    team_state = st.session_state.get("team_state", {})
+    team_state = team_state if isinstance(team_state, dict) else {}
+    datasets = team_state.get("datasets")
+    datasets = datasets if isinstance(datasets, dict) else {}
+    entry = datasets.get(dataset_id)
+    entry = entry if isinstance(entry, dict) else {}
+    fingerprint = entry.get("fingerprint")
+    fingerprint = (
+        fingerprint if isinstance(fingerprint, str) and fingerprint.strip() else None
+    )
+    if fingerprint:
+        store = _load_pipeline_studio_artifact_store()
+        by_fp = store.get("by_fingerprint")
+        by_fp = by_fp if isinstance(by_fp, dict) else {}
+        rec = by_fp.get(fingerprint)
+        rec = rec if isinstance(rec, dict) else {}
+        stored = rec.get("cleared_keys")
+        if isinstance(stored, list):
+            clears.update([str(x) for x in stored if isinstance(x, str) and x])
+    return clears
+
+
+def _pipeline_studio_clear_dataset_artifacts(
+    *, dataset_id: str, keys: list[str]
+) -> None:
+    dataset_id = dataset_id.strip() if isinstance(dataset_id, str) else ""
+    if not dataset_id:
+        st.session_state["pipeline_studio_artifact_notice"] = (
+            "Error: Select a pipeline step to clear artifacts."
+        )
+        return
+    keys = sorted(
+        {
+            str(k)
+            for k in (keys or [])
+            if isinstance(k, str)
+            and str(k).strip()
+            and str(k) in PIPELINE_STUDIO_ARTIFACT_KEYS
+        }
+    )
+    if not keys:
+        st.session_state["pipeline_studio_artifact_notice"] = (
+            "Error: Select artifacts to remove."
+        )
+        return
+
+    idx_map = st.session_state.get("pipeline_studio_artifacts")
+    idx_map = idx_map if isinstance(idx_map, dict) else {}
+    entry_art = idx_map.get(dataset_id)
+    entry_art = entry_art if isinstance(entry_art, dict) else {}
+    for key in keys:
+        entry_art.pop(key, None)
+    if entry_art:
+        idx_map[dataset_id] = entry_art
+    else:
+        idx_map.pop(dataset_id, None)
+    st.session_state["pipeline_studio_artifacts"] = idx_map
+
+    clears = _pipeline_studio_get_artifact_clear_keys(dataset_id=dataset_id)
+    clears.update(keys)
+    clears_map = st.session_state.get("pipeline_studio_artifact_clears")
+    clears_map = clears_map if isinstance(clears_map, dict) else {}
+    clears_map[dataset_id] = sorted(clears)
+    st.session_state["pipeline_studio_artifact_clears"] = clears_map
+
+    team_state = st.session_state.get("team_state", {})
+    team_state = team_state if isinstance(team_state, dict) else {}
+    datasets = team_state.get("datasets")
+    datasets = datasets if isinstance(datasets, dict) else {}
+    entry = datasets.get(dataset_id)
+    entry = entry if isinstance(entry, dict) else {}
+    fingerprint = entry.get("fingerprint")
+    fingerprint = (
+        fingerprint if isinstance(fingerprint, str) and fingerprint.strip() else None
+    )
+    if fingerprint:
+        try:
+            import time as _time
+
+            store = _load_pipeline_studio_artifact_store()
+            by_fp = store.get("by_fingerprint")
+            by_fp = by_fp if isinstance(by_fp, dict) else {}
+            rec = by_fp.get(fingerprint)
+            rec = rec if isinstance(rec, dict) else {}
+            rec_art = rec.get("artifacts")
+            rec_art = rec_art if isinstance(rec_art, dict) else {}
+            for key in keys:
+                rec_art.pop(key, None)
+            rec["artifacts"] = rec_art
+            rec["fingerprint"] = fingerprint
+            rec["updated_ts"] = _time.time()
+            if clears:
+                rec["cleared_keys"] = sorted(clears)
+            else:
+                rec.pop("cleared_keys", None)
+            by_fp[fingerprint] = rec
+            store["by_fingerprint"] = by_fp
+            st.session_state["pipeline_studio_artifact_store"] = store
+            _save_pipeline_studio_artifact_store(store)
+        except Exception:
+            pass
+
+    try:
+        pipelines = _pipeline_studio_build_pipelines_from_team_state(team_state)
+        datasets = datasets if isinstance(datasets, dict) else {}
+        _update_pipeline_registry_store_for_pipelines(
+            pipelines=pipelines, datasets=datasets
+        )
+    except Exception:
+        pass
+
+    st.session_state["pipeline_studio_artifact_notice"] = (
+        f"Cleared {len(keys)} artifact type(s) for `{dataset_id}`."
+    )
+    _keep_pipeline_studio_open()
 
 
 def _load_pipeline_studio_flow_layout_store() -> dict:
@@ -9063,6 +9231,15 @@ def _render_pipeline_studio() -> None:
                     else:
                         st.success(project_notice)
 
+                artifact_notice = st.session_state.pop(
+                    "pipeline_studio_artifact_notice", None
+                )
+                if isinstance(artifact_notice, str) and artifact_notice.strip():
+                    if artifact_notice.lower().startswith("error:"):
+                        st.error(artifact_notice.replace("Error:", "", 1).strip())
+                    else:
+                        st.success(artifact_notice)
+
                 with st.expander("Projects (save/load)", expanded=False):
                     st.caption(
                         "Saves Pipeline Studio state to `pipeline_store/pipeline_projects/` "
@@ -10308,6 +10485,281 @@ def _render_pipeline_studio() -> None:
                     key="pipeline_studio_node_id",
                 )
 
+                with st.expander("Artifacts (manage)", expanded=False):
+                    if not (isinstance(selected_node_id, str) and selected_node_id):
+                        st.caption("Select a pipeline step to manage artifacts.")
+                    else:
+                        group_labels = list(PIPELINE_STUDIO_ARTIFACT_GROUPS.keys())
+                        with st.expander("Artifact summary", expanded=True):
+                            st.caption(
+                                "Summary reflects stored artifacts (session + persisted) and respects clears."
+                            )
+                            idx_map = st.session_state.get("pipeline_studio_artifacts")
+                            idx_map = idx_map if isinstance(idx_map, dict) else {}
+                            store = _load_pipeline_studio_artifact_store()
+                            by_fp = store.get("by_fingerprint")
+                            by_fp = by_fp if isinstance(by_fp, dict) else {}
+                            clears_map = st.session_state.get(
+                                "pipeline_studio_artifact_clears"
+                            )
+                            clears_map = (
+                                clears_map if isinstance(clears_map, dict) else {}
+                            )
+                            artifact_fields = {
+                                "plotly_graph": "json",
+                                "viz_error": "message",
+                                "viz_warning": "message",
+                                "eda_reports": "reports",
+                                "model_info": "info",
+                                "eval_artifacts": "artifacts",
+                                "eval_plotly_graph": "json",
+                                "mlflow_artifacts": "artifacts",
+                            }
+
+                            def _clears_for_node(
+                                node_id: str, entry_obj: dict
+                            ) -> set[str]:
+                                clears: set[str] = set()
+                                stored = clears_map.get(node_id)
+                                if isinstance(stored, list):
+                                    clears.update(
+                                        [
+                                            str(x)
+                                            for x in stored
+                                            if isinstance(x, str) and x
+                                        ]
+                                    )
+                                fp = entry_obj.get("fingerprint")
+                                fp = fp if isinstance(fp, str) and fp else None
+                                if fp:
+                                    rec = by_fp.get(fp)
+                                    rec = rec if isinstance(rec, dict) else {}
+                                    stored = rec.get("cleared_keys")
+                                    if isinstance(stored, list):
+                                        clears.update(
+                                            [
+                                                str(x)
+                                                for x in stored
+                                                if isinstance(x, str) and x
+                                            ]
+                                        )
+                                return clears
+
+                            def _artifact_present(
+                                entry_art: dict, persisted_art: dict, key: str
+                            ) -> bool:
+                                field = artifact_fields.get(key)
+                                for src in (entry_art, persisted_art):
+                                    rec = src.get(key) if isinstance(src, dict) else None
+                                    if not isinstance(rec, dict):
+                                        continue
+                                    if field:
+                                        val = rec.get(field)
+                                        if isinstance(val, (dict, list)):
+                                            if val:
+                                                return True
+                                            continue
+                                        if val is not None and str(val).strip():
+                                            return True
+                                    elif rec:
+                                        return True
+                                return False
+
+                            summary_rows = []
+                            for did in node_ids:
+                                if not isinstance(did, str) or not did:
+                                    continue
+                                entry_obj = (
+                                    studio_datasets.get(did)
+                                    if isinstance(studio_datasets, dict)
+                                    else None
+                                )
+                                entry_obj = (
+                                    entry_obj if isinstance(entry_obj, dict) else {}
+                                )
+                                label = (
+                                    entry_obj.get("label")
+                                    or (meta_by_id.get(did) or {}).get("label")
+                                    or did
+                                )
+                                stage = (
+                                    entry_obj.get("stage")
+                                    or (meta_by_id.get(did) or {}).get("stage")
+                                    or ""
+                                )
+                                entry_art = idx_map.get(did)
+                                entry_art = entry_art if isinstance(entry_art, dict) else {}
+                                fp = entry_obj.get("fingerprint")
+                                fp = fp if isinstance(fp, str) and fp else None
+                                persisted = {}
+                                if fp:
+                                    rec = by_fp.get(fp)
+                                    rec = rec if isinstance(rec, dict) else {}
+                                    persisted = (
+                                        rec.get("artifacts")
+                                        if isinstance(rec.get("artifacts"), dict)
+                                        else {}
+                                    )
+                                clears = _clears_for_node(did, entry_obj)
+
+                                def _has(key: str) -> bool:
+                                    if key in clears:
+                                        return False
+                                    return _artifact_present(entry_art, persisted, key)
+
+                                def _flag(keys: tuple[str, ...]) -> bool:
+                                    return any(_has(k) for k in keys if k)
+
+                                summary_rows.append(
+                                    {
+                                        "Select": False,
+                                        "Node": f"{label} ({did})",
+                                        "Stage": stage or "-",
+                                        "Chart": _flag(
+                                            PIPELINE_STUDIO_ARTIFACT_GROUPS["Chart"]
+                                        ),
+                                        "EDA": _flag(
+                                            PIPELINE_STUDIO_ARTIFACT_GROUPS["EDA"]
+                                        ),
+                                        "Model": _flag(
+                                            PIPELINE_STUDIO_ARTIFACT_GROUPS["Model"]
+                                        ),
+                                        "MLflow": _flag(
+                                            PIPELINE_STUDIO_ARTIFACT_GROUPS["MLflow"]
+                                        ),
+                                    }
+                                )
+
+                            if summary_rows:
+                                summary_df = pd.DataFrame(summary_rows)
+                                edited_summary = st.data_editor(
+                                    summary_df,
+                                    width="stretch",
+                                    hide_index=True,
+                                    key="pipeline_studio_artifact_summary_editor",
+                                    column_config={
+                                        "Select": st.column_config.CheckboxColumn(
+                                            "Select"
+                                        ),
+                                        "Chart": st.column_config.CheckboxColumn(
+                                            "Chart"
+                                        ),
+                                        "EDA": st.column_config.CheckboxColumn("EDA"),
+                                        "Model": st.column_config.CheckboxColumn(
+                                            "Model"
+                                        ),
+                                        "MLflow": st.column_config.CheckboxColumn(
+                                            "MLflow"
+                                        ),
+                                    },
+                                    disabled=[
+                                        "Node",
+                                        "Stage",
+                                        "Chart",
+                                        "EDA",
+                                        "Model",
+                                        "MLflow",
+                                    ],
+                                )
+                                selected_ids = []
+                                if isinstance(edited_summary, pd.DataFrame):
+                                    if "Select" in edited_summary.columns:
+                                        selected_rows = edited_summary[
+                                            edited_summary["Select"] == True
+                                        ]
+                                    else:
+                                        selected_rows = edited_summary.iloc[0:0]
+                                    for node_label in selected_rows.get("Node", []).tolist():
+                                        m = re.search(
+                                            r"\(([^()]*)\)\s*$", str(node_label)
+                                        )
+                                        if m:
+                                            selected_ids.append(m.group(1))
+                                summary_groups = st.multiselect(
+                                    "Artifacts to clear for selected node(s)",
+                                    options=group_labels,
+                                    key="pipeline_studio_artifact_summary_clear_groups",
+                                )
+                                summary_keys: list[str] = []
+                                for group in summary_groups:
+                                    summary_keys.extend(
+                                        PIPELINE_STUDIO_ARTIFACT_GROUPS.get(group, ())
+                                    )
+                                if st.button(
+                                    "Clear selected node artifacts",
+                                    key="pipeline_studio_artifact_summary_clear",
+                                    width="stretch",
+                                    disabled=not bool(selected_ids and summary_keys),
+                                ):
+                                    for node_id in selected_ids:
+                                        _pipeline_studio_clear_dataset_artifacts(
+                                            dataset_id=node_id, keys=summary_keys
+                                        )
+                            else:
+                                st.caption("No pipeline steps available.")
+
+                        st.caption(
+                            "Remove stored artifacts for this step (Chart/EDA/Model/MLflow)."
+                        )
+                        selected_groups = st.multiselect(
+                            "Artifacts to remove",
+                            options=group_labels,
+                            key="pipeline_studio_artifact_clear_groups",
+                        )
+
+                        def _clear_selected_artifacts() -> None:
+                            groups = st.session_state.get(
+                                "pipeline_studio_artifact_clear_groups"
+                            )
+                            groups = groups if isinstance(groups, list) else []
+                            keys: list[str] = []
+                            for group in groups:
+                                keys.extend(
+                                    PIPELINE_STUDIO_ARTIFACT_GROUPS.get(group, ())
+                                )
+                            _pipeline_studio_clear_dataset_artifacts(
+                                dataset_id=selected_node_id, keys=keys
+                            )
+                            st.session_state[
+                                "pipeline_studio_artifact_clear_groups"
+                            ] = []
+
+                        def _clear_all_artifacts() -> None:
+                            _pipeline_studio_clear_dataset_artifacts(
+                                dataset_id=selected_node_id,
+                                keys=PIPELINE_STUDIO_ARTIFACT_KEYS,
+                            )
+                            st.session_state[
+                                "pipeline_studio_artifact_clear_groups"
+                            ] = []
+                            st.session_state[
+                                "pipeline_studio_artifact_clear_all_confirm"
+                            ] = False
+
+                        c_clear_sel, c_clear_all = st.columns([0.6, 0.4])
+                        with c_clear_sel:
+                            if st.button(
+                                "Remove selected",
+                                key="pipeline_studio_artifact_clear_selected",
+                                width="stretch",
+                                disabled=not bool(selected_groups),
+                                on_click=_clear_selected_artifacts,
+                            ):
+                                pass
+                        with c_clear_all:
+                            confirm_clear = st.checkbox(
+                                "Confirm clear all",
+                                key="pipeline_studio_artifact_clear_all_confirm",
+                            )
+                            if st.button(
+                                "Clear all",
+                                key="pipeline_studio_artifact_clear_all",
+                                width="stretch",
+                                disabled=not bool(confirm_clear),
+                                on_click=_clear_all_artifacts,
+                            ):
+                                pass
+
                 with st.expander("Templates (quick add)", expanded=False):
                     template_catalog = [
                         {
@@ -11048,6 +11500,10 @@ def _render_pipeline_studio() -> None:
                         shared = sorted(set_a.intersection(set_b))
 
                     def _get_plotly_graph_json(dataset_id: str, entry_obj: dict):
+                        if "plotly_graph" in _pipeline_studio_get_artifact_clear_keys(
+                            dataset_id=dataset_id
+                        ):
+                            return None
                         graph_json = None
                         idx_map = st.session_state.get("pipeline_studio_artifacts")
                         if isinstance(idx_map, dict):
@@ -11679,10 +12135,15 @@ def _render_pipeline_studio() -> None:
                     if fp
                     else {}
                 )
+                artifact_clears = _pipeline_studio_get_artifact_clear_keys(
+                    dataset_id=selected_node_id
+                )
 
                 def _artifact_payload(
                     key: str, *, detail_key: str | None = None, field: str | None = None
                 ) -> object | None:
+                    if key in artifact_clears:
+                        return None
                     rec = entry_art.get(key) if isinstance(entry_art, dict) else None
                     rec = rec if isinstance(rec, dict) else {}
                     if field and isinstance(rec.get(field), (dict, list, str)):
@@ -11902,6 +12363,13 @@ def _render_pipeline_studio() -> None:
                             viz_warn = viz_warn if isinstance(viz_warn, dict) else {}
                             if not viz_warn_msg:
                                 viz_warn_msg = viz_warn.get("message")
+                    if "plotly_graph" in artifact_clears:
+                        graph_json = None
+                    if "viz_error" in artifact_clears:
+                        viz_err_msg = None
+                        viz_err_path = None
+                    if "viz_warning" in artifact_clears:
+                        viz_warn_msg = None
                     if isinstance(viz_err_msg, str) and viz_err_msg:
                         err_bits = [viz_err_msg]
                         if isinstance(viz_err_path, str) and viz_err_path:
@@ -11958,6 +12426,8 @@ def _render_pipeline_studio() -> None:
                             er = er if isinstance(er, dict) else {}
                             reports = er.get("reports")
                     reports = reports if isinstance(reports, dict) else {}
+                    if "eda_reports" in artifact_clears:
+                        reports = {}
                     sweetviz_file = (
                         reports.get("sweetviz_report_file")
                         if isinstance(reports.get("sweetviz_report_file"), str)
@@ -12399,6 +12869,12 @@ def _render_pipeline_studio() -> None:
                             eg = persisted.get("eval_plotly_graph")
                             eg = eg if isinstance(eg, dict) else {}
                             eval_graph = eg.get("json")
+                    if "model_info" in artifact_clears:
+                        model_info = None
+                    if "eval_artifacts" in artifact_clears:
+                        eval_art = None
+                    if "eval_plotly_graph" in artifact_clears:
+                        eval_graph = None
 
                     if model_info is not None:
                         st.markdown("**Model Info**")
@@ -12502,6 +12978,8 @@ def _render_pipeline_studio() -> None:
                             ma = persisted.get("mlflow_artifacts")
                             ma = ma if isinstance(ma, dict) else {}
                             mlflow_art = ma.get("artifacts")
+                    if "mlflow_artifacts" in artifact_clears:
+                        mlflow_art = None
 
                     if mlflow_art is None:
                         st.info(
