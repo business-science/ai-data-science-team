@@ -981,7 +981,11 @@ def _pipeline_studio_prune_projects(*, max_items: int) -> None:
 
 
 def _pipeline_studio_save_project(
-    *, name: str, team_state: dict, include_data: bool = False
+    *,
+    name: str,
+    team_state: dict,
+    include_data: bool = False,
+    project_dir: str | None = None,
 ) -> dict:
     """
     Save a best-effort, local "project" bundle:
@@ -1000,18 +1004,36 @@ def _pipeline_studio_save_project(
         active_id = team_state.get("active_dataset_id")
         active_id = active_id if isinstance(active_id, str) and active_id else None
 
-        os.makedirs(PIPELINE_STUDIO_PROJECTS_DIR, exist_ok=True)
-        slug = _pipeline_studio_project_slug(name)
-        ts = int(time.time())
-        dir_name = f"{slug}_{ts}"
-        project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
-        if os.path.exists(project_dir):
-            dir_name = f"{slug}_{ts}_{uuid.uuid4().hex[:6]}"
-            project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
-        os.makedirs(project_dir, exist_ok=True)
-        if include_data:
+        existing_manifest = None
+        if isinstance(project_dir, str) and project_dir.strip():
+            project_dir = project_dir.strip()
+            os.makedirs(project_dir, exist_ok=True)
+            dir_name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
+            existing_manifest = _pipeline_studio_load_project_manifest(
+                project_dir=project_dir
+            )
+            if isinstance(existing_manifest, dict):
+                existing_dir = existing_manifest.get("dir_name")
+                if isinstance(existing_dir, str) and existing_dir:
+                    dir_name = existing_dir
             ds_dir = os.path.join(project_dir, "datasets")
-            os.makedirs(ds_dir, exist_ok=True)
+            if os.path.isdir(ds_dir):
+                shutil.rmtree(ds_dir, ignore_errors=True)
+            if include_data:
+                os.makedirs(ds_dir, exist_ok=True)
+        else:
+            os.makedirs(PIPELINE_STUDIO_PROJECTS_DIR, exist_ok=True)
+            slug = _pipeline_studio_project_slug(name)
+            ts = int(time.time())
+            dir_name = f"{slug}_{ts}"
+            project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+            if os.path.exists(project_dir):
+                dir_name = f"{slug}_{ts}_{uuid.uuid4().hex[:6]}"
+                project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+            os.makedirs(project_dir, exist_ok=True)
+            if include_data:
+                ds_dir = os.path.join(project_dir, "datasets")
+                os.makedirs(ds_dir, exist_ok=True)
 
         datasets_out: dict[str, dict] = {}
         fingerprints: set[str] = set()
@@ -1127,6 +1149,22 @@ def _pipeline_studio_save_project(
         except Exception:
             code_drafts_by_fp = {}
 
+        prev_tags = []
+        prev_notes = ""
+        prev_archived = False
+        prev_last_opened = None
+        prev_created_ts = None
+        if isinstance(existing_manifest, dict):
+            tags_val = existing_manifest.get("tags")
+            if isinstance(tags_val, list):
+                prev_tags = tags_val
+            notes_val = existing_manifest.get("notes")
+            if isinstance(notes_val, str):
+                prev_notes = notes_val
+            prev_archived = bool(existing_manifest.get("archived", False))
+            prev_last_opened = existing_manifest.get("last_opened_ts")
+            prev_created_ts = existing_manifest.get("created_ts")
+
         manifest = {
             "version": PIPELINE_STUDIO_PROJECTS_VERSION,
             "name": name.strip()
@@ -1137,10 +1175,10 @@ def _pipeline_studio_save_project(
             "data_mode": "full" if include_data else "metadata_only",
             "datasets_saved": int(saved_count),
             "datasets_total": int(len(datasets_out)),
-            "tags": [],
-            "notes": "",
-            "archived": False,
-            "last_opened_ts": None,
+            "tags": prev_tags,
+            "notes": prev_notes,
+            "archived": prev_archived,
+            "last_opened_ts": prev_last_opened,
             "pipeline_hashes": pipeline_hashes,
             "team_state": {
                 "active_dataset_id": active_id,
@@ -1150,6 +1188,8 @@ def _pipeline_studio_save_project(
             "flow_layout_by_pipeline_hash": flow_layout_by_ph,
             "code_drafts_by_fingerprint": code_drafts_by_fp,
         }
+        if prev_created_ts:
+            manifest["created_ts"] = prev_created_ts
 
         manifest_path = os.path.join(project_dir, "manifest.json")
         fd, tmp_path = tempfile.mkstemp(
@@ -1636,6 +1676,81 @@ def _pipeline_studio_load_project(*, project_dir: str, rehydrate: bool = True) -
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+def _pipeline_studio_load_project_into_session(
+    *, project_dir: str, rehydrate: bool, open_studio: bool
+) -> None:
+    res = _pipeline_studio_load_project(project_dir=project_dir, rehydrate=rehydrate)
+    err = res.get("error")
+    if isinstance(err, str) and err:
+        st.session_state["pipeline_studio_project_notice"] = f"Error: {err}"
+        return
+
+    loaded_n = res.get("loaded_datasets")
+    data_mode = res.get("data_mode") or "full"
+    stats = res.get("rehydrate_stats")
+    stats = stats if isinstance(stats, dict) else {}
+    data_files_loaded = res.get("data_files_loaded") or 0
+    missing_files = res.get("missing_files")
+    missing_files = missing_files if isinstance(missing_files, list) else []
+
+    if str(data_mode).lower() == "metadata_only":
+        if rehydrate:
+            suffix_bits: list[str] = []
+            roots_loaded = stats.get("roots_loaded")
+            transforms_run = stats.get("transforms_run")
+            missing_sources = stats.get("missing_sources")
+            failures = stats.get("transform_failures")
+            if roots_loaded:
+                suffix_bits.append(f"roots loaded: {roots_loaded}")
+            if transforms_run:
+                suffix_bits.append(f"transforms: {transforms_run}")
+            if missing_sources:
+                suffix_bits.append(f"missing sources: {missing_sources}")
+            if failures:
+                suffix_bits.append(f"transform errors: {failures}")
+            suffix = f" ({', '.join(suffix_bits)})" if suffix_bits else ""
+            st.session_state["pipeline_studio_project_notice"] = (
+                f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s){suffix}."
+            )
+        else:
+            st.session_state["pipeline_studio_project_notice"] = (
+                f"Loaded metadata-only project: {int(loaded_n or 0)} dataset(s) (data not rehydrated)."
+            )
+    else:
+        suffix_bits = []
+        if data_files_loaded:
+            suffix_bits.append(f"loaded {data_files_loaded} data file(s)")
+        if missing_files:
+            suffix_bits.append(f"missing data files: {len(missing_files)}")
+        suffix = f" ({', '.join(suffix_bits)})" if suffix_bits else ""
+        st.session_state["pipeline_studio_project_notice"] = (
+            f"Loaded project: {int(loaded_n or 0)} dataset(s){suffix}."
+        )
+
+    st.session_state["pipeline_studio_last_load_summary"] = {
+        "data_mode": data_mode,
+        "rehydrate_stats": stats,
+        "data_files_loaded": data_files_loaded,
+        "missing_files": missing_files,
+    }
+    st.session_state["pipeline_studio_loaded_project_dir"] = project_dir
+    missing_sources = res.get("missing_sources")
+    missing_sources = missing_sources if isinstance(missing_sources, list) else []
+    st.session_state["pipeline_studio_missing_sources"] = missing_sources
+
+    active_id = res.get("active_dataset_id")
+    if isinstance(active_id, str) and active_id:
+        st.session_state["pipeline_studio_node_id_pending"] = active_id
+
+    st.session_state.pop("chat_dataset_selector", None)
+    _queue_active_dataset_override("")
+    st.session_state["pipeline_studio_autofollow_pending"] = True
+    st.session_state["pipeline_studio_view_pending"] = "Visual Editor"
+
+    if open_studio:
+        _request_open_pipeline_studio()
 
 
 def _pipeline_studio_dataset_meta(
@@ -3288,7 +3403,7 @@ def _pipeline_studio_reset_project(*, clear_cache: bool, add_memory: bool) -> No
     _keep_pipeline_studio_open()
 
 
-def _pipeline_studio_delete_project(*, dir_name: str) -> None:
+def _pipeline_studio_delete_project(dir_name: str | None = None) -> None:
     dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
     if not dir_name:
         st.session_state["pipeline_studio_project_notice"] = (
@@ -3309,6 +3424,13 @@ def _pipeline_studio_delete_project(*, dir_name: str) -> None:
     st.session_state["pipeline_studio_project_notice"] = (
         f"Deleted project `{dir_name}`."
     )
+    loaded_dir = st.session_state.get("pipeline_studio_loaded_project_dir")
+    if isinstance(loaded_dir, str) and os.path.normpath(loaded_dir) == os.path.normpath(
+        project_dir
+    ):
+        st.session_state.pop("pipeline_studio_loaded_project_dir", None)
+        st.session_state.pop("pipeline_studio_missing_sources", None)
+        st.session_state.pop("pipeline_studio_last_load_summary", None)
     st.session_state.pop("pipeline_studio_project_select", None)
     _keep_pipeline_studio_open()
 
@@ -4038,6 +4160,109 @@ with st.sidebar:
         key="pipeline_studio_docked",
         help="Docked mode keeps Studio inline; undocked opens a modal.",
     )
+    with st.expander("Projects", expanded=False):
+        projects = _pipeline_studio_list_projects()
+        if not projects:
+            st.caption("No saved projects yet.")
+        else:
+            show_archived = st.checkbox(
+                "Show archived projects",
+                value=False,
+                key="pipeline_studio_sidebar_show_archived",
+            )
+            search = st.text_input(
+                "Search projects",
+                value="",
+                key="pipeline_studio_sidebar_project_search",
+            )
+            q = (search or "").strip().lower()
+            filtered: list[dict] = []
+            for rec in projects:
+                if not isinstance(rec, dict):
+                    continue
+                if not show_archived and bool(rec.get("archived", False)):
+                    continue
+                name = str(rec.get("name") or "")
+                dir_name = str(rec.get("dir_name") or "")
+                if q and q not in f"{name} {dir_name}".lower():
+                    continue
+                filtered.append(rec)
+
+            filtered.sort(key=lambda x: float(x.get("saved_ts") or 0.0), reverse=True)
+            by_dir = {
+                rec.get("dir_name"): rec
+                for rec in filtered
+                if isinstance(rec, dict) and isinstance(rec.get("dir_name"), str)
+            }
+            options = [dn for dn in by_dir.keys() if dn]
+            if not options:
+                st.caption("No matching projects.")
+            else:
+
+                def _fmt_project_dir(dir_name: str) -> str:
+                    rec = by_dir.get(dir_name) or {}
+                    name = rec.get("name") or dir_name
+                    n_ds = int(rec.get("datasets_total") or 0)
+                    data_mode = str(rec.get("data_mode") or "full")
+                    try:
+                        from datetime import datetime
+
+                        saved_ts = float(rec.get("saved_ts") or 0.0)
+                        saved_txt = (
+                            datetime.fromtimestamp(saved_ts).strftime("%Y-%m-%d %H:%M")
+                            if saved_ts > 0
+                            else "unknown"
+                        )
+                    except Exception:
+                        saved_txt = "unknown"
+                    return f"{name} · {n_ds} datasets · {data_mode} · {saved_txt}"
+
+                selected_dir_name = st.selectbox(
+                    "Saved projects",
+                    options=[""] + options,
+                    format_func=lambda x: "Select a project…" if not x else _fmt_project_dir(str(x)),
+                    key="pipeline_studio_sidebar_project_select",
+                )
+                rehydrate = st.checkbox(
+                    "Rehydrate (best-effort)",
+                    value=True,
+                    key="pipeline_studio_sidebar_project_rehydrate",
+                    help="Attempts to reload sources and rerun stored transforms when a project is metadata-only.",
+                )
+                c_load, c_open = st.columns([0.45, 0.55], gap="small")
+                with c_load:
+                    if st.button(
+                        "Load",
+                        key="pipeline_studio_sidebar_project_load",
+                        disabled=not bool(selected_dir_name),
+                        width="stretch",
+                    ):
+                        rec = by_dir.get(selected_dir_name) or {}
+                        project_dir = rec.get("dir_path") or ""
+                        if isinstance(project_dir, str) and project_dir:
+                            _pipeline_studio_load_project_into_session(
+                                project_dir=project_dir,
+                                rehydrate=rehydrate,
+                                open_studio=False,
+                            )
+                with c_open:
+                    if st.button(
+                        "Load + open Studio",
+                        key="pipeline_studio_sidebar_project_load_open",
+                        disabled=not bool(selected_dir_name),
+                        width="stretch",
+                    ):
+                        rec = by_dir.get(selected_dir_name) or {}
+                        project_dir = rec.get("dir_path") or ""
+                        if isinstance(project_dir, str) and project_dir:
+                            _pipeline_studio_load_project_into_session(
+                                project_dir=project_dir,
+                                rehydrate=rehydrate,
+                                open_studio=True,
+                            )
+                notice = st.session_state.get("pipeline_studio_project_notice")
+                if isinstance(notice, str) and notice.strip():
+                    st.info(notice)
     st.divider()
 
     st.header("LLM")
@@ -8388,6 +8613,199 @@ def _render_pipeline_studio() -> None:
 
     if not studio_datasets:
         st.info("No pipeline yet. Load data and run a transform to build one.")
+        project_notice = st.session_state.pop(
+            "pipeline_studio_project_notice", None
+        )
+        if isinstance(project_notice, str) and project_notice.strip():
+            if project_notice.lower().startswith("error:"):
+                st.error(project_notice.replace("Error:", "", 1).strip())
+            else:
+                st.success(project_notice)
+        with st.expander("Projects (save/load)", expanded=False):
+            st.caption(
+                "Saves Pipeline Studio state to `pipeline_store/pipeline_projects/` "
+                "(pickles optional; do not load untrusted files)."
+            )
+
+            def _save_project_click(
+                project_name: str, include_data: bool, project_dir: str | None = None
+            ) -> None:
+                target_dir = (
+                    project_dir.strip()
+                    if isinstance(project_dir, str) and project_dir.strip()
+                    else None
+                )
+                team_state = st.session_state.get("team_state", {})
+                res = _pipeline_studio_save_project(
+                    name=project_name or "project",
+                    team_state=team_state,
+                    include_data=bool(include_data),
+                    project_dir=target_dir,
+                )
+                err = res.get("error")
+                if isinstance(err, str) and err:
+                    st.session_state["pipeline_studio_project_notice"] = (
+                        f"Error: {err}"
+                    )
+                    return
+                saved_dir = res.get("project_dir")
+                if isinstance(saved_dir, str) and saved_dir:
+                    data_mode = (
+                        "metadata-only" if not bool(include_data) else "full"
+                    )
+                    if target_dir:
+                        st.session_state["pipeline_studio_project_notice"] = (
+                            f"Overwrote {data_mode} project at `{target_dir}`."
+                        )
+                        st.session_state["pipeline_studio_loaded_project_dir"] = (
+                            target_dir
+                        )
+                    else:
+                        st.session_state["pipeline_studio_project_notice"] = (
+                            f"Saved {data_mode} project to `{saved_dir}`."
+                        )
+                        current_loaded = st.session_state.get(
+                            "pipeline_studio_loaded_project_dir"
+                        )
+                        if not (
+                            isinstance(current_loaded, str)
+                            and current_loaded.strip()
+                        ):
+                            st.session_state["pipeline_studio_loaded_project_dir"] = (
+                                saved_dir
+                            )
+                else:
+                    st.session_state["pipeline_studio_project_notice"] = (
+                        "Error: Project save failed (unknown error)."
+                    )
+
+            def _load_project_click(dir_name: str, rehydrate: bool) -> None:
+                dir_name = dir_name.strip() if isinstance(dir_name, str) else ""
+                if not dir_name:
+                    st.session_state["pipeline_studio_project_notice"] = (
+                        "Error: Select a project to load."
+                    )
+                    return
+                project_dir = os.path.join(PIPELINE_STUDIO_PROJECTS_DIR, dir_name)
+                _pipeline_studio_load_project_into_session(
+                    project_dir=project_dir,
+                    rehydrate=bool(rehydrate),
+                    open_studio=False,
+                )
+
+            default_project_name = st.session_state.get("pipeline_studio_project_name")
+            if (
+                not isinstance(default_project_name, str)
+                or not default_project_name.strip()
+            ):
+                default_project_name = "project"
+            project_name = st.text_input(
+                "Project name",
+                value=default_project_name,
+                key="pipeline_studio_project_name",
+            )
+            loaded_project_dir = st.session_state.get("pipeline_studio_loaded_project_dir")
+            loaded_project_dir = (
+                loaded_project_dir
+                if isinstance(loaded_project_dir, str) and loaded_project_dir.strip()
+                else None
+            )
+            loaded_manifest = (
+                _pipeline_studio_load_project_manifest(project_dir=loaded_project_dir)
+                if loaded_project_dir
+                else None
+            )
+            loaded_name = (
+                loaded_manifest.get("name")
+                if isinstance(loaded_manifest, dict)
+                else None
+            )
+            loaded_name = (
+                loaded_name
+                if isinstance(loaded_name, str) and loaded_name.strip()
+                else os.path.basename(loaded_project_dir) if loaded_project_dir else None
+            )
+            save_as_new = False
+            if loaded_project_dir:
+                st.caption(f"Loaded project: **{loaded_name or 'current'}**")
+                save_as_new = st.checkbox(
+                    "Save as new copy",
+                    value=False,
+                    key="pipeline_studio_project_save_as_new",
+                    help="When unchecked, Save overwrites the loaded project.",
+                )
+                if not save_as_new:
+                    st.caption("Saving will overwrite the loaded project.")
+            overwrite_dir = None
+            if loaded_project_dir and not save_as_new:
+                overwrite_dir = loaded_project_dir
+            c_save_meta, c_save_full = st.columns(2)
+            with c_save_meta:
+                st.button(
+                    "Save project (metadata-only)",
+                    key="pipeline_studio_project_save_meta",
+                    on_click=_save_project_click,
+                    args=(project_name, False, overwrite_dir),
+                    width="stretch",
+                    help="Stores lineage + steps without dataset pickles; reloads from source on demand.",
+                )
+            with c_save_full:
+                st.button(
+                    "Save project with data",
+                    key="pipeline_studio_project_save_full",
+                    on_click=_save_project_click,
+                    args=(project_name, True, overwrite_dir),
+                    width="stretch",
+                    help="Stores dataset snapshots (Parquet when available, else pickle).",
+                )
+
+            projects = _pipeline_studio_list_projects()
+            if not projects:
+                st.caption("No saved projects yet.")
+            else:
+                dir_options = [
+                    p.get("dir_name") for p in projects if p.get("dir_name")
+                ]
+                dir_options = [
+                    x for x in dir_options if isinstance(x, str) and x
+                ]
+
+                def _fmt_project(dir_name: str) -> str:
+                    rec = next(
+                        (p for p in projects if p.get("dir_name") == dir_name),
+                        None,
+                    )
+                    if not isinstance(rec, dict):
+                        return dir_name
+                    label = (
+                        rec.get("name")
+                        if isinstance(rec.get("name"), str)
+                        else dir_name
+                    )
+                    try:
+                        ts = float(rec.get("saved_ts") or 0.0)
+                    except Exception:
+                        ts = 0.0
+                    return f"{label} ({int(ts)})" if ts else str(label)
+
+                selected_project = st.selectbox(
+                    "Load project",
+                    options=dir_options,
+                    format_func=_fmt_project,
+                    key="pipeline_studio_project_select",
+                )
+                rehydrate = st.checkbox(
+                    "Rebuild datasets from sources (metadata-only)",
+                    key="pipeline_studio_project_rehydrate",
+                    help="Attempts to reload source files and replay transforms when the project contains metadata only.",
+                )
+                st.button(
+                    "Load selected project",
+                    key="pipeline_studio_project_load",
+                    on_click=_load_project_click,
+                    args=(selected_project, bool(rehydrate)),
+                    width="stretch",
+                )
     else:
         target_options = [
             ("Model (latest feature)", "model"),
@@ -8652,13 +9070,21 @@ def _render_pipeline_studio() -> None:
                     )
 
                     def _save_project_click(
-                        project_name: str, include_data: bool
+                        project_name: str,
+                        include_data: bool,
+                        project_dir: str | None = None,
                     ) -> None:
+                        target_dir = (
+                            project_dir.strip()
+                            if isinstance(project_dir, str) and project_dir.strip()
+                            else None
+                        )
                         team_state = st.session_state.get("team_state", {})
                         res = _pipeline_studio_save_project(
                             name=project_name or "project",
                             team_state=team_state,
                             include_data=bool(include_data),
+                            project_dir=target_dir,
                         )
                         err = res.get("error")
                         if isinstance(err, str) and err:
@@ -8666,14 +9092,32 @@ def _render_pipeline_studio() -> None:
                                 f"Error: {err}"
                             )
                             return
-                        project_dir = res.get("project_dir")
-                        if isinstance(project_dir, str) and project_dir:
+                        saved_dir = res.get("project_dir")
+                        if isinstance(saved_dir, str) and saved_dir:
                             data_mode = (
                                 "metadata-only" if not bool(include_data) else "full"
                             )
-                            st.session_state["pipeline_studio_project_notice"] = (
-                                f"Saved {data_mode} project to `{project_dir}`."
-                            )
+                            if target_dir:
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    f"Overwrote {data_mode} project at `{target_dir}`."
+                                )
+                                st.session_state[
+                                    "pipeline_studio_loaded_project_dir"
+                                ] = target_dir
+                            else:
+                                st.session_state["pipeline_studio_project_notice"] = (
+                                    f"Saved {data_mode} project to `{saved_dir}`."
+                                )
+                                current_loaded = st.session_state.get(
+                                    "pipeline_studio_loaded_project_dir"
+                                )
+                                if not (
+                                    isinstance(current_loaded, str)
+                                    and current_loaded.strip()
+                                ):
+                                    st.session_state[
+                                        "pipeline_studio_loaded_project_dir"
+                                    ] = saved_dir
                         else:
                             st.session_state["pipeline_studio_project_notice"] = (
                                 "Error: Project save failed (unknown error)."
@@ -8790,13 +9234,55 @@ def _render_pipeline_studio() -> None:
                         value=default_project_name,
                         key="pipeline_studio_project_name",
                     )
+                    loaded_project_dir = st.session_state.get(
+                        "pipeline_studio_loaded_project_dir"
+                    )
+                    loaded_project_dir = (
+                        loaded_project_dir
+                        if isinstance(loaded_project_dir, str)
+                        and loaded_project_dir.strip()
+                        else None
+                    )
+                    loaded_manifest = (
+                        _pipeline_studio_load_project_manifest(
+                            project_dir=loaded_project_dir
+                        )
+                        if loaded_project_dir
+                        else None
+                    )
+                    loaded_name = (
+                        loaded_manifest.get("name")
+                        if isinstance(loaded_manifest, dict)
+                        else None
+                    )
+                    loaded_name = (
+                        loaded_name
+                        if isinstance(loaded_name, str) and loaded_name.strip()
+                        else os.path.basename(loaded_project_dir)
+                        if loaded_project_dir
+                        else None
+                    )
+                    save_as_new = False
+                    if loaded_project_dir:
+                        st.caption(f"Loaded project: **{loaded_name or 'current'}**")
+                        save_as_new = st.checkbox(
+                            "Save as new copy",
+                            value=False,
+                            key="pipeline_studio_project_save_as_new",
+                            help="When unchecked, Save overwrites the loaded project.",
+                        )
+                        if not save_as_new:
+                            st.caption("Saving will overwrite the loaded project.")
+                    overwrite_dir = None
+                    if loaded_project_dir and not save_as_new:
+                        overwrite_dir = loaded_project_dir
                     c_save_meta, c_save_full = st.columns(2)
                     with c_save_meta:
                         st.button(
                             "Save project (metadata-only)",
                             key="pipeline_studio_project_save_meta",
                             on_click=_save_project_click,
-                            args=(project_name, False),
+                            args=(project_name, False, overwrite_dir),
                             width="stretch",
                             help="Stores lineage + steps without dataset pickles; reloads from source on demand.",
                         )
@@ -8805,7 +9291,7 @@ def _render_pipeline_studio() -> None:
                             "Save project with data",
                             key="pipeline_studio_project_save_full",
                             on_click=_save_project_click,
-                            args=(project_name, True),
+                            args=(project_name, True, overwrite_dir),
                             width="stretch",
                             help="Stores dataset snapshots (Parquet when available, else pickle).",
                         )
@@ -9356,6 +9842,9 @@ def _render_pipeline_studio() -> None:
                             team_state.get("datasets")
                             if isinstance(team_state, dict)
                             else {}
+                        )
+                        datasets_meta = (
+                            datasets_meta if isinstance(datasets_meta, dict) else {}
                         )
                         preview_sets = [
                             (did, meta)
