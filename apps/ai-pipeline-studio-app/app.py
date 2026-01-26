@@ -4876,22 +4876,63 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Projects section
+    # Projects section with CRUD
     with st.expander("📁 Projects", expanded=False):
         projects = _pipeline_studio_list_projects()
+
+        # Create New Project section
+        st.markdown("**➕ Create New Project**")
+        new_project_name = st.text_input(
+            "Project Name",
+            value="",
+            key="new_project_name_input",
+            placeholder="My Data Analysis Project",
+        )
+        if st.button("💾 Save Current as New Project", key="create_new_project", use_container_width=True):
+            if new_project_name.strip():
+                try:
+                    team_state = st.session_state.get("team_state", {})
+                    if team_state.get("datasets"):
+                        # Save project with the given name
+                        result = _pipeline_studio_save_project(
+                            name=new_project_name.strip(),
+                            data_mode="metadata",
+                        )
+                        if result.get("success"):
+                            st.success(f"✓ Project '{new_project_name}' saved!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to save: {result.get('error', 'Unknown error')}")
+                    else:
+                        st.warning("No datasets to save. Load some data first.")
+                except Exception as e:
+                    st.error(f"Error saving project: {e}")
+            else:
+                st.warning("Please enter a project name.")
+
+        st.divider()
+
+        # List existing projects
+        st.markdown("**📂 Saved Projects**")
         if not projects:
-            st.caption("No saved projects yet.")
+            st.caption("No saved projects yet. Create one above!")
         else:
-            show_archived = st.checkbox(
-                "Show archived projects",
-                value=False,
-                key="pipeline_studio_sidebar_show_archived",
-            )
-            search = st.text_input(
-                "Search projects",
-                value="",
-                key="pipeline_studio_sidebar_project_search",
-            )
+            # Filters
+            col_search, col_filter = st.columns([2, 1])
+            with col_search:
+                search = st.text_input(
+                    "🔍 Search",
+                    value="",
+                    key="pipeline_studio_sidebar_project_search",
+                    placeholder="Filter projects...",
+                )
+            with col_filter:
+                show_archived = st.checkbox(
+                    "Archived",
+                    value=False,
+                    key="pipeline_studio_sidebar_show_archived",
+                )
+
             q = (search or "").strip().lower()
             filtered: list[dict] = []
             for rec in projects:
@@ -4912,74 +4953,122 @@ with st.sidebar:
                 if isinstance(rec, dict) and isinstance(rec.get("dir_name"), str)
             }
             options = [dn for dn in by_dir.keys() if dn]
+
             if not options:
                 st.caption("No matching projects.")
             else:
-
                 def _fmt_project_dir(dir_name: str) -> str:
                     rec = by_dir.get(dir_name) or {}
                     name = rec.get("name") or dir_name
                     n_ds = int(rec.get("datasets_total") or 0)
-                    data_mode = str(rec.get("data_mode") or "full")
+                    archived = "📦 " if rec.get("archived") else ""
                     try:
                         from datetime import datetime
-
                         saved_ts = float(rec.get("saved_ts") or 0.0)
                         saved_txt = (
-                            datetime.fromtimestamp(saved_ts).strftime("%Y-%m-%d %H:%M")
+                            datetime.fromtimestamp(saved_ts).strftime("%b %d, %Y")
                             if saved_ts > 0
-                            else "unknown"
+                            else ""
                         )
                     except Exception:
-                        saved_txt = "unknown"
-                    return f"{name} · {n_ds} datasets · {data_mode} · {saved_txt}"
+                        saved_txt = ""
+                    return f"{archived}{name} ({n_ds} datasets) - {saved_txt}"
 
                 selected_dir_name = st.selectbox(
-                    "Saved projects",
+                    "Select Project",
                     options=[""] + options,
-                    format_func=lambda x: "Select a project…" if not x else _fmt_project_dir(str(x)),
+                    format_func=lambda x: "Choose a project..." if not x else _fmt_project_dir(str(x)),
                     key="pipeline_studio_sidebar_project_select",
                 )
-                rehydrate = st.checkbox(
-                    "Rehydrate (best-effort)",
-                    value=True,
-                    key="pipeline_studio_sidebar_project_rehydrate",
-                    help="Attempts to reload sources and rerun stored transforms when a project is metadata-only.",
-                )
-                c_load, c_open = st.columns([0.45, 0.55], gap="small")
-                with c_load:
-                    if st.button(
-                        "Load",
-                        key="pipeline_studio_sidebar_project_load",
-                        disabled=not bool(selected_dir_name),
-                        width="stretch",
-                    ):
-                        rec = by_dir.get(selected_dir_name) or {}
-                        project_dir = rec.get("dir_path") or ""
-                        if isinstance(project_dir, str) and project_dir:
-                            _pipeline_studio_load_project_into_session(
-                                project_dir=project_dir,
-                                rehydrate=rehydrate,
-                                open_studio=False,
-                            )
-                with c_open:
-                    if st.button(
-                        "Load + open Studio",
-                        key="pipeline_studio_sidebar_project_load_open",
-                        disabled=not bool(selected_dir_name),
-                        width="stretch",
-                    ):
-                        rec = by_dir.get(selected_dir_name) or {}
-                        project_dir = rec.get("dir_path") or ""
-                        if isinstance(project_dir, str) and project_dir:
-                            _pipeline_studio_load_project_into_session(
-                                project_dir=project_dir,
-                                rehydrate=rehydrate,
-                                open_studio=True,
-                            )
+
+                if selected_dir_name:
+                    selected_rec = by_dir.get(selected_dir_name) or {}
+
+                    # Project actions
+                    st.markdown("**Actions**")
+
+                    # Load buttons
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("📂 Load", key="proj_load", use_container_width=True):
+                            project_dir = selected_rec.get("dir_path") or ""
+                            if project_dir:
+                                _pipeline_studio_load_project_into_session(
+                                    project_dir=project_dir,
+                                    rehydrate=True,
+                                    open_studio=False,
+                                )
+                    with c2:
+                        if st.button("📂 Load + Studio", key="proj_load_studio", use_container_width=True):
+                            project_dir = selected_rec.get("dir_path") or ""
+                            if project_dir:
+                                _pipeline_studio_load_project_into_session(
+                                    project_dir=project_dir,
+                                    rehydrate=True,
+                                    open_studio=True,
+                                )
+
+                    # Edit section
+                    with st.popover("✏️ Rename"):
+                        current_name = selected_rec.get("name") or selected_dir_name
+                        new_name = st.text_input("New name", value=current_name, key="rename_project_input")
+                        if st.button("Save Name", key="rename_project_btn"):
+                            if new_name.strip() and new_name != current_name:
+                                try:
+                                    project_dir = selected_rec.get("dir_path")
+                                    if project_dir:
+                                        meta_path = os.path.join(project_dir, "project_meta.json")
+                                        if os.path.exists(meta_path):
+                                            with open(meta_path, "r") as f:
+                                                meta = json.load(f)
+                                            meta["name"] = new_name.strip()
+                                            with open(meta_path, "w") as f:
+                                                json.dump(meta, f)
+                                            st.success(f"✓ Renamed to '{new_name}'")
+                                            st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error renaming: {e}")
+
+                    # Archive/Delete section
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        is_archived = bool(selected_rec.get("archived"))
+                        archive_label = "📤 Unarchive" if is_archived else "📦 Archive"
+                        if st.button(archive_label, key="proj_archive", use_container_width=True):
+                            try:
+                                project_dir = selected_rec.get("dir_path")
+                                if project_dir:
+                                    meta_path = os.path.join(project_dir, "project_meta.json")
+                                    if os.path.exists(meta_path):
+                                        with open(meta_path, "r") as f:
+                                            meta = json.load(f)
+                                        meta["archived"] = not is_archived
+                                        with open(meta_path, "w") as f:
+                                            json.dump(meta, f)
+                                        action = "unarchived" if is_archived else "archived"
+                                        st.success(f"✓ Project {action}")
+                                        st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+                    with c4:
+                        with st.popover("🗑️ Delete"):
+                            st.warning(f"Delete '{selected_rec.get('name', selected_dir_name)}'?")
+                            st.caption("This cannot be undone!")
+                            if st.button("⚠️ Confirm Delete", key="confirm_delete_proj", type="primary"):
+                                try:
+                                    project_dir = selected_rec.get("dir_path")
+                                    if project_dir and os.path.exists(project_dir):
+                                        shutil.rmtree(project_dir)
+                                        st.success("✓ Project deleted")
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error deleting: {e}")
+
                 notice = st.session_state.get("pipeline_studio_project_notice")
                 if isinstance(notice, str) and notice.strip():
                     st.info(notice)
+                    st.session_state["pipeline_studio_project_notice"] = None
     st.markdown("---")
 
     # AI Configuration Section
@@ -5042,33 +5131,22 @@ with st.sidebar:
         default_ollama_url = (
             st.session_state.get("ollama_base_url") or "http://localhost:11434"
         )
-        default_ollama_model = st.session_state.get("ollama_model") or "llama3.1:8b"
         ollama_base_url = st.text_input(
-            "Ollama base URL",
+            "🌐 Ollama URL",
             value=default_ollama_url,
             key="ollama_base_url_input",
+            placeholder="http://localhost:11434",
             help="Usually `http://localhost:11434`.",
         ).strip()
-        ollama_model = st.text_input(
-            "Ollama model",
-            value=default_ollama_model,
-            key="ollama_model_input",
-            help="Example: `llama3.1:8b` (run `ollama list` to see what's installed).",
-        ).strip()
-
         st.session_state["ollama_base_url"] = ollama_base_url
-        st.session_state["ollama_model"] = ollama_model
 
-        model_choice = ollama_model
-
-        if st.button(
-            "Check Ollama connection", width="stretch", key="ollama_check"
-        ):
+        # Fetch available models from Ollama
+        def _fetch_ollama_models(base_url: str) -> list[str]:
+            """Fetch available models from Ollama server."""
             try:
                 from urllib.request import Request, urlopen
                 import json as _json
-
-                url = f"{ollama_base_url.rstrip('/')}/api/tags"
+                url = f"{base_url.rstrip('/')}/api/tags"
                 req = Request(url, headers={"Accept": "application/json"})
                 with urlopen(req, timeout=3) as resp:
                     payload = _json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -5077,19 +5155,49 @@ with st.sidebar:
                     for m in (payload.get("models") or [])
                     if isinstance(m, dict) and isinstance(m.get("name"), str)
                 ]
-                if models:
-                    st.success(f"Connected. Found {len(models)} model(s).")
-                    st.write(models[:20])
-                else:
-                    st.warning(
-                        "Connected, but no models were returned. Run `ollama list` to confirm."
-                    )
-            except Exception as e:
-                st.error(f"Could not connect to Ollama at `{ollama_base_url}`: {e}")
+                return sorted(models) if models else []
+            except Exception:
+                return []
 
-        st.caption(
-            "Tip: start Ollama with `ollama serve` and pull a model with `ollama pull <model>`."
-        )
+        # Cache models in session state
+        if st.button("🔄 Refresh Models", key="ollama_refresh", use_container_width=True):
+            st.session_state["_ollama_models_cache"] = _fetch_ollama_models(ollama_base_url)
+            st.session_state["_ollama_connected"] = len(st.session_state.get("_ollama_models_cache", [])) > 0
+
+        # Auto-fetch on first load if not cached
+        if "_ollama_models_cache" not in st.session_state:
+            st.session_state["_ollama_models_cache"] = _fetch_ollama_models(ollama_base_url)
+            st.session_state["_ollama_connected"] = len(st.session_state.get("_ollama_models_cache", [])) > 0
+
+        available_models = st.session_state.get("_ollama_models_cache", [])
+
+        if available_models:
+            st.success(f"✓ Connected — {len(available_models)} model(s) available")
+            default_ollama_model = st.session_state.get("ollama_model") or available_models[0]
+            # Ensure default is in list
+            if default_ollama_model not in available_models:
+                default_ollama_model = available_models[0]
+
+            ollama_model = st.selectbox(
+                "🤖 Select Model",
+                options=available_models,
+                index=available_models.index(default_ollama_model) if default_ollama_model in available_models else 0,
+                key="ollama_model_select",
+                help="Select from available Ollama models.",
+            )
+        else:
+            st.warning("⚠️ Could not connect to Ollama or no models found")
+            ollama_model = st.text_input(
+                "🤖 Model Name",
+                value=st.session_state.get("ollama_model") or "llama3.1:8b",
+                key="ollama_model_input",
+                placeholder="llama3.1:8b",
+                help="Enter model name manually (e.g., `llama3.1:8b`).",
+            ).strip()
+            st.caption("💡 Start Ollama with `ollama serve` and pull a model with `ollama pull <model>`")
+
+        st.session_state["ollama_model"] = ollama_model
+        model_choice = ollama_model
 
     # Settings
     st.header("Settings")
