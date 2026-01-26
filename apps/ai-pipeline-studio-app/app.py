@@ -57,23 +57,502 @@ TITLE = "AI Pipeline Studio"
 LOGO_PATH = os.path.join(APP_ROOT, "img", "ai_pipeline_studio_logo.png")
 page_icon = LOGO_PATH if os.path.exists(LOGO_PATH) else ":bar_chart:"
 st.set_page_config(page_title=TITLE, page_icon=page_icon, layout="wide")
-st.title(TITLE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Modern UI Styling
+# ─────────────────────────────────────────────────────────────────────────────
+MODERN_CSS = """
+<style>
+/* ===== Global Styles ===== */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --primary-color: #6366f1;
+    --primary-hover: #4f46e5;
+    --secondary-color: #8b5cf6;
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --error-color: #ef4444;
+    --bg-primary: #0f172a;
+    --bg-secondary: #1e293b;
+    --bg-card: #1e293b;
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --border-color: #334155;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+}
+
+/* Light mode overrides */
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg-primary: #f8fafc;
+        --bg-secondary: #f1f5f9;
+        --bg-card: #ffffff;
+        --text-primary: #1e293b;
+        --text-secondary: #64748b;
+        --border-color: #e2e8f0;
+        --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+}
+
+/* Main container */
+.main .block-container {
+    padding: 2rem 3rem;
+    max-width: 1400px;
+}
+
+/* Hide Streamlit branding */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+
+/* ===== Typography ===== */
+h1, h2, h3, h4, h5, h6, p, span, div {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+h1 {
+    font-size: 2rem !important;
+    font-weight: 700 !important;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.5rem !important;
+}
+
+/* ===== Cards ===== */
+.stCard, [data-testid="stExpander"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    box-shadow: var(--shadow) !important;
+    padding: 1rem !important;
+    margin-bottom: 1rem !important;
+}
+
+/* ===== Buttons ===== */
+.stButton > button {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    padding: 0.5rem 1.5rem !important;
+    font-weight: 600 !important;
+    font-size: 0.875rem !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 2px 4px rgba(99, 102, 241, 0.3) !important;
+}
+
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4) !important;
+}
+
+/* Secondary buttons */
+.stButton > button[kind="secondary"] {
+    background: transparent !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
+}
+
+/* ===== Input Fields ===== */
+.stTextInput > div > div > input,
+.stSelectbox > div > div,
+.stTextArea > div > div > textarea {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    color: var(--text-primary) !important;
+    padding: 0.75rem !important;
+    font-size: 0.875rem !important;
+}
+
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus {
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
+}
+
+/* ===== Sidebar ===== */
+[data-testid="stSidebar"] {
+    background: var(--bg-secondary) !important;
+    border-right: 1px solid var(--border-color) !important;
+}
+
+[data-testid="stSidebar"] .block-container {
+    padding: 1.5rem 1rem !important;
+}
+
+/* Sidebar section headers */
+[data-testid="stSidebar"] .stMarkdown h3 {
+    font-size: 0.75rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    color: var(--text-secondary) !important;
+    margin: 1.5rem 0 0.75rem 0 !important;
+}
+
+/* ===== Chat Interface ===== */
+.stChatMessage {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    padding: 1rem !important;
+    margin-bottom: 0.75rem !important;
+}
+
+.stChatInputContainer {
+    border: 2px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    background: var(--bg-card) !important;
+}
+
+.stChatInputContainer:focus-within {
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
+}
+
+/* ===== Expanders ===== */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+[data-testid="stExpander"] summary {
+    padding: 0.75rem 1rem !important;
+    font-weight: 600 !important;
+}
+
+/* ===== Tabs ===== */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0.5rem !important;
+    background: var(--bg-secondary) !important;
+    padding: 0.5rem !important;
+    border-radius: 10px !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    border-radius: 8px !important;
+    padding: 0.5rem 1rem !important;
+    font-weight: 500 !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background: var(--primary-color) !important;
+    color: white !important;
+}
+
+/* ===== DataFrames ===== */
+.stDataFrame {
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+
+/* ===== Metrics ===== */
+[data-testid="stMetric"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    padding: 1rem !important;
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 1.75rem !important;
+    font-weight: 700 !important;
+}
+
+/* ===== Alerts/Info boxes ===== */
+.stAlert {
+    border-radius: 10px !important;
+    border: none !important;
+}
+
+[data-testid="stInfo"] {
+    background: rgba(99, 102, 241, 0.1) !important;
+    border-left: 4px solid var(--primary-color) !important;
+}
+
+[data-testid="stSuccess"] {
+    background: rgba(16, 185, 129, 0.1) !important;
+    border-left: 4px solid var(--success-color) !important;
+}
+
+[data-testid="stWarning"] {
+    background: rgba(245, 158, 11, 0.1) !important;
+    border-left: 4px solid var(--warning-color) !important;
+}
+
+[data-testid="stError"] {
+    background: rgba(239, 68, 68, 0.1) !important;
+    border-left: 4px solid var(--error-color) !important;
+}
+
+/* ===== Progress Indicators ===== */
+.stProgress > div > div {
+    background: linear-gradient(90deg, #6366f1, #8b5cf6) !important;
+    border-radius: 10px !important;
+}
+
+/* ===== Spinners ===== */
+.stSpinner > div {
+    border-color: var(--primary-color) transparent transparent transparent !important;
+}
+
+/* ===== Dialog ===== */
+@media (min-width: 1100px) {
+    [data-testid="stDialog"] [role="dialog"] {
+        width: calc(100vw - 2rem) !important;
+        max-width: calc(100vw - 2rem) !important;
+        border-radius: 16px !important;
+    }
+}
+
+/* ===== Welcome Card ===== */
+.welcome-card {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 16px;
+    padding: 2rem;
+    margin-bottom: 2rem;
+}
+
+.feature-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+    transition: all 0.2s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+}
+
+.feature-icon {
+    font-size: 2rem;
+    margin-bottom: 0.75rem;
+}
+
+/* ===== Quick Actions ===== */
+.quick-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.quick-action:hover {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+/* ===== Status Badges ===== */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.status-badge.success {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+}
+
+.status-badge.warning {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+}
+
+.status-badge.error {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+}
+
+/* ===== Tooltips ===== */
+[data-testid="stTooltipIcon"] {
+    color: var(--text-secondary) !important;
+}
+
+/* ===== Dividers ===== */
+hr {
+    border: none !important;
+    border-top: 1px solid var(--border-color) !important;
+    margin: 1.5rem 0 !important;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+}
+
+/* ===== Animation ===== */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+    animation: fadeIn 0.3s ease-out;
+}
+
+/* ===== Download Buttons (Chart Export) ===== */
+.stDownloadButton > button {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
+    font-size: 0.75rem !important;
+    padding: 0.25rem 0.75rem !important;
+}
+
+.stDownloadButton > button:hover {
+    background: var(--primary-color) !important;
+    border-color: var(--primary-color) !important;
+    color: white !important;
+}
+</style>
+"""
+
+st.markdown(MODERN_CSS, unsafe_allow_html=True)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
-st.markdown(
-    "\n".join(
-        [
-            "<style>",
-            "@media (min-width: 1100px) {",
-            "  [data-testid=\"stDialog\"] [role=\"dialog\"] {",
-            "    width: calc(100vw - 2rem) !important;",
-            "    max-width: calc(100vw - 2rem) !important;",
-            "  }",
-            "}",
-            "</style>",
-        ]
-    ),
-    unsafe_allow_html=True,
-)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Welcome / Onboarding
+# ─────────────────────────────────────────────────────────────────────────────
+def _show_welcome_screen():
+    """Display welcome screen for new users."""
+    if st.session_state.get("_welcome_dismissed"):
+        return
+
+    st.markdown("""
+    <div class="welcome-card animate-in">
+        <h2 style="margin: 0 0 0.5rem 0; font-size: 1.5rem;">👋 Welcome to AI Pipeline Studio</h2>
+        <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">
+            Your intelligent assistant for data science workflows. Load data, analyze, visualize, and build ML models using natural language.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Feature cards
+    cols = st.columns(4)
+    features = [
+        ("📊", "Load Data", "Upload CSV, Excel, or connect to databases"),
+        ("🔍", "Analyze", "Get instant EDA and insights"),
+        ("📈", "Visualize", "Create charts with natural language"),
+        ("🤖", "Build Models", "Train ML models automatically"),
+    ]
+
+    for col, (icon, title, desc) in zip(cols, features):
+        with col:
+            st.markdown(f"""
+            <div class="feature-card">
+                <div class="feature-icon">{icon}</div>
+                <div style="font-weight: 600; margin-bottom: 0.25rem;">{title}</div>
+                <div style="font-size: 0.8rem; color: var(--text-secondary);">{desc}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Quick start tips
+    with st.expander("🚀 Quick Start Guide", expanded=False):
+        st.markdown("""
+        ### Getting Started
+
+        **1. Configure your AI provider** (sidebar)
+        - Enter your OpenAI API key, or
+        - Switch to Ollama for local models
+
+        **2. Load your data**
+        - Type: `load data from sales.csv`
+        - Or: `connect to my database`
+
+        **3. Ask questions naturally**
+        - `Show me a summary of the data`
+        - `Create a bar chart of sales by region`
+        - `Clean missing values`
+        - `Train a model to predict churn`
+
+        **4. Use Pipeline Studio**
+        - Click **Pipeline Studio** to see your data pipeline visually
+        - Track transformations and models
+
+        ### Example Prompts
+        | Task | Example |
+        |------|---------|
+        | Load data | `load data from customers.csv` |
+        | Analyze | `show summary statistics` |
+        | Visualize | `plot sales over time` |
+        | Clean | `remove duplicate rows` |
+        | Model | `train a classifier for target column` |
+
+        ### Tips
+        - 💡 Use `3*3` for quick math calculations
+        - 🔍 Search datasets using the filter box
+        - 📥 Export charts as PNG, SVG, or JSON
+        - ↩️ Use Undo/Redo for dataset changes
+        """)
+
+    # Dismiss button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("✨ Get Started", key="dismiss_welcome", use_container_width=True):
+            st.session_state["_welcome_dismissed"] = True
+            st.rerun()
+
+
+def _render_header():
+    """Render the app header with status indicators."""
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("🧪 AI Pipeline Studio")
+    with col2:
+        # Status indicators
+        api_configured = bool(st.session_state.get("OPENAI_API_KEY")) or bool(st.session_state.get("ollama_model"))
+        datasets_count = len((st.session_state.get("team_state") or {}).get("datasets") or {})
+
+        status_html = f"""
+        <div style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; padding-top: 0.5rem;">
+            <span class="status-badge {'success' if api_configured else 'warning'}">
+                {'✓ AI Ready' if api_configured else '⚠ Configure AI'}
+            </span>
+            <span class="status-badge success">
+                📦 {datasets_count} Dataset{'s' if datasets_count != 1 else ''}
+            </span>
+        </div>
+        """
+        st.markdown(status_html, unsafe_allow_html=True)
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
 DEFAULT_SQL_URL = "sqlite:///:memory:"
@@ -4733,24 +5212,39 @@ def _maybe_open_pipeline_studio_from_query() -> None:
 
 _maybe_open_pipeline_studio_from_query()
 
+# ---------------- Header & Welcome ----------------
+_render_header()
+_show_welcome_screen()
 
 # ---------------- Sidebar ----------------
 key_status = None
 with st.sidebar:
+    # Sidebar branding
+    st.markdown("""
+    <div style="text-align: center; padding: 0.5rem 0 1rem 0; border-bottom: 1px solid var(--border-color); margin-bottom: 1rem;">
+        <span style="font-size: 1.25rem; font-weight: 700;">🧪 Pipeline Studio</span>
+    </div>
+    """, unsafe_allow_html=True)
+    # Quick Actions
+    st.markdown("### 🚀 Quick Actions")
     if st.button(
-        "Pipeline Studio",
+        "📊 Open Pipeline Studio",
         key="pipeline_studio_open_sidebar",
-        width="stretch",
+        use_container_width=True,
         help="Open Pipeline Studio using the selected mode.",
     ):
         _request_open_pipeline_studio()
     st.toggle(
-        "Dock Pipeline Studio (inline)",
+        "📌 Dock inline",
         value=False,
         key="pipeline_studio_docked",
         help="Docked mode keeps Studio inline; undocked opens a modal.",
     )
-    with st.expander("Projects", expanded=False):
+
+    st.markdown("---")
+
+    # Projects section
+    with st.expander("📁 Projects", expanded=False):
         projects = _pipeline_studio_list_projects()
         if not projects:
             st.caption("No saved projects yet.")
@@ -4853,25 +5347,27 @@ with st.sidebar:
                 notice = st.session_state.get("pipeline_studio_project_notice")
                 if isinstance(notice, str) and notice.strip():
                     st.info(notice)
-    st.divider()
+    st.markdown("---")
 
-    st.header("LLM")
+    # AI Configuration Section
+    st.markdown("### 🤖 AI Configuration")
     llm_provider = st.selectbox(
-        "Provider",
+        "AI Provider",
         ["OpenAI", "Ollama"],
         index=0,
         key="llm_provider",
-        help="Choose OpenAI (cloud) or Ollama (local).",
+        help="Choose OpenAI (cloud) or Ollama (local models).",
     )
 
     ollama_base_url = None
     if llm_provider == "OpenAI":
         openai_key_input = st.text_input(
-            "OpenAI API key",
+            "🔑 API Key",
             type="password",
             value=st.session_state.get("OPENAI_API_KEY") or "",
             key="openai_api_key_input",
-            help="Required when using OpenAI models.",
+            placeholder="sk-...",
+            help="Your OpenAI API key. Get one at platform.openai.com",
         )
         openai_key = (openai_key_input or "").strip()
         st.session_state["OPENAI_API_KEY"] = openai_key
@@ -4880,14 +5376,13 @@ with st.sidebar:
             try:
                 _ = OpenAI(api_key=openai_key).models.list()
                 key_status = "ok"
-                st.success("API Key is valid!")
+                st.success("✓ API Key verified!")
             except Exception as e:
                 key_status = "bad"
-                st.error(f"Invalid API Key: {e}")
+                st.error(f"✗ Invalid API Key")
         else:
-            st.info(
-                "Please enter your OpenAI API key to proceed (or switch to Ollama)."
-            )
+            st.warning("⚠️ Enter your API key to continue")
+            st.caption("Get your key at [platform.openai.com](https://platform.openai.com/api-keys)")
             st.stop()
 
         model_choice = st.selectbox(
@@ -4899,10 +5394,10 @@ with st.sidebar:
                 "gpt-4o",
                 "gpt-5-mini",
                 "gpt-5.1",
-                # "gpt-5.1-codex-mini",
                 "gpt-5.2",
             ],
             key="openai_model_choice",
+            help="Select the model to use for AI responses.",
         )
     else:
         if ChatOllama is None:
@@ -5282,31 +5777,34 @@ with st.sidebar:
         mlflow_experiment_name or ""
     ).strip() or "H2O AutoML"
 
-    st.markdown("**Debug options**")
-    st.checkbox(
-        "Verbose console logs",
-        value=bool(st.session_state.get("debug_mode", False)),
-        key="debug_mode",
-        help="Print extra debug info to the terminal to troubleshoot DB connect and multi-file loads.",
-    )
-    st.checkbox(
-        "Show progress in chat",
-        value=bool(st.session_state.get("show_progress", True)),
-        key="show_progress",
-        help="Shows which agent is running while the team works (best effort).",
-    )
-    st.checkbox(
-        "Show live logs while running",
-        value=bool(st.session_state.get("show_live_logs", True)),
-        key="show_live_logs",
-        help="Streams console output into the app during execution (clears after the run finishes).",
-    )
+    st.markdown("---")
 
-    # Debug panel for recent errors
-    with st.expander("🔍 Error Log", expanded=False):
+    # Advanced Settings
+    with st.expander("⚙️ Advanced Settings", expanded=False):
+        st.checkbox(
+            "📝 Verbose console logs",
+            value=bool(st.session_state.get("debug_mode", False)),
+            key="debug_mode",
+            help="Print extra debug info to the terminal.",
+        )
+        st.checkbox(
+            "📊 Show progress indicators",
+            value=bool(st.session_state.get("show_progress", True)),
+            key="show_progress",
+            help="Shows which agent is running while processing.",
+        )
+        st.checkbox(
+            "📜 Show live execution logs",
+            value=bool(st.session_state.get("show_live_logs", True)),
+            key="show_live_logs",
+            help="Stream console output during execution.",
+        )
+
+        # Error log
+        st.markdown("**Recent Errors**")
         recent_errors = _get_recent_errors(5)
         if not recent_errors:
-            st.caption("No recent errors.")
+            st.caption("No recent errors. ✓")
         else:
             for err in recent_errors:
                 ts = err.get("timestamp", 0)
@@ -5321,7 +5819,10 @@ with st.sidebar:
                     st.caption(f"Context: {context}")
                 st.code(msg, language="text")
 
-    if st.button("Clear chat"):
+    st.markdown("---")
+
+    # Actions
+    if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.details = []
         st.session_state.team_state = {}
