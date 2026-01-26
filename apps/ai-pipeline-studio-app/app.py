@@ -59,387 +59,38 @@ page_icon = LOGO_PATH if os.path.exists(LOGO_PATH) else ":bar_chart:"
 st.set_page_config(page_title=TITLE, page_icon=page_icon, layout="wide")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Modern UI Styling
+# Modern UI Styling (Simplified to avoid layout issues)
 # ─────────────────────────────────────────────────────────────────────────────
 MODERN_CSS = """
 <style>
-/* ===== Global Styles ===== */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-:root {
-    --primary-color: #6366f1;
-    --primary-hover: #4f46e5;
-    --secondary-color: #8b5cf6;
-    --success-color: #10b981;
-    --warning-color: #f59e0b;
-    --error-color: #ef4444;
-    --bg-primary: #0f172a;
-    --bg-secondary: #1e293b;
-    --bg-card: #1e293b;
-    --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --border-color: #334155;
-    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-}
-
-/* Light mode overrides */
-@media (prefers-color-scheme: light) {
-    :root {
-        --bg-primary: #f8fafc;
-        --bg-secondary: #f1f5f9;
-        --bg-card: #ffffff;
-        --text-primary: #1e293b;
-        --text-secondary: #64748b;
-        --border-color: #e2e8f0;
-        --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
-}
-
-/* Main container */
-.main .block-container {
-    padding: 2rem 3rem;
-    max-width: 1400px;
-}
+/* ===== Minimal Safe Styles ===== */
 
 /* Hide Streamlit branding */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
-header {visibility: hidden;}
 
-/* ===== Typography ===== */
-h1, h2, h3, h4, h5, h6, p, span, div {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
-}
-
-h1 {
-    font-size: 2rem !important;
-    font-weight: 700 !important;
-    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin-bottom: 0.5rem !important;
-}
-
-/* ===== Cards ===== */
-.stCard, [data-testid="stExpander"] {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    box-shadow: var(--shadow) !important;
-    padding: 1rem !important;
-    margin-bottom: 1rem !important;
-}
-
-/* ===== Buttons ===== */
-.stButton > button {
+/* Primary button styling */
+.stButton > button[kind="primary"],
+.stButton > button:not([kind]) {
     background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
     color: white !important;
     border: none !important;
     border-radius: 8px !important;
-    padding: 0.5rem 1.5rem !important;
-    font-weight: 600 !important;
-    font-size: 0.875rem !important;
-    transition: all 0.2s ease !important;
-    box-shadow: 0 2px 4px rgba(99, 102, 241, 0.3) !important;
-}
-
-.stButton > button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4) !important;
-}
-
-/* Secondary buttons */
-.stButton > button[kind="secondary"] {
-    background: transparent !important;
-    border: 1px solid var(--border-color) !important;
-    color: var(--text-primary) !important;
-}
-
-/* ===== Input Fields ===== */
-.stTextInput > div > div > input,
-.stSelectbox > div > div,
-.stTextArea > div > div > textarea {
-    background: var(--bg-secondary) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 8px !important;
-    color: var(--text-primary) !important;
-    padding: 0.75rem !important;
-    font-size: 0.875rem !important;
-}
-
-.stTextInput > div > div > input:focus,
-.stTextArea > div > div > textarea:focus {
-    border-color: var(--primary-color) !important;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
-}
-
-/* ===== Sidebar ===== */
-[data-testid="stSidebar"] {
-    background: var(--bg-secondary) !important;
-    border-right: 1px solid var(--border-color) !important;
-}
-
-[data-testid="stSidebar"] .block-container {
-    padding: 1.5rem 1rem !important;
-}
-
-/* Sidebar section headers */
-[data-testid="stSidebar"] .stMarkdown h3 {
-    font-size: 0.75rem !important;
-    font-weight: 600 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
-    color: var(--text-secondary) !important;
-    margin: 1.5rem 0 0.75rem 0 !important;
-}
-
-/* ===== Chat Interface ===== */
-.stChatMessage {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    padding: 1rem !important;
-    margin-bottom: 0.75rem !important;
-}
-
-.stChatInputContainer {
-    border: 2px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    background: var(--bg-card) !important;
-}
-
-.stChatInputContainer:focus-within {
-    border-color: var(--primary-color) !important;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
-}
-
-/* ===== Expanders ===== */
-[data-testid="stExpander"] {
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}
-
-[data-testid="stExpander"] summary {
-    padding: 0.75rem 1rem !important;
     font-weight: 600 !important;
 }
 
-/* ===== Tabs ===== */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 0.5rem !important;
-    background: var(--bg-secondary) !important;
-    padding: 0.5rem !important;
-    border-radius: 10px !important;
+/* Download buttons - smaller */
+.stDownloadButton > button {
+    font-size: 0.8rem !important;
+    padding: 0.25rem 0.5rem !important;
 }
 
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    border-radius: 8px !important;
-    padding: 0.5rem 1rem !important;
-    font-weight: 500 !important;
-}
-
-.stTabs [aria-selected="true"] {
-    background: var(--primary-color) !important;
-    color: white !important;
-}
-
-/* ===== DataFrames ===== */
-.stDataFrame {
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}
-
-/* ===== Metrics ===== */
-[data-testid="stMetric"] {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 12px !important;
-    padding: 1rem !important;
-}
-
-[data-testid="stMetricValue"] {
-    font-size: 1.75rem !important;
-    font-weight: 700 !important;
-}
-
-/* ===== Alerts/Info boxes ===== */
-.stAlert {
-    border-radius: 10px !important;
-    border: none !important;
-}
-
-[data-testid="stInfo"] {
-    background: rgba(99, 102, 241, 0.1) !important;
-    border-left: 4px solid var(--primary-color) !important;
-}
-
-[data-testid="stSuccess"] {
-    background: rgba(16, 185, 129, 0.1) !important;
-    border-left: 4px solid var(--success-color) !important;
-}
-
-[data-testid="stWarning"] {
-    background: rgba(245, 158, 11, 0.1) !important;
-    border-left: 4px solid var(--warning-color) !important;
-}
-
-[data-testid="stError"] {
-    background: rgba(239, 68, 68, 0.1) !important;
-    border-left: 4px solid var(--error-color) !important;
-}
-
-/* ===== Progress Indicators ===== */
-.stProgress > div > div {
-    background: linear-gradient(90deg, #6366f1, #8b5cf6) !important;
-    border-radius: 10px !important;
-}
-
-/* ===== Spinners ===== */
-.stSpinner > div {
-    border-color: var(--primary-color) transparent transparent transparent !important;
-}
-
-/* ===== Dialog ===== */
+/* Dialog width */
 @media (min-width: 1100px) {
     [data-testid="stDialog"] [role="dialog"] {
         width: calc(100vw - 2rem) !important;
         max-width: calc(100vw - 2rem) !important;
-        border-radius: 16px !important;
     }
-}
-
-/* ===== Welcome Card ===== */
-.welcome-card {
-    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-    border: 1px solid rgba(99, 102, 241, 0.3);
-    border-radius: 16px;
-    padding: 2rem;
-    margin-bottom: 2rem;
-}
-
-.feature-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 1.5rem;
-    text-align: center;
-    transition: all 0.2s ease;
-}
-
-.feature-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow);
-}
-
-.feature-icon {
-    font-size: 2rem;
-    margin-bottom: 0.75rem;
-}
-
-/* ===== Quick Actions ===== */
-.quick-action {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 0.5rem 1rem;
-    font-size: 0.875rem;
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.quick-action:hover {
-    background: var(--primary-color);
-    color: white;
-    border-color: var(--primary-color);
-}
-
-/* ===== Status Badges ===== */
-.status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    padding: 0.25rem 0.75rem;
-    border-radius: 9999px;
-    font-size: 0.75rem;
-    font-weight: 600;
-}
-
-.status-badge.success {
-    background: rgba(16, 185, 129, 0.1);
-    color: #10b981;
-}
-
-.status-badge.warning {
-    background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
-}
-
-.status-badge.error {
-    background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
-}
-
-/* ===== Tooltips ===== */
-[data-testid="stTooltipIcon"] {
-    color: var(--text-secondary) !important;
-}
-
-/* ===== Dividers ===== */
-hr {
-    border: none !important;
-    border-top: 1px solid var(--border-color) !important;
-    margin: 1.5rem 0 !important;
-}
-
-/* ===== Scrollbar ===== */
-::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: var(--bg-secondary);
-}
-
-::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--text-secondary);
-}
-
-/* ===== Animation ===== */
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.animate-in {
-    animation: fadeIn 0.3s ease-out;
-}
-
-/* ===== Download Buttons (Chart Export) ===== */
-.stDownloadButton > button {
-    background: var(--bg-secondary) !important;
-    border: 1px solid var(--border-color) !important;
-    color: var(--text-primary) !important;
-    font-size: 0.75rem !important;
-    padding: 0.25rem 0.75rem !important;
-}
-
-.stDownloadButton > button:hover {
-    background: var(--primary-color) !important;
-    border-color: var(--primary-color) !important;
-    color: white !important;
 }
 </style>
 """
@@ -448,42 +99,31 @@ st.markdown(MODERN_CSS, unsafe_allow_html=True)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Welcome / Onboarding
+# Welcome / Onboarding (Using native Streamlit components)
 # ─────────────────────────────────────────────────────────────────────────────
 def _show_welcome_screen():
     """Display welcome screen for new users."""
     if st.session_state.get("_welcome_dismissed"):
         return
 
-    st.markdown("""
-    <div class="welcome-card animate-in">
-        <h2 style="margin: 0 0 0.5rem 0; font-size: 1.5rem;">👋 Welcome to AI Pipeline Studio</h2>
-        <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">
-            Your intelligent assistant for data science workflows. Load data, analyze, visualize, and build ML models using natural language.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("👋 **Welcome to AI Pipeline Studio** — Your intelligent assistant for data science workflows.")
 
-    # Feature cards
+    # Feature cards using columns
     cols = st.columns(4)
-    features = [
-        ("📊", "Load Data", "Upload CSV, Excel, or connect to databases"),
-        ("🔍", "Analyze", "Get instant EDA and insights"),
-        ("📈", "Visualize", "Create charts with natural language"),
-        ("🤖", "Build Models", "Train ML models automatically"),
-    ]
+    with cols[0]:
+        st.markdown("### 📊 Load Data")
+        st.caption("Upload CSV, Excel, or connect to databases")
+    with cols[1]:
+        st.markdown("### 🔍 Analyze")
+        st.caption("Get instant EDA and insights")
+    with cols[2]:
+        st.markdown("### 📈 Visualize")
+        st.caption("Create charts with natural language")
+    with cols[3]:
+        st.markdown("### 🤖 Build Models")
+        st.caption("Train ML models automatically")
 
-    for col, (icon, title, desc) in zip(cols, features):
-        with col:
-            st.markdown(f"""
-            <div class="feature-card">
-                <div class="feature-icon">{icon}</div>
-                <div style="font-weight: 600; margin-bottom: 0.25rem;">{title}</div>
-                <div style="font-size: 0.8rem; color: var(--text-secondary);">{desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
+    st.divider()
 
     # Quick start tips
     with st.expander("🚀 Quick Start Guide", expanded=False):
@@ -534,25 +174,18 @@ def _show_welcome_screen():
 
 def _render_header():
     """Render the app header with status indicators."""
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         st.title("🧪 AI Pipeline Studio")
     with col2:
-        # Status indicators
         api_configured = bool(st.session_state.get("OPENAI_API_KEY")) or bool(st.session_state.get("ollama_model"))
+        if api_configured:
+            st.success("✓ AI Ready")
+        else:
+            st.warning("⚠ Setup AI")
+    with col3:
         datasets_count = len((st.session_state.get("team_state") or {}).get("datasets") or {})
-
-        status_html = f"""
-        <div style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; padding-top: 0.5rem;">
-            <span class="status-badge {'success' if api_configured else 'warning'}">
-                {'✓ AI Ready' if api_configured else '⚠ Configure AI'}
-            </span>
-            <span class="status-badge success">
-                📦 {datasets_count} Dataset{'s' if datasets_count != 1 else ''}
-            </span>
-        </div>
-        """
-        st.markdown(status_html, unsafe_allow_html=True)
+        st.info(f"📦 {datasets_count} Datasets")
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
 DEFAULT_SQL_URL = "sqlite:///:memory:"
