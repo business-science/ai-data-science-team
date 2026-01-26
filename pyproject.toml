@@ -61,6 +61,19 @@ data_science = [
     "missingno>=0.5.2",
     "sweetviz>=2.3.0",
 ]
+api = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+]
+cloud = [
+    "snowflake-connector-python>=3.6.0",
+    "google-cloud-bigquery>=3.14.0",
+    "redshift-connector>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "boto3>=1.34.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
@@ -71,6 +84,7 @@ dev = [
     "ruff>=0.2.0",
     "mypy>=1.8.0",
     "pre-commit>=3.6.0",
+    "httpx>=0.26.0",
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -78,7 +92,7 @@ docs = [
     "mkdocstrings[python]>=0.24.0",
 ]
 all = [
-    "ai-data-science-team[machine_learning,data_science,dev,docs]",
+    "ai-data-science-team[machine_learning,data_science,api,cloud,dev,docs]",
 ]
 
 [project.urls]
@@ -89,6 +103,7 @@ Issues = "https://github.com/business-science/ai-data-science-team/issues"
 
 [project.scripts]
 ai-ds-team = "ai_data_science_team.cli:main"
+ai-ds-team-api = "ai_data_science_team.api.cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "ai_data_science_team._version.__version__"}
@@ -103,6 +118,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
     "-v",
     "--tb=short",
@@ -113,6 +130,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "requires_api: marks tests that require API keys",
+    "asyncio: marks tests as async tests",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
