@@ -30,7 +30,6 @@ class TestFileLoading:
         assert len(df) > 0
         assert "name" in df.columns
 
-    @pytest.mark.skipif(True, reason="openpyxl not installed")
     def test_load_excel_file(self, sample_excel_file):
         """Test loading an Excel file."""
         df = pd.read_excel(sample_excel_file)
@@ -38,7 +37,6 @@ class TestFileLoading:
         assert isinstance(df, pd.DataFrame)
         assert len(df) > 0
 
-    @pytest.mark.skipif(True, reason="pyarrow not installed")
     def test_load_parquet_file(self, sample_parquet_file):
         """Test loading a Parquet file."""
         df = pd.read_parquet(sample_parquet_file)
