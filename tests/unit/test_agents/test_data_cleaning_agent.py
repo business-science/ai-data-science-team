@@ -29,7 +29,7 @@ class TestDataCleaningAgent:
             log=False,
         )
         assert agent is not None
-        assert agent.params.human_in_the_loop is False
+        assert agent._params["human_in_the_loop"] is False
 
     def test_agent_initialization_with_defaults(self, mock_llm):
         """Test agent initializes with default parameters."""
@@ -43,7 +43,7 @@ class TestDataCleaningAgent:
         assert hasattr(agent, "invoke_agent")
         assert hasattr(agent, "get_data_cleaned")
         assert hasattr(agent, "get_data_cleaner_function")
-        assert hasattr(agent, "get_recommended_steps")
+        assert hasattr(agent, "get_recommended_cleaning_steps")
         assert hasattr(agent, "get_response")
         assert callable(agent.invoke_agent)
 
@@ -57,50 +57,23 @@ class TestDataCleaningAgent:
             n_samples=5,
         )
 
-        assert agent.params.human_in_the_loop is True
-        assert agent.params.log is True
+        assert agent._params["human_in_the_loop"] is True
+        assert agent._params["log"] is True
+        assert agent._params["n_samples"] == 5
 
-    def test_agent_with_custom_cleaning_steps(self, mock_llm):
-        """Test agent with pre-defined cleaning steps."""
-        custom_steps = [
-            "Remove rows with missing values",
-            "Remove duplicate rows",
-            "Convert date columns to datetime",
-        ]
-
+    def test_agent_with_bypass_recommended_steps(self, mock_llm):
+        """Test agent with bypass_recommended_steps option."""
         agent = DataCleaningAgent(
             model=mock_llm,
-            data_cleaning_steps=custom_steps,
+            bypass_recommended_steps=True,
         )
 
-        assert agent is not None
+        assert agent._params["bypass_recommended_steps"] is True
 
 
 @pytest.mark.skipif(not IMPORTS_AVAILABLE, reason="Package not installed")
 class TestDataCleaningAgentInvocation:
     """Tests for DataCleaningAgent invocation and data processing."""
-
-    @patch("ai_data_science_team.agents.data_cleaning_agent.make_data_cleaning_agent")
-    def test_invoke_with_dataframe(self, mock_make_agent, mock_llm, sample_df):
-        """Test invoking agent with a DataFrame."""
-        # Setup mock
-        mock_graph = MagicMock()
-        mock_graph.invoke.return_value = {
-            "data_cleaned": sample_df.dropna(),
-            "data_cleaner_function": "def clean(df): return df.dropna()",
-            "data_cleaner_error": None,
-            "all_datasets_summary": "Summary",
-        }
-        mock_make_agent.return_value = mock_graph
-
-        agent = DataCleaningAgent(model=mock_llm)
-        agent._compiled_graph = mock_graph
-
-        # This would normally invoke the agent
-        # agent.invoke_agent(
-        #     user_instructions="Clean the data",
-        #     data_raw=sample_df,
-        # )
 
     def test_get_data_cleaned_before_invoke(self, mock_llm):
         """Test that get_data_cleaned returns None before invocation."""
@@ -108,10 +81,10 @@ class TestDataCleaningAgentInvocation:
         result = agent.get_data_cleaned()
         assert result is None
 
-    def test_get_recommended_steps_before_invoke(self, mock_llm):
-        """Test that get_recommended_steps returns None before invocation."""
+    def test_get_recommended_cleaning_steps_before_invoke(self, mock_llm):
+        """Test that get_recommended_cleaning_steps returns None before invocation."""
         agent = DataCleaningAgent(model=mock_llm)
-        result = agent.get_recommended_steps()
+        result = agent.get_recommended_cleaning_steps()
         assert result is None
 
 

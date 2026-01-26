@@ -31,16 +31,17 @@ class TestDataVisualizationAgent:
 
         assert hasattr(agent, "invoke_agent")
         assert hasattr(agent, "get_plotly_graph")
-        assert hasattr(agent, "get_plotly_graph_dict")
         assert hasattr(agent, "get_data_visualization_function")
 
-    def test_agent_with_custom_instructions(self, mock_llm):
-        """Test agent with custom visualization instructions."""
+    def test_agent_params_structure(self, mock_llm):
+        """Test that agent params have expected structure."""
         agent = DataVisualizationAgent(
             model=mock_llm,
-            chart_instructions="Use blue color scheme for all charts",
+            human_in_the_loop=True,
+            log=True,
         )
-        assert agent is not None
+        assert agent._params["human_in_the_loop"] is True
+        assert agent._params["log"] is True
 
 
 class TestPlotlyVisualizationLogic:

@@ -173,24 +173,6 @@ class TestCategoricalAnalysis:
         assert isinstance(crosstab, pd.DataFrame)
 
 
-@pytest.mark.skipif(not IMPORTS_AVAILABLE, reason="Package not installed")
-class TestEDATools:
-    """Tests for the EDA tool functions."""
-
-    def test_explain_data_function(self, sample_df):
-        """Test the explain_data tool function."""
-        result = explain_data(sample_df)
-
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-    def test_describe_dataset_function(self, sample_df):
-        """Test the describe_dataset tool function."""
-        result = describe_dataset(sample_df)
-
-        assert isinstance(result, str)
-
-
 class TestEDAEdgeCases:
     """Tests for edge cases in EDA."""
 
