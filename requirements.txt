@@ -15,3 +15,4 @@ scikit-learn
 xgboost
 psutil
 streamlit-flow-component
+ipython
