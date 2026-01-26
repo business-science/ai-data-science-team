@@ -16,3 +16,5 @@ xgboost
 psutil
 streamlit-flow-component
 ipython
+h2o >= 3.46.0.9
+mlflow >= 3.8.1
