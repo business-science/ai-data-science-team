@@ -1,0 +1,6 @@
+id,name,age,salary,department,hire_date
+1,Alice,25,50000,Engineering,2020-01-15
+2,Bob,30,60000,Sales,2019-06-20
+3,Charlie,35,70000,Engineering,2021-03-10
+4,David,,80000,HR,2018-11-05
+5,Eve,45,,Sales,2022-07-01

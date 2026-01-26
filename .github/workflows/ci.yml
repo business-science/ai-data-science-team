@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main, develop]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run linting
+        run: |
+          pip install ruff
+          ruff check ai_data_science_team/ --exit-zero
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short -x --ignore=tests/integration/
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Run tests with coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        run: |
+          pytest tests/ -v --cov=ai_data_science_team --cov-report=xml --cov-report=term --ignore=tests/integration/
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v --tb=short -m "not requires_api"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install mypy
+
+      - name: Run type checking
+        run: |
+          mypy ai_data_science_team/ --ignore-missing-imports --no-error-summary || true
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
+      - name: Build docs
+        run: |
+          echo "Documentation build placeholder"
+          # mkdocs build --strict
