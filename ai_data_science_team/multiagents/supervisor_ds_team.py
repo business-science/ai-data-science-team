@@ -747,6 +747,41 @@ Examples:
     def supervisor_node(state: SupervisorDSState):
         print("---SUPERVISOR---")
         clean_msgs = _clean_messages(state.get("messages", []))
+        # Hydrate cached datasets from artifacts for stateless reuse across calls.
+        hydrated: dict[str, Any] = {}
+        artifacts = state.get("artifacts") or {}
+        data_cleaned = state.get("data_cleaned")
+        if data_cleaned is None and isinstance(artifacts.get("data_cleaning"), dict):
+            data_cleaned = artifacts.get("data_cleaning")
+            hydrated["data_cleaned"] = data_cleaned
+        data_wrangled = state.get("data_wrangled")
+        if data_wrangled is None and isinstance(artifacts.get("data_wrangling"), dict):
+            data_wrangled = artifacts.get("data_wrangling")
+            hydrated["data_wrangled"] = data_wrangled
+        data_sql = state.get("data_sql")
+        sql_art = artifacts.get("sql") if isinstance(artifacts, dict) else None
+        if (
+            data_sql is None
+            and isinstance(sql_art, dict)
+            and sql_art.get("data_sql") is not None
+        ):
+            data_sql = sql_art.get("data_sql")
+            hydrated["data_sql"] = data_sql
+        feature_data = state.get("feature_data")
+        fe_art = (
+            artifacts.get("feature_engineering") if isinstance(artifacts, dict) else None
+        )
+        if (
+            feature_data is None
+            and isinstance(fe_art, dict)
+            and fe_art.get("data_engineered") is not None
+        ):
+            feature_data = fe_art.get("data_engineered")
+            hydrated["feature_data"] = feature_data
+
+        if hydrated:
+            state = {**state, **hydrated}
+        base_update = hydrated
         # Ensure every message has an ID so per-request step tracking is reliable even
         # when upstream callers don't set message IDs (e.g., Streamlit chat history).
         try:
@@ -890,6 +925,7 @@ Examples:
             return {
                 "messages": [msg],
                 "next": "FINISH",
+                **base_update,
                 "active_data_key": active_data_key,
                 "datasets": datasets,
                 "active_dataset_id": requested_dataset_id,
@@ -1325,6 +1361,7 @@ Examples:
                                 else {}
                             ),
                             "next": "Data_Loader_Tools_Agent",
+                            **base_update,
                             "active_data_key": active_data_key,
                             "datasets": datasets,
                             "active_dataset_id": active_dataset_id,
@@ -1341,6 +1378,7 @@ Examples:
                     return {
                         **({"messages": planner_messages} if planner_messages else {}),
                         "next": worker,
+                        **base_update,
                         "active_data_key": active_data_key,
                         "datasets": datasets,
                         "active_dataset_id": active_dataset_id,
@@ -1356,6 +1394,7 @@ Examples:
                 return {
                     **({"messages": planner_messages} if planner_messages else {}),
                     "next": "FINISH",
+                    **base_update,
                     "active_data_key": active_data_key,
                     "datasets": datasets,
                     "active_dataset_id": active_dataset_id,
@@ -1407,6 +1446,7 @@ Examples:
         # Keep active_data_key stable unless a worker changes it.
         return {
             "next": next_worker,
+            **base_update,
             "active_data_key": active_data_key,
             "datasets": datasets,
             "active_dataset_id": active_dataset_id,
@@ -1630,6 +1670,22 @@ Examples:
             return getattr(resp, "content", None) or str(resp)
         except Exception:
             return None
+
+    def _append_error_message(
+        merged: dict,
+        agent_name: str,
+        error_text: Optional[str],
+        log_path: Optional[str] = None,
+        prefix: str = "Error",
+    ):
+        if not error_text:
+            return
+        lines = [str(error_text)]
+        if isinstance(log_path, str) and log_path:
+            lines.append(f"Log: {log_path}")
+        merged["messages"].append(
+            AIMessage(content=f"{prefix}:\n" + "\n".join(lines), name=agent_name)
+        )
 
     def _ensure_df(data):
         try:
@@ -2750,6 +2806,36 @@ Examples:
         if summary_msg:
             merged["messages"] = merged.get("messages", []) + [summary_msg]
 
+        def _collect_loader_errors(loader_artifacts: Any) -> list[str]:
+            errors: list[str] = []
+            if not loader_artifacts:
+                return errors
+            if isinstance(loader_artifacts, dict):
+                # Handle direct tool artifact or tool-keyed artifact
+                for key, val in loader_artifacts.items():
+                    if isinstance(val, dict):
+                        # load_file style
+                        if val.get("status") == "error" and val.get("error"):
+                            errors.append(f"{key}: {val.get('error')}")
+                        # load_directory style: {filename: {status, error}}
+                        for fname, info in val.items():
+                            if (
+                                isinstance(info, dict)
+                                and info.get("status") == "error"
+                                and info.get("error")
+                            ):
+                                errors.append(f"{fname}: {info.get('error')}")
+            return errors
+
+        loader_errors = _collect_loader_errors(loader_artifacts)
+        if loader_errors:
+            merged["messages"] = merged.get("messages", []) + [
+                AIMessage(
+                    content="Data loading error(s):\n" + "\n".join(loader_errors),
+                    name="data_loader_agent",
+                )
+            ]
+
         merged["messages"] = _tag_messages(merged.get("messages"), "data_loader_agent")
 
         # If the dataset changed, clear downstream artifacts to avoid stale plots/models.
@@ -2774,6 +2860,7 @@ Examples:
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_loader": loader_artifacts,
+                "data_loader_details": {"errors": loader_errors} if loader_errors else {},
             },
             "last_worker": "Data_Loader_Tools_Agent",
             **downstream_resets,
@@ -3145,6 +3232,13 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="data_wrangling_agent")
             )
+        _append_error_message(
+            merged,
+            "data_wrangling_agent",
+            response.get("data_wrangler_error"),
+            response.get("data_wrangler_error_log_path"),
+            prefix="Data wrangling error",
+        )
         data_wrangled = response.get("data_wrangled")
         if data_wrangled is not None:
             try:
@@ -3205,6 +3299,21 @@ Examples:
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_wrangling": data_wrangled,
+                "data_wrangling_details": {
+                    "data_wrangler_function": response.get("data_wrangler_function"),
+                    "data_wrangler_function_path": response.get(
+                        "data_wrangler_function_path"
+                    ),
+                    "data_wrangler_function_name": response.get(
+                        "data_wrangler_function_name"
+                    ),
+                    "data_wrangler_error": response.get("data_wrangler_error"),
+                    "data_wrangler_error_log_path": response.get(
+                        "data_wrangler_error_log_path"
+                    ),
+                    "data_wrangling_summary": response.get("data_wrangling_summary"),
+                    "recommended_steps": response.get("recommended_steps"),
+                },
             },
             "last_worker": "Data_Wrangling_Agent",
             **downstream_resets,
@@ -3262,6 +3371,13 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="data_cleaning_agent")
             )
+        _append_error_message(
+            merged,
+            "data_cleaning_agent",
+            response.get("data_cleaner_error"),
+            response.get("data_cleaner_error_log_path"),
+            prefix="Data cleaning error",
+        )
         data_cleaned = response.get("data_cleaned")
         if data_cleaned is not None:
             try:
@@ -3317,6 +3433,21 @@ Examples:
             "artifacts": {
                 **state.get("artifacts", {}),
                 "data_cleaning": data_cleaned,
+                "data_cleaning_details": {
+                    "data_cleaner_function": response.get("data_cleaner_function"),
+                    "data_cleaner_function_path": response.get(
+                        "data_cleaner_function_path"
+                    ),
+                    "data_cleaner_function_name": response.get(
+                        "data_cleaner_function_name"
+                    ),
+                    "data_cleaner_error": response.get("data_cleaner_error"),
+                    "data_cleaner_error_log_path": response.get(
+                        "data_cleaner_error_log_path"
+                    ),
+                    "data_cleaning_summary": response.get("data_cleaning_summary"),
+                    "recommended_steps": response.get("recommended_steps"),
+                },
             },
             "last_worker": "Data_Cleaning_Agent",
             **downstream_resets,
@@ -3344,6 +3475,13 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="sql_database_agent")
             )
+        _append_error_message(
+            merged,
+            "sql_database_agent",
+            response.get("sql_database_error"),
+            response.get("sql_database_error_log_path"),
+            prefix="SQL error",
+        )
         data_sql = response.get("data_sql")
         if data_sql is not None:
             try:
@@ -3404,6 +3542,11 @@ Examples:
                     "sql_database_function_name": response.get(
                         "sql_database_function_name"
                     ),
+                    "sql_database_error": response.get("sql_database_error"),
+                    "sql_database_error_log_path": response.get(
+                        "sql_database_error_log_path"
+                    ),
+                    "recommended_steps": response.get("recommended_steps"),
                     "data_sql": data_sql,
                 },
             },
@@ -3641,6 +3784,13 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="feature_engineering_agent")
             )
+        _append_error_message(
+            merged,
+            "feature_engineering_agent",
+            response.get("feature_engineer_error"),
+            response.get("feature_engineer_error_log_path"),
+            prefix="Feature engineering error",
+        )
         feature_data = response.get("data_engineered")
         if feature_data is not None:
             try:
@@ -3698,6 +3848,25 @@ Examples:
             "artifacts": {
                 **state.get("artifacts", {}),
                 "feature_engineering": response,
+                "feature_engineering_details": {
+                    "feature_engineer_function": response.get(
+                        "feature_engineer_function"
+                    ),
+                    "feature_engineer_function_path": response.get(
+                        "feature_engineer_function_path"
+                    ),
+                    "feature_engineer_function_name": response.get(
+                        "feature_engineer_function_name"
+                    ),
+                    "feature_engineer_error": response.get("feature_engineer_error"),
+                    "feature_engineer_error_log_path": response.get(
+                        "feature_engineer_error_log_path"
+                    ),
+                    "feature_engineering_summary": response.get(
+                        "feature_engineering_summary"
+                    ),
+                    "recommended_steps": response.get("recommended_steps"),
+                },
             },
             "last_worker": "Feature_Engineering_Agent",
             **downstream_resets,
@@ -4124,6 +4293,13 @@ Examples:
             merged["messages"].append(
                 AIMessage(content=summary_text, name="h2o_ml_agent")
             )
+        _append_error_message(
+            merged,
+            "h2o_ml_agent",
+            response.get("h2o_train_error"),
+            response.get("h2o_train_error_log_path"),
+            prefix="Model training error",
+        )
         mlflow_run_id = response.get("mlflow_run_id")
         if mlflow_run_id:
             merged["messages"].append(
@@ -4156,6 +4332,16 @@ Examples:
             "artifacts": {
                 **state.get("artifacts", {}),
                 "h2o": response,
+                "h2o_details": {
+                    "h2o_train_error": response.get("h2o_train_error"),
+                    "h2o_train_error_log_path": response.get(
+                        "h2o_train_error_log_path"
+                    ),
+                    "best_model_id": response.get("best_model_id"),
+                    "leaderboard": response.get("leaderboard"),
+                    "mlflow_run_id": mlflow_run_id,
+                    "mlflow_model_uri": response.get("mlflow_model_uri"),
+                },
             },
             "last_worker": "H2O_ML_Agent",
         }
@@ -4228,6 +4414,13 @@ Examples:
         )
         eval_artifacts = response.get("eval_artifacts")
         plotly_graph = response.get("plotly_graph")
+        if isinstance(eval_artifacts, dict) and eval_artifacts.get("error"):
+            merged["messages"].append(
+                AIMessage(
+                    content="Model evaluation error:\n" + str(eval_artifacts.get("error")),
+                    name="model_evaluation_agent",
+                )
+            )
         return {
             **merged,
             "eval_artifacts": eval_artifacts,
@@ -4706,3 +4899,24 @@ class SupervisorDSTeam:
         if self.response:
             return self.response.get("artifacts")
         return None
+
+    def show(self, xray: int = 0):
+        """
+        Displays the supervisor team's state graph as a Mermaid diagram.
+        """
+        try:
+            from IPython.display import Image, display
+
+            display(Image(self._compiled_graph.get_graph(xray=xray).draw_mermaid_png()))
+        except Exception:
+            return None
+
+    def _repr_mimebundle_(self, *args, **kwargs):
+        """
+        Jupyter/IPython rich display: render the supervisor graph as a Mermaid PNG.
+        """
+        try:
+            png = self._compiled_graph.get_graph(xray=0).draw_mermaid_png()
+            return {"image/png": png, "text/plain": repr(self)}
+        except Exception:
+            return {"text/plain": repr(self)}
