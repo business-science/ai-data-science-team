@@ -123,12 +123,114 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# =============================================================================
+# SENSITIVE / PRIVATE INFORMATION - NEVER COMMIT
+# =============================================================================
+
+# API Keys and Secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets.json
+secrets.yaml
+secrets.yml
+secrets.toml
+*_secret*
+*_secrets*
+api_key*
+apikey*
+.secrets/
+secrets/
+
+# Cloud Credentials
+credentials.json
+service_account*.json
+gcp-credentials*.json
+aws_credentials*
+.aws/
+.gcp/
+.azure/
+snowflake_credentials*
+bigquery_credentials*
+redshift_credentials*
+
+# Database Connection Strings
+database.ini
+db_config*
+connection_string*
+*.db
+*.sqlite
+*.sqlite3
+
+# SSH Keys
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.ppk
+known_hosts
+
+# OAuth Tokens
+token.json
+tokens.json
+oauth_token*
+refresh_token*
+access_token*
+.token
+
+# Config files that may contain secrets
+config.local.*
+config.private.*
+*.local.json
+*.local.yaml
+*.local.yml
+*.private.json
+*.private.yaml
+*.private.yml
+local_config*
+private_config*
+
+# Jupyter notebooks with potential secrets
+*.ipynb
+!examples/*.ipynb
+
+# History files that may contain secrets
+.python_history
+.bash_history
+.zsh_history
+.node_repl_history
+.psql_history
+.mysql_history
+
+# Editor backup files
+*~
+*.swp
+*.swo
+*.bak
+*.backup
+*.orig
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.Spotlight-V100
+.Trashes
 
 # Spyder project settings
 .spyderproject
@@ -181,3 +283,63 @@ mlflow_artifacts/
 
 # Conda Environments
 environment_ds4b_301p_dev.yml
+
+# =============================================================================
+# PROJECT SPECIFIC
+# =============================================================================
+
+# Cache directories (from our caching module)
+.cache/
+cache/
+*.cache
+
+# Uploaded/processed data
+data/
+uploads/
+downloads/
+output/
+outputs/
+results/
+
+# Model files
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.onnx
+*.pt
+*.pth
+models/
+checkpoints/
+
+# Large data files
+*.csv
+*.parquet
+*.feather
+*.arrow
+*.xlsx
+*.xls
+!tests/fixtures/*.csv
+!tests/fixtures/*.xlsx
+
+# API Server logs
+api_logs/
+server.log
+uvicorn.log
+
+# User-specific files
+.user/
+user_config*
+my_config*
+
+# Temporary test files
+.tmp/
+tmp/
+temp_*/
+
+# Claude/AI generated files that may contain context
+.claude/
+.anthropic/
+.openai/
+ai_context/

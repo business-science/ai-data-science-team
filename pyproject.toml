@@ -1,0 +1,209 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-data-science-team"
+dynamic = ["version"]
+description = "Build and run an AI-powered data science team."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Matt Dancho", email = "mdancho@business-science.io"}
+]
+keywords = [
+    "ai", "data-science", "machine-learning", "langchain",
+    "llm", "agents", "automation", "pandas", "streamlit"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "openpyxl>=3.1.0",
+    "langchain>=0.2.0,<1.0.0",
+    "langchain-community>=0.2.0",
+    "langchain-ollama>=0.1.0",
+    "langchain-openai>=0.1.0",
+    "langchain-experimental>=0.0.60",
+    "langgraph>=0.2.0",
+    "openai>=1.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "sqlalchemy>=2.0.0",
+    "plotly>=5.18.0",
+    "streamlit>=1.30.0",
+    "streamlit-flow-component>=0.1.0",
+    "scikit-learn>=1.3.0",
+    "xgboost>=2.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+machine_learning = [
+    "h2o>=3.44.0",
+    "mlflow>=2.10.0",
+]
+data_science = [
+    "pytimetk>=0.4.0",
+    "missingno>=0.5.2",
+    "sweetviz>=2.3.0",
+]
+api = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+]
+cloud = [
+    "snowflake-connector-python>=3.6.0",
+    "google-cloud-bigquery>=3.14.0",
+    "redshift-connector>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "boto3>=1.34.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+    "pytest-xdist>=3.5.0",
+    "black>=24.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+    "httpx>=0.26.0",
+]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
+all = [
+    "ai-data-science-team[machine_learning,data_science,api,cloud,dev,docs]",
+]
+
+[project.urls]
+Homepage = "https://github.com/business-science/ai-data-science-team"
+Documentation = "https://github.com/business-science/ai-data-science-team#readme"
+Repository = "https://github.com/business-science/ai-data-science-team"
+Issues = "https://github.com/business-science/ai-data-science-team/issues"
+
+[project.scripts]
+ai-ds-team = "ai_data_science_team.cli:main"
+ai-ds-team-api = "ai_data_science_team.api.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "ai_data_science_team._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_data_science_team*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-v",
+    "--tb=short",
+    "-ra",
+    "--strict-markers",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "requires_api: marks tests that require API keys",
+    "asyncio: marks tests as async tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["ai_data_science_team"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/apps/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+fail_under = 70
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | apps
+)/
+'''
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true

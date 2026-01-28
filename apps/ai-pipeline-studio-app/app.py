@@ -13,6 +13,12 @@ import os
 import json
 import inspect
 import shutil
+import ast
+import time
+import logging
+import hashlib
+import io
+import base64
 from openai import OpenAI
 import pandas as pd
 import sqlalchemy as sql
@@ -51,23 +57,135 @@ TITLE = "AI Pipeline Studio"
 LOGO_PATH = os.path.join(APP_ROOT, "img", "ai_pipeline_studio_logo.png")
 page_icon = LOGO_PATH if os.path.exists(LOGO_PATH) else ":bar_chart:"
 st.set_page_config(page_title=TITLE, page_icon=page_icon, layout="wide")
-st.title(TITLE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Modern UI Styling (Simplified to avoid layout issues)
+# ─────────────────────────────────────────────────────────────────────────────
+MODERN_CSS = """
+<style>
+/* ===== Minimal Safe Styles ===== */
+
+/* Hide Streamlit branding */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* Primary button styling */
+.stButton > button[kind="primary"],
+.stButton > button:not([kind]) {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+
+/* Download buttons - smaller */
+.stDownloadButton > button {
+    font-size: 0.8rem !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+/* Dialog width */
+@media (min-width: 1100px) {
+    [data-testid="stDialog"] [role="dialog"] {
+        width: calc(100vw - 2rem) !important;
+        max-width: calc(100vw - 2rem) !important;
+    }
+}
+</style>
+"""
+
+st.markdown(MODERN_CSS, unsafe_allow_html=True)
 st.markdown('<div id="page-top"></div>', unsafe_allow_html=True)
-st.markdown(
-    "\n".join(
-        [
-            "<style>",
-            "@media (min-width: 1100px) {",
-            "  [data-testid=\"stDialog\"] [role=\"dialog\"] {",
-            "    width: calc(100vw - 2rem) !important;",
-            "    max-width: calc(100vw - 2rem) !important;",
-            "  }",
-            "}",
-            "</style>",
-        ]
-    ),
-    unsafe_allow_html=True,
-)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Welcome / Onboarding (Using native Streamlit components)
+# ─────────────────────────────────────────────────────────────────────────────
+def _show_welcome_screen():
+    """Display welcome screen for new users."""
+    if st.session_state.get("_welcome_dismissed"):
+        return
+
+    st.info("👋 **Welcome to AI Pipeline Studio** — Your intelligent assistant for data science workflows.")
+
+    # Feature cards using columns
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown("### 📊 Load Data")
+        st.caption("Upload CSV, Excel, or connect to databases")
+    with cols[1]:
+        st.markdown("### 🔍 Analyze")
+        st.caption("Get instant EDA and insights")
+    with cols[2]:
+        st.markdown("### 📈 Visualize")
+        st.caption("Create charts with natural language")
+    with cols[3]:
+        st.markdown("### 🤖 Build Models")
+        st.caption("Train ML models automatically")
+
+    st.divider()
+
+    # Quick start tips
+    with st.expander("🚀 Quick Start Guide", expanded=False):
+        st.markdown("""
+        ### Getting Started
+
+        **1. Configure your AI provider** (sidebar)
+        - Enter your OpenAI API key, or
+        - Switch to Ollama for local models
+
+        **2. Load your data**
+        - Type: `load data from sales.csv`
+        - Or: `connect to my database`
+
+        **3. Ask questions naturally**
+        - `Show me a summary of the data`
+        - `Create a bar chart of sales by region`
+        - `Clean missing values`
+        - `Train a model to predict churn`
+
+        **4. Use Pipeline Studio**
+        - Click **Pipeline Studio** to see your data pipeline visually
+        - Track transformations and models
+
+        ### Example Prompts
+        | Task | Example |
+        |------|---------|
+        | Load data | `load data from customers.csv` |
+        | Analyze | `show summary statistics` |
+        | Visualize | `plot sales over time` |
+        | Clean | `remove duplicate rows` |
+        | Model | `train a classifier for target column` |
+
+        ### Tips
+        - 💡 Use `3*3` for quick math calculations
+        - 🔍 Search datasets using the filter box
+        - 📥 Export charts as PNG, SVG, or JSON
+        - ↩️ Use Undo/Redo for dataset changes
+        """)
+
+    # Dismiss button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("✨ Get Started", key="dismiss_welcome", use_container_width=True):
+            st.session_state["_welcome_dismissed"] = True
+            st.rerun()
+
+
+def _render_header():
+    """Render the app header with status indicators."""
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.title("🧪 AI Pipeline Studio")
+    with col2:
+        api_configured = bool(st.session_state.get("OPENAI_API_KEY")) or bool(st.session_state.get("ollama_model"))
+        if api_configured:
+            st.success("✓ AI Ready")
+        else:
+            st.warning("⚠ Setup AI")
+    with col3:
+        datasets_count = len((st.session_state.get("team_state") or {}).get("datasets") or {})
+        st.info(f"📦 {datasets_count} Datasets")
 
 UI_DETAIL_MARKER_PREFIX = "DETAILS_INDEX:"
 DEFAULT_SQL_URL = "sqlite:///:memory:"
@@ -126,6 +244,253 @@ PIPELINE_STUDIO_ARTIFACT_KEYS = sorted(
     {key for group in PIPELINE_STUDIO_ARTIFACT_GROUPS.values() for key in group}
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UI Enhancement Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Error logging with reference IDs
+_error_log: list[dict] = []
+_ERROR_LOG_MAX_ITEMS = 50
+
+
+def _log_error(error: Exception, context: str = "") -> str:
+    """Log an error with a reference ID for debugging."""
+    ref_id = hashlib.md5(
+        f"{time.time()}{error}{context}".encode()
+    ).hexdigest()[:8].upper()
+    entry = {
+        "ref_id": ref_id,
+        "timestamp": time.time(),
+        "error": str(error),
+        "type": type(error).__name__,
+        "context": context,
+    }
+    _error_log.append(entry)
+    if len(_error_log) > _ERROR_LOG_MAX_ITEMS:
+        _error_log.pop(0)
+    logging.error(f"[{ref_id}] {context}: {error}")
+    return ref_id
+
+
+def _get_recent_errors(limit: int = 10) -> list[dict]:
+    """Get recent errors for the debug panel."""
+    return _error_log[-limit:][::-1]
+
+
+# Safe math expression evaluation using AST
+_SAFE_MATH_OPS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b if b != 0 else float("inf"),
+    ast.Pow: lambda a, b: a**b if abs(b) <= 100 else float("inf"),
+    ast.Mod: lambda a, b: a % b if b != 0 else float("inf"),
+    ast.FloorDiv: lambda a, b: a // b if b != 0 else float("inf"),
+    ast.USub: lambda a: -a,
+    ast.UAdd: lambda a: +a,
+}
+
+
+def _eval_math_node(node: ast.AST) -> float | int | None:
+    """Recursively evaluate an AST node for safe math operations."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    elif isinstance(node, ast.Num):  # Python 3.7 compatibility
+        return node.n
+    elif isinstance(node, ast.BinOp):
+        left = _eval_math_node(node.left)
+        right = _eval_math_node(node.right)
+        if left is None or right is None:
+            return None
+        op = _SAFE_MATH_OPS.get(type(node.op))
+        if op is None:
+            return None
+        try:
+            return op(left, right)
+        except (OverflowError, ZeroDivisionError, ValueError):
+            return None
+    elif isinstance(node, ast.UnaryOp):
+        operand = _eval_math_node(node.operand)
+        if operand is None:
+            return None
+        op = _SAFE_MATH_OPS.get(type(node.op))
+        if op is None:
+            return None
+        return op(operand)
+    elif isinstance(node, ast.Expression):
+        return _eval_math_node(node.body)
+    return None
+
+
+def _is_math_expression(text: str) -> bool:
+    """Check if text appears to be a pure math expression."""
+    text = text.strip()
+    if not text:
+        return False
+    # Must contain at least one operator or be a number
+    if not any(c in text for c in "+-*/%^") and not text.replace(".", "").replace("-", "").isdigit():
+        return False
+    # Should not contain letters (except e for scientific notation)
+    cleaned = text.replace(" ", "").lower()
+    for c in cleaned:
+        if c.isalpha() and c != "e":
+            return False
+    return True
+
+
+def _preprocess_math_input(text: str) -> str | None:
+    """
+    Evaluate a math expression if the input is purely mathematical.
+    Returns a human-readable result string, or None if not a math expression.
+    """
+    text = text.strip()
+    if not _is_math_expression(text):
+        return None
+    # Replace ^ with ** for Python power operator
+    expr = text.replace("^", "**")
+    try:
+        tree = ast.parse(expr, mode="eval")
+        result = _eval_math_node(tree)
+        if result is None:
+            return None
+        # Format result nicely
+        if isinstance(result, float):
+            if result == float("inf") or result != result:  # inf or nan
+                return None
+            if result == int(result):
+                result = int(result)
+            else:
+                result = round(result, 10)
+        return f"The result of {text} is **{result}**"
+    except (SyntaxError, ValueError, TypeError):
+        return None
+
+
+# Dataset search/filter helper
+def _filter_datasets(options: list[str], search_term: str) -> list[str]:
+    """Filter dataset options by search term (case-insensitive)."""
+    if not search_term or not search_term.strip():
+        return options
+    term = search_term.strip().lower()
+    return [opt for opt in options if term in opt.lower()]
+
+
+# Chart export helpers
+def _export_chart_as_png(fig) -> bytes:
+    """Export a Plotly figure as PNG bytes."""
+    return fig.to_image(format="png", scale=2)
+
+
+def _export_chart_as_svg(fig) -> str:
+    """Export a Plotly figure as SVG string."""
+    return fig.to_image(format="svg").decode("utf-8")
+
+
+def _export_chart_as_json(fig) -> str:
+    """Export a Plotly figure as JSON string."""
+    return fig.to_json()
+
+
+def _render_chart_with_exports(
+    fig,
+    key_prefix: str,
+    container=None,
+) -> None:
+    """Render a Plotly chart with export buttons (PNG, SVG, JSON)."""
+    target = container if container is not None else st
+    target.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_chart")
+
+    export_cols = target.columns([1, 1, 1, 3])
+    with export_cols[0]:
+        try:
+            png_bytes = _export_chart_as_png(fig)
+            st.download_button(
+                "📥 PNG",
+                data=png_bytes,
+                file_name=f"chart_{key_prefix}.png",
+                mime="image/png",
+                key=f"{key_prefix}_png",
+            )
+        except Exception:
+            st.button("📥 PNG", disabled=True, key=f"{key_prefix}_png_disabled",
+                     help="Install kaleido for PNG export: pip install kaleido")
+    with export_cols[1]:
+        try:
+            svg_str = _export_chart_as_svg(fig)
+            st.download_button(
+                "📥 SVG",
+                data=svg_str,
+                file_name=f"chart_{key_prefix}.svg",
+                mime="image/svg+xml",
+                key=f"{key_prefix}_svg",
+            )
+        except Exception:
+            st.button("📥 SVG", disabled=True, key=f"{key_prefix}_svg_disabled",
+                     help="Install kaleido for SVG export: pip install kaleido")
+    with export_cols[2]:
+        json_str = _export_chart_as_json(fig)
+        st.download_button(
+            "📥 JSON",
+            data=json_str,
+            file_name=f"chart_{key_prefix}.json",
+            mime="application/json",
+            key=f"{key_prefix}_json",
+        )
+
+
+# Progress indicator helpers
+PROGRESS_STAGES = {
+    "data_loader": ("📂", "Loading data"),
+    "DataLoaderToolsAgent": ("📂", "Loading data"),
+    "data_wrangling": ("🔧", "Wrangling data"),
+    "DataWranglingAgent": ("🔧", "Wrangling data"),
+    "data_cleaning": ("🧹", "Cleaning data"),
+    "DataCleaningAgent": ("🧹", "Cleaning data"),
+    "data_visualization": ("📊", "Creating visualization"),
+    "DataVisualizationAgent": ("📊", "Creating visualization"),
+    "eda_tools": ("🔍", "Running EDA"),
+    "EDAToolsAgent": ("🔍", "Running EDA"),
+    "feature_engineering": ("⚙️", "Engineering features"),
+    "FeatureEngineeringAgent": ("⚙️", "Engineering features"),
+    "sql_database": ("🗄️", "Querying database"),
+    "SQLDatabaseAgent": ("🗄️", "Querying database"),
+    "h2o_ml": ("🤖", "Training model"),
+    "H2OMLAgent": ("🤖", "Training model"),
+    "model_evaluation": ("📈", "Evaluating model"),
+    "ModelEvaluationAgent": ("📈", "Evaluating model"),
+    "mlflow_tools": ("📦", "Managing MLflow"),
+    "MLflowToolsAgent": ("📦", "Managing MLflow"),
+    "workflow_planner": ("📋", "Planning workflow"),
+    "WorkflowPlannerAgent": ("📋", "Planning workflow"),
+    "supervisor": ("👔", "Coordinating team"),
+}
+
+
+def _format_progress_message(label: str | None, start_time: float | None = None) -> str:
+    """Format a progress message with icon and elapsed time."""
+    if not label:
+        icon, stage_name = "⏳", "Working"
+    else:
+        # Check for routing message
+        if label.startswith("Routing →"):
+            target = label.replace("Routing →", "").strip()
+            stage_info = PROGRESS_STAGES.get(target, ("➡️", f"Routing to {target}"))
+            icon, stage_name = stage_info[0], f"Routing to {stage_info[1].lower()}"
+        else:
+            stage_info = PROGRESS_STAGES.get(label, ("⏳", label))
+            icon, stage_name = stage_info
+
+    msg = f"{icon} **{stage_name}**"
+    if start_time is not None:
+        elapsed = time.time() - start_time
+        if elapsed >= 60:
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            msg += f" ({mins}m {secs}s)"
+        else:
+            msg += f" ({int(elapsed)}s)"
+    return msg
+
 
 def _pipeline_studio_history_init() -> None:
     if "pipeline_studio_undo_stack" not in st.session_state:
@@ -183,7 +548,11 @@ def _pipeline_studio_undo_last_action() -> None:
         action = action if isinstance(action, dict) else {}
 
         action_type = str(action.get("type") or "")
-        if action_type not in {"create_dataset", "create_datasets"}:
+        supported_actions = {
+            "create_dataset", "create_datasets",
+            "delete_dataset", "update_dataset", "set_active_dataset"
+        }
+        if action_type not in supported_actions:
             st.session_state["pipeline_studio_history_notice"] = (
                 f"Undo not implemented for action type `{action_type}`."
             )
@@ -191,6 +560,83 @@ def _pipeline_studio_undo_last_action() -> None:
             st.session_state["pipeline_studio_undo_stack"] = undo
             return
 
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+
+        # Handle set_active_dataset undo
+        if action_type == "set_active_dataset":
+            prev_active = action.get("prev_active_dataset_id")
+            prev_active = prev_active if isinstance(prev_active, str) else None
+            datasets = dict(datasets)
+            team_state = {**team_state, "datasets": datasets}
+            team_state["active_dataset_id"] = prev_active
+            st.session_state["team_state"] = team_state
+            if prev_active:
+                st.session_state["pipeline_studio_node_id_pending"] = prev_active
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Undid active dataset change (restored: `{prev_active or 'none'}`)."
+            )
+            redo = st.session_state.get("pipeline_studio_redo_stack", [])
+            redo = redo if isinstance(redo, list) else []
+            redo.append(action)
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            return
+
+        # Handle delete_dataset undo (restore the deleted dataset)
+        if action_type == "delete_dataset":
+            dataset_id = action.get("dataset_id")
+            dataset_entry = action.get("dataset_entry")
+            if isinstance(dataset_id, str) and isinstance(dataset_entry, dict):
+                datasets = dict(datasets)
+                datasets[dataset_id] = dataset_entry
+                team_state = {**team_state, "datasets": datasets}
+                prev_active = action.get("prev_active_dataset_id")
+                if isinstance(prev_active, str) and prev_active:
+                    team_state["active_dataset_id"] = prev_active
+                st.session_state["team_state"] = team_state
+                st.session_state["pipeline_studio_node_id_pending"] = dataset_id
+                st.session_state["pipeline_studio_history_notice"] = (
+                    f"Undid delete: restored dataset `{dataset_id}`."
+                )
+            else:
+                st.session_state["pipeline_studio_history_notice"] = (
+                    "Undo failed: missing dataset entry."
+                )
+            redo = st.session_state.get("pipeline_studio_redo_stack", [])
+            redo = redo if isinstance(redo, list) else []
+            redo.append(action)
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            return
+
+        # Handle update_dataset undo (restore previous state)
+        if action_type == "update_dataset":
+            dataset_id = action.get("dataset_id")
+            prev_entry = action.get("prev_dataset_entry")
+            if isinstance(dataset_id, str) and isinstance(prev_entry, dict):
+                datasets = dict(datasets)
+                datasets[dataset_id] = prev_entry
+                team_state = {**team_state, "datasets": datasets}
+                st.session_state["team_state"] = team_state
+                st.session_state["pipeline_studio_node_id_pending"] = dataset_id
+                st.session_state["pipeline_studio_history_notice"] = (
+                    f"Undid update: restored previous state of `{dataset_id}`."
+                )
+            else:
+                st.session_state["pipeline_studio_history_notice"] = (
+                    "Undo failed: missing previous dataset state."
+                )
+            redo = st.session_state.get("pipeline_studio_redo_stack", [])
+            redo = redo if isinstance(redo, list) else []
+            redo.append(action)
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            return
+
+        # Original create_dataset / create_datasets handling
         prev_active = action.get("prev_active_dataset_id")
         prev_active = (
             prev_active if isinstance(prev_active, str) and prev_active else None
@@ -329,7 +775,11 @@ def _pipeline_studio_redo_last_action() -> None:
         action = redo.pop()
         action = action if isinstance(action, dict) else {}
         action_type = str(action.get("type") or "")
-        if action_type not in {"create_dataset", "create_datasets"}:
+        supported_actions = {
+            "create_dataset", "create_datasets",
+            "delete_dataset", "update_dataset", "set_active_dataset"
+        }
+        if action_type not in supported_actions:
             st.session_state["pipeline_studio_history_notice"] = (
                 f"Redo not implemented for action type `{action_type}`."
             )
@@ -337,6 +787,90 @@ def _pipeline_studio_redo_last_action() -> None:
             st.session_state["pipeline_studio_redo_stack"] = redo
             return
 
+        team_state = st.session_state.get("team_state", {})
+        team_state = team_state if isinstance(team_state, dict) else {}
+        datasets = team_state.get("datasets")
+        datasets = datasets if isinstance(datasets, dict) else {}
+
+        # Handle set_active_dataset redo
+        if action_type == "set_active_dataset":
+            new_active = action.get("new_active_dataset_id")
+            new_active = new_active if isinstance(new_active, str) else None
+            datasets = dict(datasets)
+            team_state = {**team_state, "datasets": datasets}
+            team_state["active_dataset_id"] = new_active
+            st.session_state["team_state"] = team_state
+            if new_active:
+                st.session_state["pipeline_studio_node_id_pending"] = new_active
+            st.session_state["pipeline_studio_history_notice"] = (
+                f"Redid active dataset change (set: `{new_active or 'none'}`)."
+            )
+            undo = st.session_state.get("pipeline_studio_undo_stack", [])
+            undo = undo if isinstance(undo, list) else []
+            undo.append(action)
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            return
+
+        # Handle delete_dataset redo (delete the dataset again)
+        if action_type == "delete_dataset":
+            dataset_id = action.get("dataset_id")
+            if isinstance(dataset_id, str) and dataset_id in datasets:
+                datasets = dict(datasets)
+                datasets.pop(dataset_id, None)
+                team_state = {**team_state, "datasets": datasets}
+                active_now = team_state.get("active_dataset_id")
+                if active_now == dataset_id:
+                    # Pick newest remaining dataset
+                    best_id = None
+                    best_ts = -1.0
+                    for did, ent in datasets.items():
+                        if isinstance(ent, dict):
+                            ts = float(ent.get("created_ts") or 0.0)
+                            if ts >= best_ts:
+                                best_ts = ts
+                                best_id = did
+                    team_state["active_dataset_id"] = best_id
+                st.session_state["team_state"] = team_state
+                st.session_state["pipeline_studio_history_notice"] = (
+                    f"Redid delete: removed dataset `{dataset_id}`."
+                )
+            else:
+                st.session_state["pipeline_studio_history_notice"] = (
+                    "Redo skipped: dataset already gone."
+                )
+            undo = st.session_state.get("pipeline_studio_undo_stack", [])
+            undo = undo if isinstance(undo, list) else []
+            undo.append(action)
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            return
+
+        # Handle update_dataset redo (apply the new state)
+        if action_type == "update_dataset":
+            dataset_id = action.get("dataset_id")
+            new_entry = action.get("new_dataset_entry")
+            if isinstance(dataset_id, str) and isinstance(new_entry, dict):
+                datasets = dict(datasets)
+                datasets[dataset_id] = new_entry
+                team_state = {**team_state, "datasets": datasets}
+                st.session_state["team_state"] = team_state
+                st.session_state["pipeline_studio_node_id_pending"] = dataset_id
+                st.session_state["pipeline_studio_history_notice"] = (
+                    f"Redid update: applied new state to `{dataset_id}`."
+                )
+            else:
+                st.session_state["pipeline_studio_history_notice"] = (
+                    "Redo failed: missing dataset state."
+                )
+            undo = st.session_state.get("pipeline_studio_undo_stack", [])
+            undo = undo if isinstance(undo, list) else []
+            undo.append(action)
+            st.session_state["pipeline_studio_undo_stack"] = undo
+            st.session_state["pipeline_studio_redo_stack"] = redo
+            return
+
+        # Original create_dataset / create_datasets handling
         dataset_ids: list[str] = []
         entries_by_id: dict[str, dict] = {}
         if action_type == "create_dataset":
@@ -4311,38 +4845,94 @@ def _maybe_open_pipeline_studio_from_query() -> None:
 
 _maybe_open_pipeline_studio_from_query()
 
+# ---------------- Header & Welcome ----------------
+_render_header()
+_show_welcome_screen()
 
 # ---------------- Sidebar ----------------
 key_status = None
 with st.sidebar:
+    # Sidebar branding
+    st.markdown("""
+    <div style="text-align: center; padding: 0.5rem 0 1rem 0; border-bottom: 1px solid var(--border-color); margin-bottom: 1rem;">
+        <span style="font-size: 1.25rem; font-weight: 700;">🧪 Pipeline Studio</span>
+    </div>
+    """, unsafe_allow_html=True)
+    # Quick Actions
+    st.markdown("### 🚀 Quick Actions")
     if st.button(
-        "Pipeline Studio",
+        "📊 Open Pipeline Studio",
         key="pipeline_studio_open_sidebar",
-        width="stretch",
+        use_container_width=True,
         help="Open Pipeline Studio using the selected mode.",
     ):
         _request_open_pipeline_studio()
     st.toggle(
-        "Dock Pipeline Studio (inline)",
+        "📌 Dock inline",
         value=False,
         key="pipeline_studio_docked",
         help="Docked mode keeps Studio inline; undocked opens a modal.",
     )
-    with st.expander("Projects", expanded=False):
+
+    st.markdown("---")
+
+    # Projects section with CRUD
+    with st.expander("📁 Projects", expanded=False):
         projects = _pipeline_studio_list_projects()
+
+        # Create New Project section
+        st.markdown("**➕ Create New Project**")
+        new_project_name = st.text_input(
+            "Project Name",
+            value="",
+            key="new_project_name_input",
+            placeholder="My Data Analysis Project",
+        )
+        if st.button("💾 Save Current as New Project", key="create_new_project", use_container_width=True):
+            if new_project_name.strip():
+                try:
+                    team_state = st.session_state.get("team_state", {})
+                    if team_state.get("datasets"):
+                        # Save project with the given name
+                        result = _pipeline_studio_save_project(
+                            name=new_project_name.strip(),
+                            data_mode="metadata",
+                        )
+                        if result.get("success"):
+                            st.success(f"✓ Project '{new_project_name}' saved!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to save: {result.get('error', 'Unknown error')}")
+                    else:
+                        st.warning("No datasets to save. Load some data first.")
+                except Exception as e:
+                    st.error(f"Error saving project: {e}")
+            else:
+                st.warning("Please enter a project name.")
+
+        st.divider()
+
+        # List existing projects
+        st.markdown("**📂 Saved Projects**")
         if not projects:
-            st.caption("No saved projects yet.")
+            st.caption("No saved projects yet. Create one above!")
         else:
-            show_archived = st.checkbox(
-                "Show archived projects",
-                value=False,
-                key="pipeline_studio_sidebar_show_archived",
-            )
-            search = st.text_input(
-                "Search projects",
-                value="",
-                key="pipeline_studio_sidebar_project_search",
-            )
+            # Filters
+            col_search, col_filter = st.columns([2, 1])
+            with col_search:
+                search = st.text_input(
+                    "🔍 Search",
+                    value="",
+                    key="pipeline_studio_sidebar_project_search",
+                    placeholder="Filter projects...",
+                )
+            with col_filter:
+                show_archived = st.checkbox(
+                    "Archived",
+                    value=False,
+                    key="pipeline_studio_sidebar_show_archived",
+                )
+
             q = (search or "").strip().lower()
             filtered: list[dict] = []
             for rec in projects:
@@ -4363,93 +4953,143 @@ with st.sidebar:
                 if isinstance(rec, dict) and isinstance(rec.get("dir_name"), str)
             }
             options = [dn for dn in by_dir.keys() if dn]
+
             if not options:
                 st.caption("No matching projects.")
             else:
-
                 def _fmt_project_dir(dir_name: str) -> str:
                     rec = by_dir.get(dir_name) or {}
                     name = rec.get("name") or dir_name
                     n_ds = int(rec.get("datasets_total") or 0)
-                    data_mode = str(rec.get("data_mode") or "full")
+                    archived = "📦 " if rec.get("archived") else ""
                     try:
                         from datetime import datetime
-
                         saved_ts = float(rec.get("saved_ts") or 0.0)
                         saved_txt = (
-                            datetime.fromtimestamp(saved_ts).strftime("%Y-%m-%d %H:%M")
+                            datetime.fromtimestamp(saved_ts).strftime("%b %d, %Y")
                             if saved_ts > 0
-                            else "unknown"
+                            else ""
                         )
                     except Exception:
-                        saved_txt = "unknown"
-                    return f"{name} · {n_ds} datasets · {data_mode} · {saved_txt}"
+                        saved_txt = ""
+                    return f"{archived}{name} ({n_ds} datasets) - {saved_txt}"
 
                 selected_dir_name = st.selectbox(
-                    "Saved projects",
+                    "Select Project",
                     options=[""] + options,
-                    format_func=lambda x: "Select a project…" if not x else _fmt_project_dir(str(x)),
+                    format_func=lambda x: "Choose a project..." if not x else _fmt_project_dir(str(x)),
                     key="pipeline_studio_sidebar_project_select",
                 )
-                rehydrate = st.checkbox(
-                    "Rehydrate (best-effort)",
-                    value=True,
-                    key="pipeline_studio_sidebar_project_rehydrate",
-                    help="Attempts to reload sources and rerun stored transforms when a project is metadata-only.",
-                )
-                c_load, c_open = st.columns([0.45, 0.55], gap="small")
-                with c_load:
-                    if st.button(
-                        "Load",
-                        key="pipeline_studio_sidebar_project_load",
-                        disabled=not bool(selected_dir_name),
-                        width="stretch",
-                    ):
-                        rec = by_dir.get(selected_dir_name) or {}
-                        project_dir = rec.get("dir_path") or ""
-                        if isinstance(project_dir, str) and project_dir:
-                            _pipeline_studio_load_project_into_session(
-                                project_dir=project_dir,
-                                rehydrate=rehydrate,
-                                open_studio=False,
-                            )
-                with c_open:
-                    if st.button(
-                        "Load + open Studio",
-                        key="pipeline_studio_sidebar_project_load_open",
-                        disabled=not bool(selected_dir_name),
-                        width="stretch",
-                    ):
-                        rec = by_dir.get(selected_dir_name) or {}
-                        project_dir = rec.get("dir_path") or ""
-                        if isinstance(project_dir, str) and project_dir:
-                            _pipeline_studio_load_project_into_session(
-                                project_dir=project_dir,
-                                rehydrate=rehydrate,
-                                open_studio=True,
-                            )
+
+                if selected_dir_name:
+                    selected_rec = by_dir.get(selected_dir_name) or {}
+
+                    # Project actions
+                    st.markdown("**Actions**")
+
+                    # Load buttons
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("📂 Load", key="proj_load", use_container_width=True):
+                            project_dir = selected_rec.get("dir_path") or ""
+                            if project_dir:
+                                _pipeline_studio_load_project_into_session(
+                                    project_dir=project_dir,
+                                    rehydrate=True,
+                                    open_studio=False,
+                                )
+                    with c2:
+                        if st.button("📂 Load + Studio", key="proj_load_studio", use_container_width=True):
+                            project_dir = selected_rec.get("dir_path") or ""
+                            if project_dir:
+                                _pipeline_studio_load_project_into_session(
+                                    project_dir=project_dir,
+                                    rehydrate=True,
+                                    open_studio=True,
+                                )
+
+                    # Edit section
+                    with st.popover("✏️ Rename"):
+                        current_name = selected_rec.get("name") or selected_dir_name
+                        new_name = st.text_input("New name", value=current_name, key="rename_project_input")
+                        if st.button("Save Name", key="rename_project_btn"):
+                            if new_name.strip() and new_name != current_name:
+                                try:
+                                    project_dir = selected_rec.get("dir_path")
+                                    if project_dir:
+                                        meta_path = os.path.join(project_dir, "project_meta.json")
+                                        if os.path.exists(meta_path):
+                                            with open(meta_path, "r") as f:
+                                                meta = json.load(f)
+                                            meta["name"] = new_name.strip()
+                                            with open(meta_path, "w") as f:
+                                                json.dump(meta, f)
+                                            st.success(f"✓ Renamed to '{new_name}'")
+                                            st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error renaming: {e}")
+
+                    # Archive/Delete section
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        is_archived = bool(selected_rec.get("archived"))
+                        archive_label = "📤 Unarchive" if is_archived else "📦 Archive"
+                        if st.button(archive_label, key="proj_archive", use_container_width=True):
+                            try:
+                                project_dir = selected_rec.get("dir_path")
+                                if project_dir:
+                                    meta_path = os.path.join(project_dir, "project_meta.json")
+                                    if os.path.exists(meta_path):
+                                        with open(meta_path, "r") as f:
+                                            meta = json.load(f)
+                                        meta["archived"] = not is_archived
+                                        with open(meta_path, "w") as f:
+                                            json.dump(meta, f)
+                                        action = "unarchived" if is_archived else "archived"
+                                        st.success(f"✓ Project {action}")
+                                        st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
+                    with c4:
+                        with st.popover("🗑️ Delete"):
+                            st.warning(f"Delete '{selected_rec.get('name', selected_dir_name)}'?")
+                            st.caption("This cannot be undone!")
+                            if st.button("⚠️ Confirm Delete", key="confirm_delete_proj", type="primary"):
+                                try:
+                                    project_dir = selected_rec.get("dir_path")
+                                    if project_dir and os.path.exists(project_dir):
+                                        shutil.rmtree(project_dir)
+                                        st.success("✓ Project deleted")
+                                        st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error deleting: {e}")
+
                 notice = st.session_state.get("pipeline_studio_project_notice")
                 if isinstance(notice, str) and notice.strip():
                     st.info(notice)
-    st.divider()
+                    st.session_state["pipeline_studio_project_notice"] = None
+    st.markdown("---")
 
-    st.header("LLM")
+    # AI Configuration Section
+    st.markdown("### 🤖 AI Configuration")
     llm_provider = st.selectbox(
-        "Provider",
+        "AI Provider",
         ["OpenAI", "Ollama"],
         index=0,
         key="llm_provider",
-        help="Choose OpenAI (cloud) or Ollama (local).",
+        help="Choose OpenAI (cloud) or Ollama (local models).",
     )
 
     ollama_base_url = None
     if llm_provider == "OpenAI":
         openai_key_input = st.text_input(
-            "OpenAI API key",
+            "🔑 API Key",
             type="password",
             value=st.session_state.get("OPENAI_API_KEY") or "",
             key="openai_api_key_input",
-            help="Required when using OpenAI models.",
+            placeholder="sk-...",
+            help="Your OpenAI API key. Get one at platform.openai.com",
         )
         openai_key = (openai_key_input or "").strip()
         st.session_state["OPENAI_API_KEY"] = openai_key
@@ -4458,14 +5098,13 @@ with st.sidebar:
             try:
                 _ = OpenAI(api_key=openai_key).models.list()
                 key_status = "ok"
-                st.success("API Key is valid!")
+                st.success("✓ API Key verified!")
             except Exception as e:
                 key_status = "bad"
-                st.error(f"Invalid API Key: {e}")
+                st.error(f"✗ Invalid API Key")
         else:
-            st.info(
-                "Please enter your OpenAI API key to proceed (or switch to Ollama)."
-            )
+            st.warning("⚠️ Enter your API key to continue")
+            st.caption("Get your key at [platform.openai.com](https://platform.openai.com/api-keys)")
             st.stop()
 
         model_choice = st.selectbox(
@@ -4477,10 +5116,10 @@ with st.sidebar:
                 "gpt-4o",
                 "gpt-5-mini",
                 "gpt-5.1",
-                # "gpt-5.1-codex-mini",
                 "gpt-5.2",
             ],
             key="openai_model_choice",
+            help="Select the model to use for AI responses.",
         )
     else:
         if ChatOllama is None:
@@ -4492,33 +5131,22 @@ with st.sidebar:
         default_ollama_url = (
             st.session_state.get("ollama_base_url") or "http://localhost:11434"
         )
-        default_ollama_model = st.session_state.get("ollama_model") or "llama3.1:8b"
         ollama_base_url = st.text_input(
-            "Ollama base URL",
+            "🌐 Ollama URL",
             value=default_ollama_url,
             key="ollama_base_url_input",
+            placeholder="http://localhost:11434",
             help="Usually `http://localhost:11434`.",
         ).strip()
-        ollama_model = st.text_input(
-            "Ollama model",
-            value=default_ollama_model,
-            key="ollama_model_input",
-            help="Example: `llama3.1:8b` (run `ollama list` to see what's installed).",
-        ).strip()
-
         st.session_state["ollama_base_url"] = ollama_base_url
-        st.session_state["ollama_model"] = ollama_model
 
-        model_choice = ollama_model
-
-        if st.button(
-            "Check Ollama connection", width="stretch", key="ollama_check"
-        ):
+        # Fetch available models from Ollama
+        def _fetch_ollama_models(base_url: str) -> list[str]:
+            """Fetch available models from Ollama server."""
             try:
                 from urllib.request import Request, urlopen
                 import json as _json
-
-                url = f"{ollama_base_url.rstrip('/')}/api/tags"
+                url = f"{base_url.rstrip('/')}/api/tags"
                 req = Request(url, headers={"Accept": "application/json"})
                 with urlopen(req, timeout=3) as resp:
                     payload = _json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -4527,19 +5155,49 @@ with st.sidebar:
                     for m in (payload.get("models") or [])
                     if isinstance(m, dict) and isinstance(m.get("name"), str)
                 ]
-                if models:
-                    st.success(f"Connected. Found {len(models)} model(s).")
-                    st.write(models[:20])
-                else:
-                    st.warning(
-                        "Connected, but no models were returned. Run `ollama list` to confirm."
-                    )
-            except Exception as e:
-                st.error(f"Could not connect to Ollama at `{ollama_base_url}`: {e}")
+                return sorted(models) if models else []
+            except Exception:
+                return []
 
-        st.caption(
-            "Tip: start Ollama with `ollama serve` and pull a model with `ollama pull <model>`."
-        )
+        # Cache models in session state
+        if st.button("🔄 Refresh Models", key="ollama_refresh", use_container_width=True):
+            st.session_state["_ollama_models_cache"] = _fetch_ollama_models(ollama_base_url)
+            st.session_state["_ollama_connected"] = len(st.session_state.get("_ollama_models_cache", [])) > 0
+
+        # Auto-fetch on first load if not cached
+        if "_ollama_models_cache" not in st.session_state:
+            st.session_state["_ollama_models_cache"] = _fetch_ollama_models(ollama_base_url)
+            st.session_state["_ollama_connected"] = len(st.session_state.get("_ollama_models_cache", [])) > 0
+
+        available_models = st.session_state.get("_ollama_models_cache", [])
+
+        if available_models:
+            st.success(f"✓ Connected — {len(available_models)} model(s) available")
+            default_ollama_model = st.session_state.get("ollama_model") or available_models[0]
+            # Ensure default is in list
+            if default_ollama_model not in available_models:
+                default_ollama_model = available_models[0]
+
+            ollama_model = st.selectbox(
+                "🤖 Select Model",
+                options=available_models,
+                index=available_models.index(default_ollama_model) if default_ollama_model in available_models else 0,
+                key="ollama_model_select",
+                help="Select from available Ollama models.",
+            )
+        else:
+            st.warning("⚠️ Could not connect to Ollama or no models found")
+            ollama_model = st.text_input(
+                "🤖 Model Name",
+                value=st.session_state.get("ollama_model") or "llama3.1:8b",
+                key="ollama_model_input",
+                placeholder="llama3.1:8b",
+                help="Enter model name manually (e.g., `llama3.1:8b`).",
+            ).strip()
+            st.caption("💡 Start Ollama with `ollama serve` and pull a model with `ollama pull <model>`")
+
+        st.session_state["ollama_model"] = ollama_model
+        model_choice = ollama_model
 
     # Settings
     st.header("Settings")
@@ -4643,9 +5301,20 @@ with st.sidebar:
             shape_txt = f" {shape}" if shape else ""
             return f"{stage}: {label}{shape_txt} ({did})"
 
+        # Dataset search filter for sidebar
+        sidebar_dataset_search = st.text_input(
+            "🔍 Search",
+            value=st.session_state.get("sidebar_dataset_search", ""),
+            key="sidebar_dataset_search",
+            placeholder="Filter datasets...",
+        )
+        filtered_sidebar_options = [""] + _filter_datasets(
+            [did for did, _ in ordered], sidebar_dataset_search
+        )
+
         st.selectbox(
             "Active dataset (override)",
-            options=options,
+            options=filtered_sidebar_options,
             format_func=_fmt_dataset,
             help="Overrides which dataset is considered active for downstream steps (EDA/viz/wrangle/clean).",
             key="active_dataset_id_override",
@@ -4849,27 +5518,52 @@ with st.sidebar:
         mlflow_experiment_name or ""
     ).strip() or "H2O AutoML"
 
-    st.markdown("**Debug options**")
-    st.checkbox(
-        "Verbose console logs",
-        value=bool(st.session_state.get("debug_mode", False)),
-        key="debug_mode",
-        help="Print extra debug info to the terminal to troubleshoot DB connect and multi-file loads.",
-    )
-    st.checkbox(
-        "Show progress in chat",
-        value=bool(st.session_state.get("show_progress", True)),
-        key="show_progress",
-        help="Shows which agent is running while the team works (best effort).",
-    )
-    st.checkbox(
-        "Show live logs while running",
-        value=bool(st.session_state.get("show_live_logs", True)),
-        key="show_live_logs",
-        help="Streams console output into the app during execution (clears after the run finishes).",
-    )
+    st.markdown("---")
 
-    if st.button("Clear chat"):
+    # Advanced Settings
+    with st.expander("⚙️ Advanced Settings", expanded=False):
+        st.checkbox(
+            "📝 Verbose console logs",
+            value=bool(st.session_state.get("debug_mode", False)),
+            key="debug_mode",
+            help="Print extra debug info to the terminal.",
+        )
+        st.checkbox(
+            "📊 Show progress indicators",
+            value=bool(st.session_state.get("show_progress", True)),
+            key="show_progress",
+            help="Shows which agent is running while processing.",
+        )
+        st.checkbox(
+            "📜 Show live execution logs",
+            value=bool(st.session_state.get("show_live_logs", True)),
+            key="show_live_logs",
+            help="Stream console output during execution.",
+        )
+
+        # Error log
+        st.markdown("**Recent Errors**")
+        recent_errors = _get_recent_errors(5)
+        if not recent_errors:
+            st.caption("No recent errors. ✓")
+        else:
+            for err in recent_errors:
+                ts = err.get("timestamp", 0)
+                ref_id = err.get("ref_id", "???")
+                err_type = err.get("type", "Error")
+                context = err.get("context", "")
+                msg = err.get("error", "")[:100]
+                import datetime
+                dt = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                st.markdown(f"**[{ref_id}]** `{dt}` - {err_type}")
+                if context:
+                    st.caption(f"Context: {context}")
+                st.code(msg, language="text")
+
+    st.markdown("---")
+
+    # Actions
+    if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.details = []
         st.session_state.team_state = {}
@@ -5514,9 +6208,46 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
                     fig,
-                    width="stretch",
+                    use_container_width=True,
                     key=f"detail_chart_{key_suffix}",
                 )
+                # Chart export buttons
+                export_cols = st.columns([1, 1, 1, 3])
+                with export_cols[0]:
+                    try:
+                        png_bytes = _export_chart_as_png(fig)
+                        st.download_button(
+                            "📥 PNG",
+                            data=png_bytes,
+                            file_name=f"chart_{key_suffix}.png",
+                            mime="image/png",
+                            key=f"detail_chart_png_{key_suffix}",
+                        )
+                    except Exception:
+                        st.button("📥 PNG", disabled=True, key=f"detail_chart_png_dis_{key_suffix}",
+                                 help="Install kaleido: pip install kaleido")
+                with export_cols[1]:
+                    try:
+                        svg_str = _export_chart_as_svg(fig)
+                        st.download_button(
+                            "📥 SVG",
+                            data=svg_str,
+                            file_name=f"chart_{key_suffix}.svg",
+                            mime="image/svg+xml",
+                            key=f"detail_chart_svg_{key_suffix}",
+                        )
+                    except Exception:
+                        st.button("📥 SVG", disabled=True, key=f"detail_chart_svg_dis_{key_suffix}",
+                                 help="Install kaleido: pip install kaleido")
+                with export_cols[2]:
+                    json_str = _export_chart_as_json(fig)
+                    st.download_button(
+                        "📥 JSON",
+                        data=json_str,
+                        file_name=f"chart_{key_suffix}.json",
+                        mime="application/json",
+                        key=f"detail_chart_json_{key_suffix}",
+                    )
             except Exception as e:
                 st.error(f"Error rendering chart: {e}")
         else:
@@ -5582,9 +6313,46 @@ def _render_analysis_detail(detail: dict, key_suffix: str) -> None:
                 fig = _apply_streamlit_plot_style(pio.from_json(payload))
                 st.plotly_chart(
                     fig,
-                    width="stretch",
+                    use_container_width=True,
                     key=f"eval_chart_{key_suffix}",
                 )
+                # Chart export buttons
+                export_cols = st.columns([1, 1, 1, 3])
+                with export_cols[0]:
+                    try:
+                        png_bytes = _export_chart_as_png(fig)
+                        st.download_button(
+                            "📥 PNG",
+                            data=png_bytes,
+                            file_name=f"eval_chart_{key_suffix}.png",
+                            mime="image/png",
+                            key=f"eval_chart_png_{key_suffix}",
+                        )
+                    except Exception:
+                        st.button("📥 PNG", disabled=True, key=f"eval_chart_png_dis_{key_suffix}",
+                                 help="Install kaleido: pip install kaleido")
+                with export_cols[1]:
+                    try:
+                        svg_str = _export_chart_as_svg(fig)
+                        st.download_button(
+                            "📥 SVG",
+                            data=svg_str,
+                            file_name=f"eval_chart_{key_suffix}.svg",
+                            mime="image/svg+xml",
+                            key=f"eval_chart_svg_{key_suffix}",
+                        )
+                    except Exception:
+                        st.button("📥 SVG", disabled=True, key=f"eval_chart_svg_dis_{key_suffix}",
+                                 help="Install kaleido: pip install kaleido")
+                with export_cols[2]:
+                    json_str = _export_chart_as_json(fig)
+                    st.download_button(
+                        "📥 JSON",
+                        data=json_str,
+                        file_name=f"eval_chart_{key_suffix}.json",
+                        mime="application/json",
+                        key=f"eval_chart_json_{key_suffix}",
+                    )
             except Exception as e:
                 st.error(f"Error rendering evaluation chart: {e}")
 
@@ -5854,9 +6622,18 @@ if chat_dataset_options:
             _queue_active_dataset_override(str(selected))
             st.session_state["pipeline_studio_node_id_pending"] = str(selected)
 
+    # Dataset search filter
+    chat_dataset_search = st.text_input(
+        "🔍 Search datasets",
+        value=st.session_state.get("chat_dataset_search", ""),
+        key="chat_dataset_search",
+        placeholder="Type to filter datasets...",
+    )
+    filtered_chat_options = _filter_datasets(chat_dataset_options, chat_dataset_search)
+
     st.selectbox(
         "Chat dataset",
-        options=[""] + chat_dataset_options,
+        options=[""] + filtered_chat_options,
         format_func=_format_chat_dataset,
         key="chat_dataset_selector",
         help="Controls which dataset chat operations target.",
@@ -5883,6 +6660,15 @@ if prompt:
         if not resolved_ollama_model:
             st.error("Ollama model name is required. Enter it in the sidebar.")
             st.stop()
+
+    # Check for math expressions first (e.g., "3*3" -> "The result of 3*3 is 9")
+    math_result = _preprocess_math_input(prompt)
+    if math_result is not None:
+        st.chat_message("human").write(prompt)
+        msgs.add_user_message(prompt)
+        st.chat_message("assistant").write(math_result)
+        msgs.add_ai_message(math_result)
+        st.stop()
 
     debug_mode = bool(st.session_state.get("debug_mode", False))
     raw_prompt = prompt
@@ -6085,8 +6871,9 @@ if prompt:
             }
             show_progress = bool(st.session_state.get("show_progress", True))
             progress_box = st.empty() if show_progress else None
+            progress_start_time = time.time()
             if progress_box is not None:
-                progress_box.info("Working…")
+                progress_box.info(_format_progress_message(None, progress_start_time))
 
             show_live_logs = bool(st.session_state.get("show_live_logs", False))
             log_container = st.empty() if show_live_logs else None
@@ -6174,7 +6961,7 @@ if prompt:
                 return team.invoke(invoke_payload, config=run_config)
 
             if show_live_logs:
-                shared = {"done": False, "label": None, "result": None, "error": None}
+                shared = {"done": False, "label": None, "result": None, "error": None, "start_time": progress_start_time}
                 start_ts = time.time()
                 last_output_ts = start_ts
                 last_status_ts = 0.0
@@ -6196,12 +6983,11 @@ if prompt:
 
                 last_rendered = None
                 while not shared.get("done"):
-                    if (
-                        progress_box is not None
-                        and isinstance(shared.get("label"), str)
-                        and shared["label"]
-                    ):
-                        progress_box.info(f"Working: `{shared['label']}`")
+                    if progress_box is not None:
+                        progress_box.info(_format_progress_message(
+                            shared.get("label"),
+                            shared.get("start_time", progress_start_time)
+                        ))
                     if log_placeholder is not None:
                         text = (stdout_cap.get_text() + stderr_cap.get_text()).strip()
                         if text:
@@ -6260,12 +7046,10 @@ if prompt:
                                 and event.get("last_worker").strip()
                             ):
                                 label = event.get("last_worker").strip()
-                            if (
-                                progress_box is not None
-                                and isinstance(label, str)
-                                and label.strip()
-                            ):
-                                progress_box.info(f"Working: `{label}`")
+                            if progress_box is not None:
+                                progress_box.info(_format_progress_message(
+                                    label, progress_start_time
+                                ))
                     result = last_event
             else:
                 with redirect_stdout(stdout_cap), redirect_stderr(stderr_cap):
@@ -6287,19 +7071,21 @@ if prompt:
             except Exception:
                 pass
             msg = str(e)
+            ref_id = _log_error(e, context="team_execution")
             if (
                 "rate_limit_exceeded" in msg
                 or "tokens per min" in msg
                 or "tpm" in msg.lower()
                 or "request too large" in msg.lower()
             ):
-                st.error(f"Error running team (rate limit): {e}")
+                st.error(f"⚠️ Rate limit exceeded (Ref: {ref_id})")
                 st.info(
                     "Try again in ~60s, or reduce load by disabling memory, lowering recursion, "
                     "or switching to a smaller model."
                 )
             else:
-                st.error(f"Error running team: {e}")
+                st.error(f"⚠️ Error running team (Ref: {ref_id}): {e}")
+                st.caption(f"Reference ID: `{ref_id}` - Check debug panel for details.")
             result = None
 
     if result:
@@ -9139,13 +9925,25 @@ def _render_pipeline_studio() -> None:
                             and studio_active_id in pick_ids
                             else pick_ids[0]
                         )
+                    # Dataset search filter for Pipeline Studio
+                    studio_dataset_search = st.text_input(
+                        "🔍 Search datasets",
+                        value=st.session_state.get("studio_dataset_search", ""),
+                        key="studio_dataset_search",
+                        placeholder="Type to filter...",
+                    )
+                    filtered_pick_ids = _filter_datasets(pick_ids, studio_dataset_search)
+                    # Ensure default_pick is in filtered list
+                    if filtered_pick_ids and default_pick not in filtered_pick_ids:
+                        default_pick = filtered_pick_ids[0]
+
                     pick_cols = st.columns([0.64, 0.18, 0.18], gap="small")
                     with pick_cols[0]:
                         picked_id = st.selectbox(
                             "Set active dataset",
-                            options=pick_ids,
-                            index=pick_ids.index(default_pick)
-                            if default_pick in pick_ids
+                            options=filtered_pick_ids if filtered_pick_ids else pick_ids,
+                            index=filtered_pick_ids.index(default_pick)
+                            if filtered_pick_ids and default_pick in filtered_pick_ids
                             else 0,
                             format_func=_fmt_studio_dataset,
                             key="pipeline_studio_active_picker",
@@ -12391,9 +13189,46 @@ def _render_pipeline_studio() -> None:
                             fig = _apply_streamlit_plot_style(pio.from_json(payload))
                             st.plotly_chart(
                                 fig,
-                                width="stretch",
+                                use_container_width=True,
                                 key=f"pipeline_studio_chart_{selected_node_id}",
                             )
+                            # Chart export buttons
+                            export_cols = st.columns([1, 1, 1, 3])
+                            with export_cols[0]:
+                                try:
+                                    png_bytes = _export_chart_as_png(fig)
+                                    st.download_button(
+                                        "📥 PNG",
+                                        data=png_bytes,
+                                        file_name=f"pipeline_chart_{selected_node_id}.png",
+                                        mime="image/png",
+                                        key=f"pipeline_chart_png_{selected_node_id}",
+                                    )
+                                except Exception:
+                                    st.button("📥 PNG", disabled=True, key=f"pipeline_chart_png_dis_{selected_node_id}",
+                                             help="Install kaleido: pip install kaleido")
+                            with export_cols[1]:
+                                try:
+                                    svg_str = _export_chart_as_svg(fig)
+                                    st.download_button(
+                                        "📥 SVG",
+                                        data=svg_str,
+                                        file_name=f"pipeline_chart_{selected_node_id}.svg",
+                                        mime="image/svg+xml",
+                                        key=f"pipeline_chart_svg_{selected_node_id}",
+                                    )
+                                except Exception:
+                                    st.button("📥 SVG", disabled=True, key=f"pipeline_chart_svg_dis_{selected_node_id}",
+                                             help="Install kaleido: pip install kaleido")
+                            with export_cols[2]:
+                                json_str = _export_chart_as_json(fig)
+                                st.download_button(
+                                    "📥 JSON",
+                                    data=json_str,
+                                    file_name=f"pipeline_chart_{selected_node_id}.json",
+                                    mime="application/json",
+                                    key=f"pipeline_chart_json_{selected_node_id}",
+                                )
                         except Exception as e:
                             st.error(f"Error rendering chart: {e}")
 
@@ -12906,9 +13741,46 @@ def _render_pipeline_studio() -> None:
                             fig = _apply_streamlit_plot_style(pio.from_json(payload))
                             st.plotly_chart(
                                 fig,
-                                width="stretch",
+                                use_container_width=True,
                                 key=f"pipeline_studio_eval_chart_{selected_node_id}",
                             )
+                            # Chart export buttons
+                            export_cols = st.columns([1, 1, 1, 3])
+                            with export_cols[0]:
+                                try:
+                                    png_bytes = _export_chart_as_png(fig)
+                                    st.download_button(
+                                        "📥 PNG",
+                                        data=png_bytes,
+                                        file_name=f"eval_chart_{selected_node_id}.png",
+                                        mime="image/png",
+                                        key=f"pipeline_eval_png_{selected_node_id}",
+                                    )
+                                except Exception:
+                                    st.button("📥 PNG", disabled=True, key=f"pipeline_eval_png_dis_{selected_node_id}",
+                                             help="Install kaleido: pip install kaleido")
+                            with export_cols[1]:
+                                try:
+                                    svg_str = _export_chart_as_svg(fig)
+                                    st.download_button(
+                                        "📥 SVG",
+                                        data=svg_str,
+                                        file_name=f"eval_chart_{selected_node_id}.svg",
+                                        mime="image/svg+xml",
+                                        key=f"pipeline_eval_svg_{selected_node_id}",
+                                    )
+                                except Exception:
+                                    st.button("📥 SVG", disabled=True, key=f"pipeline_eval_svg_dis_{selected_node_id}",
+                                             help="Install kaleido: pip install kaleido")
+                            with export_cols[2]:
+                                json_str = _export_chart_as_json(fig)
+                                st.download_button(
+                                    "📥 JSON",
+                                    data=json_str,
+                                    file_name=f"eval_chart_{selected_node_id}.json",
+                                    mime="application/json",
+                                    key=f"pipeline_eval_json_{selected_node_id}",
+                                )
                         except Exception as e:
                             st.error(f"Error rendering evaluation chart: {e}")
                     if model_info is None and eval_art is None and eval_graph is None:
