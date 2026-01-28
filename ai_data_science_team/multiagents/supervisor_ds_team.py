@@ -416,7 +416,8 @@ Examples:
             "first 5 rows",
         )
         wants_viz = has("plot", "chart", "visual", "graph")
-        wants_sql = has("sql", "query", "database", "table")
+        # "table" is ambiguous (can mean a pandas summary table). Require explicit SQL context.
+        wants_sql = has("sql", "query", "database", "schema")
         wants_clean = has("clean", "impute", "missing", "null", "na", "outlier")
         merge_signal = has("merge", "concat", "append", "union", "combine")
         join_signal = has("join")

@@ -178,6 +178,8 @@ class SQLDatabaseAgent(BaseAgent):
         smart_schema_pruning=False,
         safe_mode=True,
     ):
+        if not function_name:
+            function_name = "sql_database_pipeline"
         self._params = {
             "model": model,
             "connection": connection,
@@ -516,6 +518,8 @@ def make_sql_database_agent(
     })
     ```
     """
+    if not function_name:
+        function_name = "sql_database_pipeline"
 
     llm = model
 
