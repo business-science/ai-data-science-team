@@ -473,16 +473,40 @@ Function Name: {self.response.get("data_wrangler_function_name")}
         Internal utility to convert data_raw (which could be a DataFrame, dict, or list of dicts)
         into the format expected by the underlying agent (dict or list of dicts).
 
+        Security Note: This method does NOT support loading data from pickle files directly.
+        Pickle deserialization can execute arbitrary code and should not be used with untrusted data.
+        Use safe formats like CSV, JSON, or Parquet instead.
+
         Parameters
         ----------
         data_raw : Union[pd.DataFrame, dict, list]
-            The raw input data to be converted.
+            The raw input data to be converted. Must be already deserialized data structures,
+            not file paths or pickle objects.
 
         Returns
         -------
         Union[dict, list]
             The data in a dictionary or list-of-dictionaries format.
+        
+        Raises
+        ------
+        ValueError
+            If data_raw appears to be a pickle file path or contains suspicious pickle-related attributes.
         """
+        # Security check: reject string inputs that might be file paths to pickle files
+        if isinstance(data_raw, (str, bytes)):
+            if isinstance(data_raw, str) and data_raw.endswith(('.pkl', '.pickle')):
+                raise ValueError(
+                    "Direct pickle file paths are not supported for security reasons. "
+                    "Pickle deserialization can execute arbitrary code. "
+                    "Please load data using safe formats (CSV, JSON, Parquet) or "
+                    "ensure pickle files are from trusted sources only."
+                )
+            raise ValueError(
+                "String or bytes input is not supported. "
+                "Expected pandas DataFrame, dict, or list of dicts."
+            )
+        
         # If a single DataFrame, convert to dict
         if isinstance(data_raw, pd.DataFrame):
             return data_raw.to_dict()
