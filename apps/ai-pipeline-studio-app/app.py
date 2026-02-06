@@ -4453,10 +4453,24 @@ with st.sidebar:
         )
         openai_key = (openai_key_input or "").strip()
         st.session_state["OPENAI_API_KEY"] = openai_key
+        default_openai_base_url = st.session_state.get("OPENAI_BASE_URL")
+        if default_openai_base_url is None:
+            default_openai_base_url = os.environ.get("OPENAI_BASE_URL", "")
+        openai_base_url_input = st.text_input(
+            "OpenAI base URL (optional)",
+            value=default_openai_base_url,
+            key="openai_base_url_input",
+            help="Override OpenAI base URL, e.g. http://localhost:8000/v1",
+        )
+        openai_base_url = (openai_base_url_input or "").strip()
+        st.session_state["OPENAI_BASE_URL"] = openai_base_url
 
         if openai_key:
             try:
-                _ = OpenAI(api_key=openai_key).models.list()
+                client_kwargs = {"api_key": openai_key}
+                if openai_base_url:
+                    client_kwargs["base_url"] = openai_base_url
+                _ = OpenAI(**client_kwargs).models.list()
                 key_status = "ok"
                 st.success("API Key is valid!")
             except Exception as e:
@@ -4886,6 +4900,9 @@ with st.sidebar:
 # LLM credentials are only required when running chat (Pipeline Studio + previews should still work).
 llm_provider_selected = st.session_state.get("llm_provider") or "OpenAI"
 resolved_api_key = (st.session_state.get("OPENAI_API_KEY") or "").strip() or None
+resolved_openai_base_url = (
+    (st.session_state.get("OPENAI_BASE_URL") or "").strip() or None
+)
 resolved_ollama_model = (st.session_state.get("ollama_model") or "").strip() or None
 
 
@@ -4893,6 +4910,7 @@ def build_team(
     llm_provider: str,
     model_name: str,
     openai_api_key: str | None,
+    openai_base_url: str | None,
     ollama_base_url: str | None,
     use_memory: bool,
     sql_url: str,
@@ -4935,6 +4953,15 @@ def build_team(
             "model": model_name,
             "api_key": openai_api_key,
         }
+        if openai_base_url:
+            try:
+                sig = inspect.signature(ChatOpenAI)
+                if "base_url" in sig.parameters:
+                    llm_kwargs["base_url"] = openai_base_url
+                elif "openai_api_base" in sig.parameters:
+                    llm_kwargs["openai_api_base"] = openai_base_url
+            except Exception:
+                llm_kwargs["base_url"] = openai_base_url
         if _openai_requires_responses(model_name):
             llm_kwargs["use_responses_api"] = True
             llm_kwargs["output_version"] = "responses/v1"
@@ -5952,6 +5979,7 @@ if prompt:
             llm_provider_selected,
             model_choice,
             resolved_api_key if llm_provider_selected == "OpenAI" else None,
+            resolved_openai_base_url if llm_provider_selected == "OpenAI" else None,
             st.session_state.get("ollama_base_url"),
             add_memory,
             st.session_state.get("sql_url", DEFAULT_SQL_URL),

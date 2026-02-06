@@ -8,6 +8,8 @@
 # !pip install git+https://github.com/business-science/ai-data-science-team.git --upgrade
 
 from openai import OpenAI
+import inspect
+import os
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -186,9 +188,21 @@ st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
     type="password",
     help="Your OpenAI API key is required for the app to function.",
 )
+default_openai_base_url = st.session_state.get("OPENAI_BASE_URL")
+if default_openai_base_url is None:
+    default_openai_base_url = os.environ.get("OPENAI_BASE_URL", "")
+st.session_state["OPENAI_BASE_URL"] = st.sidebar.text_input(
+    "Base URL (optional)",
+    value=default_openai_base_url,
+    help="Override OpenAI base URL, e.g. http://localhost:8000/v1",
+)
 
+openai_base_url = (st.session_state.get("OPENAI_BASE_URL") or "").strip() or None
 if st.session_state["OPENAI_API_KEY"]:
-    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
+    client_kwargs = {"api_key": st.session_state["OPENAI_API_KEY"]}
+    if openai_base_url:
+        client_kwargs["base_url"] = openai_base_url
+    client = OpenAI(**client_kwargs)
     try:
         models = client.models.list()
         st.success("API Key is valid!")
@@ -199,7 +213,25 @@ else:
     st.stop()
 
 model_option = st.sidebar.selectbox("Choose OpenAI model", MODEL_LIST, index=0)
-OPENAI_LLM = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"])
+def _chat_openai_kwargs(model_name, api_key, base_url):
+    kwargs = {"model": model_name, "api_key": api_key}
+    if base_url:
+        try:
+            sig = inspect.signature(ChatOpenAI)
+            if "base_url" in sig.parameters:
+                kwargs["base_url"] = base_url
+            elif "openai_api_base" in sig.parameters:
+                kwargs["openai_api_base"] = base_url
+        except Exception:
+            kwargs["base_url"] = base_url
+    return kwargs
+
+
+OPENAI_LLM = ChatOpenAI(
+    **_chat_openai_kwargs(
+        model_option, st.session_state["OPENAI_API_KEY"], openai_base_url
+    )
+)
 llm = OPENAI_LLM
 
 # =============================================================================
