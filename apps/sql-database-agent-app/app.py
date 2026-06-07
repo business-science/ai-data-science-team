@@ -26,7 +26,9 @@ DB_OPTIONS = {
     "Northwind Database": "sqlite:///data/northwind.db",
 }
 
-MODEL_LIST = ['gpt-4o-mini', 'gpt-4o']
+PROVIDER_LIST = ["OpenAI", "MiniMax"]
+OPENAI_MODEL_LIST = ['gpt-4o-mini', 'gpt-4o']
+MINIMAX_MODEL_LIST = ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]
 
 TITLE = "Your SQL Database Agent"
 
@@ -64,40 +66,53 @@ sql_engine = sql.create_engine(st.session_state["PATH_DB"])
 
 conn = sql_engine.connect()
 
-# * OpenAI API Key
+# * LLM Provider
 
-st.sidebar.header("Enter your OpenAI API Key")
+st.sidebar.header("LLM Provider")
 
-st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input("API Key", type="password", help="Your OpenAI API key is required for the app to function.")
+provider_option = st.sidebar.selectbox("Choose provider", PROVIDER_LIST, index=0)
 
-# Test OpenAI API Key
-if st.session_state["OPENAI_API_KEY"]:
-    # Set the API key for OpenAI
-    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
-    
-    # Test the API key (optional)
-    try:
-        # Example: Fetch models to validate the key
-        models = client.models.list()
-        st.success("API Key is valid!")
-    except Exception as e:
-        st.error(f"Invalid API Key: {e}")
-else:
-    st.info("Please enter your OpenAI API Key to proceed.")
-    st.stop()
+if provider_option == "OpenAI":
+    st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
+        "OpenAI API Key", type="password",
+        help="Your OpenAI API key is required for the app to function.",
+    )
 
+    if st.session_state["OPENAI_API_KEY"]:
+        client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
+        try:
+            models = client.models.list()
+            st.success("API Key is valid!")
+        except Exception as e:
+            st.error(f"Invalid API Key: {e}")
+    else:
+        st.info("Please enter your OpenAI API Key to proceed.")
+        st.stop()
 
-# * OpenAI Model Selection
+    model_option = st.sidebar.selectbox("Choose model", OPENAI_MODEL_LIST, index=0)
+    OPENAI_LLM = ChatOpenAI(
+        model=model_option,
+        api_key=st.session_state["OPENAI_API_KEY"],
+    )
 
-model_option = st.sidebar.selectbox(
-    "Choose OpenAI model",
-    MODEL_LIST,
-    index=0
-)
+elif provider_option == "MiniMax":
+    st.session_state["MINIMAX_API_KEY"] = st.sidebar.text_input(
+        "MiniMax API Key", type="password",
+        help="Your MiniMax API key. Get one at https://platform.minimaxi.com",
+    )
 
-OPENAI_LLM = ChatOpenAI(
-    model = model_option,
-    api_key=st.session_state["OPENAI_API_KEY"]
+    if st.session_state["MINIMAX_API_KEY"]:
+        st.success("MiniMax API key set.")
+    else:
+        st.info("Please enter your MiniMax API Key to proceed.")
+        st.stop()
+
+    model_option = st.sidebar.selectbox("Choose model", MINIMAX_MODEL_LIST, index=0)
+    OPENAI_LLM = ChatOpenAI(
+        model=model_option,
+        api_key=st.session_state["MINIMAX_API_KEY"],
+        base_url="https://api.minimax.io/v1",
+        temperature=0.7,
 )
 
 llm = OPENAI_LLM

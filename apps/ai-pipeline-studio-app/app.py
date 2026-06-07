@@ -4436,10 +4436,10 @@ with st.sidebar:
     st.header("LLM")
     llm_provider = st.selectbox(
         "Provider",
-        ["OpenAI", "Ollama"],
+        ["OpenAI", "MiniMax", "Ollama"],
         index=0,
         key="llm_provider",
-        help="Choose OpenAI (cloud) or Ollama (local).",
+        help="Choose OpenAI (cloud), MiniMax (cloud), or Ollama (local).",
     )
 
     ollama_base_url = None
@@ -4481,6 +4481,35 @@ with st.sidebar:
                 "gpt-5.2",
             ],
             key="openai_model_choice",
+        )
+    elif llm_provider == "MiniMax":
+        minimax_key_input = st.text_input(
+            "MiniMax API key",
+            type="password",
+            value=st.session_state.get("MINIMAX_API_KEY") or "",
+            key="minimax_api_key_input",
+            help="Required when using MiniMax models. Get one at https://platform.minimaxi.com",
+        )
+        minimax_key = (minimax_key_input or "").strip()
+        st.session_state["MINIMAX_API_KEY"] = minimax_key
+
+        if minimax_key:
+            st.success("MiniMax API key set.")
+        else:
+            st.info(
+                "Please enter your MiniMax API key to proceed (or switch to another provider)."
+            )
+            st.stop()
+
+        model_choice = st.selectbox(
+            "Model",
+            [
+                "MiniMax-M3",
+                "MiniMax-M2.7",
+                "MiniMax-M2.7-highspeed",
+            ],
+            key="minimax_model_choice",
+            help="MiniMax-M3 is the latest model (512K context, up to 128K output, image input).",
         )
     else:
         if ChatOllama is None:
@@ -4886,6 +4915,7 @@ with st.sidebar:
 # LLM credentials are only required when running chat (Pipeline Studio + previews should still work).
 llm_provider_selected = st.session_state.get("llm_provider") or "OpenAI"
 resolved_api_key = (st.session_state.get("OPENAI_API_KEY") or "").strip() or None
+resolved_minimax_key = (st.session_state.get("MINIMAX_API_KEY") or "").strip() or None
 resolved_ollama_model = (st.session_state.get("ollama_model") or "").strip() or None
 
 
@@ -4893,6 +4923,7 @@ def build_team(
     llm_provider: str,
     model_name: str,
     openai_api_key: str | None,
+    minimax_api_key: str | None,
     ollama_base_url: str | None,
     use_memory: bool,
     sql_url: str,
@@ -4921,6 +4952,13 @@ def build_team(
             except Exception:
                 kwargs["base_url"] = base_url
         llm = ChatOllama(**kwargs)
+    elif llm_provider.lower() == "minimax":
+        llm = ChatOpenAI(
+            model=model_name,
+            api_key=minimax_api_key,
+            base_url="https://api.minimax.io/v1",
+            temperature=0.7,
+        )
     else:
 
         def _openai_requires_responses(model: str | None) -> bool:
@@ -5879,6 +5917,12 @@ if prompt:
                 "OpenAI API key is required and must be valid. Enter it in the sidebar."
             )
             st.stop()
+    elif llm_provider_selected == "MiniMax":
+        if not resolved_minimax_key:
+            st.error(
+                "MiniMax API key is required. Enter it in the sidebar."
+            )
+            st.stop()
     else:
         if not resolved_ollama_model:
             st.error("Ollama model name is required. Enter it in the sidebar.")
@@ -5952,6 +5996,7 @@ if prompt:
             llm_provider_selected,
             model_choice,
             resolved_api_key if llm_provider_selected == "OpenAI" else None,
+            resolved_minimax_key if llm_provider_selected == "MiniMax" else None,
             st.session_state.get("ollama_base_url"),
             add_memory,
             st.session_state.get("sql_url", DEFAULT_SQL_URL),

@@ -117,7 +117,9 @@ def render_report_iframe(
 # STREAMLIT APP SETUP (including data upload, API key, etc.)
 # =============================================================================
 
-MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
+PROVIDER_LIST = ["OpenAI", "MiniMax"]
+OPENAI_MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
+MINIMAX_MODEL_LIST = ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]
 TITLE = "Your Exploratory Data Analysis (EDA) Copilot"
 st.set_page_config(page_title=TITLE, page_icon="📊")
 st.title("📊 " + TITLE)
@@ -179,28 +181,51 @@ else:
     else:
         st.info("Please upload a CSV or Excel file or Use Demo Data to proceed.")
 
-# Sidebar: OpenAI API Key and Model Selection
-st.sidebar.header("Enter your OpenAI API Key")
-st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
-    "API Key",
-    type="password",
-    help="Your OpenAI API key is required for the app to function.",
-)
+# Sidebar: LLM Provider, API Key, and Model Selection
+st.sidebar.header("LLM Provider")
+provider_option = st.sidebar.selectbox("Choose provider", PROVIDER_LIST, index=0)
 
-if st.session_state["OPENAI_API_KEY"]:
-    client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
-    try:
-        models = client.models.list()
-        st.success("API Key is valid!")
-    except Exception as e:
-        st.error(f"Invalid API Key: {e}")
-else:
-    st.info("Please enter your OpenAI API Key to proceed.")
-    st.stop()
+if provider_option == "OpenAI":
+    st.session_state["OPENAI_API_KEY"] = st.sidebar.text_input(
+        "OpenAI API Key",
+        type="password",
+        help="Your OpenAI API key is required for the app to function.",
+    )
 
-model_option = st.sidebar.selectbox("Choose OpenAI model", MODEL_LIST, index=0)
-OPENAI_LLM = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"])
-llm = OPENAI_LLM
+    if st.session_state["OPENAI_API_KEY"]:
+        client = OpenAI(api_key=st.session_state["OPENAI_API_KEY"])
+        try:
+            models = client.models.list()
+            st.success("API Key is valid!")
+        except Exception as e:
+            st.error(f"Invalid API Key: {e}")
+    else:
+        st.info("Please enter your OpenAI API Key to proceed.")
+        st.stop()
+
+    model_option = st.sidebar.selectbox("Choose model", OPENAI_MODEL_LIST, index=0)
+    llm = ChatOpenAI(model=model_option, api_key=st.session_state["OPENAI_API_KEY"])
+
+elif provider_option == "MiniMax":
+    st.session_state["MINIMAX_API_KEY"] = st.sidebar.text_input(
+        "MiniMax API Key",
+        type="password",
+        help="Your MiniMax API key. Get one at https://platform.minimaxi.com",
+    )
+
+    if st.session_state["MINIMAX_API_KEY"]:
+        st.success("MiniMax API key set.")
+    else:
+        st.info("Please enter your MiniMax API Key to proceed.")
+        st.stop()
+
+    model_option = st.sidebar.selectbox("Choose model", MINIMAX_MODEL_LIST, index=0)
+    llm = ChatOpenAI(
+        model=model_option,
+        api_key=st.session_state["MINIMAX_API_KEY"],
+        base_url="https://api.minimax.io/v1",
+        temperature=0.7,
+    )
 
 # =============================================================================
 # CHAT MESSAGE HISTORY AND ARTIFACT STORAGE
