@@ -514,6 +514,15 @@ Function Name: {self.response.get("data_wrangler_function_name")}
 # Function
 
 
+def _validate_data_wrangler_result(result, error):
+    """Return an error when execution fails or produces no result."""
+    if error is not None:
+        return error
+    if result is None:
+        return "Data wrangling function returned None instead of a table."
+    return None
+
+
 def make_data_wrangling_agent(
     model,
     n_samples=30,
@@ -892,11 +901,11 @@ def make_data_wrangling_agent(
             data_format="dataframe_list",
         )
 
-        validation_error = error
+        validation_error = _validate_data_wrangler_result(result, error)
         wrangling_summary = None
         df_out = None
 
-        if error is None:
+        if validation_error is None:
             try:
                 # result can be dict or list (depending on user code)
                 if isinstance(result, list):
