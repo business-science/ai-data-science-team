@@ -9,26 +9,26 @@ import re
 
 # Python Parser for output standardization  
 class PythonOutputParser(BaseOutputParser):
-    def parse(self, text: str):        
-        def extract_python_code(text):
-            python_code_match = re.search(r'```python(.*?)```', text, re.DOTALL)
-            if python_code_match:
-                python_code = python_code_match.group(1).strip()
-                return python_code
-            else:
-                python_code_match = re.search(r"python(.*?)'", text, re.DOTALL)
-                if python_code_match:
-                    python_code = python_code_match.group(1).strip()
-                    return python_code
-                else:
-                    return None
-        python_code = extract_python_code(text)
-        if python_code is not None:
-            return python_code
-        else:
-            # Assume ```sql wasn't used
-            return text
+    def parse(self, text: str) -> str:
+        # Ignore reasoning blocks before extracting generated code.
+        text = re.sub(
+            r"<think>.*?</think>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
 
+        # Use the final Python code block in the remaining response.
+        matches = re.findall(
+            r"```python\s*(.*?)```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+        if matches:
+            return matches[-1].strip()
+
+        return text
 # SQL Parser for output standardization  
 class SQLOutputParser(BaseOutputParser):
     def parse(self, text: str):        
