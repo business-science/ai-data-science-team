@@ -5,6 +5,7 @@ from ai_data_science_team.agents import (
     SQLDatabaseAgent,
     DataWranglingAgent,
     FeatureEngineeringAgent,
+    ResearchToolsAgent,
 )
 
 from ai_data_science_team.ds_agents import (
