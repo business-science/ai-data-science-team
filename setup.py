@@ -28,9 +28,10 @@ setup(
     packages=find_packages(),
     install_requires=parse_requirements("requirements.txt"),
     extras_require={
+        "research": ["mcp>=1.30,<2", "ipython"],
         "machine_learning": ["h2o", "mlflow"],
         "data_science": ["pytimetk", "missingno", "sweetviz"],
-        "all": ["h2o", "mlflow", "pytimetk", "missingno", "sweetviz"],
+        "all": ["h2o", "mlflow", "pytimetk", "missingno", "sweetviz", "mcp>=1.30,<2", "ipython"],
     },
     python_requires=">=3.9",
     classifiers=[
