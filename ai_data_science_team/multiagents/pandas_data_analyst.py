@@ -329,6 +329,7 @@ def make_pandas_data_analyst(
         data_raw: Union[dict, list]
         data_wrangled: dict
         data_wrangler_function: str
+        data_wrangler_error: str
         data_visualization_function: str
         plotly_graph: dict
         plotly_error: str
@@ -397,6 +398,8 @@ def make_pandas_data_analyst(
 
     def router_chart_or_table(state: PrimaryState):
         print("---ROUTER: CHART OR TABLE---")
+        if state.get("data_wrangler_error"):
+            return "table"
         return (
             "chart"
             if state.get("routing_preprocessor_decision") == "chart"
@@ -417,7 +420,11 @@ def make_pandas_data_analyst(
             "messages": response.get("messages"),
             "data_wrangled": response.get("data_wrangled"),
             "data_wrangler_function": response.get("data_wrangler_function"),
-            "plotly_error": response.get("data_visualization_error"),
+            "data_wrangler_error": response.get("data_wrangler_error"),
+            # Clear visualization artifacts from previous checkpointed turns.
+            "data_visualization_function": None,
+            "plotly_graph": None,
+            "plotly_error": None,
         }
 
     def invoke_data_visualization_agent(state: PrimaryState):
@@ -447,6 +454,16 @@ def make_pandas_data_analyst(
 
     def finalize_output(state: PrimaryState):
         print("---FINALIZE OUTPUT---")
+        wrangling_error = state.get("data_wrangler_error")
+        if wrangling_error:
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"Data wrangling failed: {wrangling_error}",
+                        role="assistant",
+                    )
+                ]
+            }
         route = state.get("routing_preprocessor_decision", "table")
         data_wrangled = state.get("data_wrangled")
         plot = state.get("plotly_graph")
